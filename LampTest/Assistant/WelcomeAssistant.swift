@@ -56,9 +56,9 @@ final class WelcomeAssistant: ObservableObject {
 
     private func greetOnly() async {
         status = "Greeting (app in background)"
-        audio.activate(.duckOthers)
+        await audio.activate(.duckOthers)
         await speaker.say(AppConfig.Phrases.welcome)
-        audio.release()
+        await audio.release()
         status = "Done - greeted only (app was in background)"
     }
 
@@ -68,7 +68,7 @@ final class WelcomeAssistant: ObservableObject {
         let musicWasPlaying = audio.isOtherAudioPlaying
         let weatherBriefing = startWeatherBriefingIfMorning()   // fetched while we talk
 
-        audio.activate(.conversation)                            // pauses the music
+        await audio.activate(.conversation)                            // pauses the music
         status = "Greeting"
         await speaker.say(AppConfig.Phrases.welcome)
         if let briefing = await weatherBriefing?.value {
@@ -79,12 +79,12 @@ final class WelcomeAssistant: ObservableObject {
         let destination = await askForDestination()
 
         if musicWasPlaying {
-            audio.activate(.holdOthersPaused)                    // mic off, music still paused
+            await audio.activate(.holdOthersPaused)                    // mic off, music still paused
             await openMaps(searching: destination)
-            audio.release()                                      // music app may resume now
+            await audio.release()                                      // music app may resume now
             await announceMusicIfResumed()
         } else {
-            audio.release()
+            await audio.release()
             await startMusicAndOpenMaps(searching: destination)
         }
         status = "Done - " + (destination.map { "searched \"\($0)\"" } ?? "opened Google Maps")
@@ -138,11 +138,11 @@ final class WelcomeAssistant: ObservableObject {
         if musicStarted { lines.append(AppConfig.Phrases.musicContinued) }
         guard !lines.isEmpty else { return }
 
-        audio.activate(.duckOthers)
+        await audio.activate(.duckOthers)
         for line in lines {
             await speaker.say(line)
         }
-        audio.release()
+        await audio.release()
     }
 
     private func waitForOtherAudio(timeout: TimeInterval) async -> Bool {
@@ -158,9 +158,9 @@ final class WelcomeAssistant: ObservableObject {
     private func announceMusicIfResumed() async {
         try? await Task.sleep(for: .seconds(1.5))
         guard audio.isOtherAudioPlaying else { return }
-        audio.activate(.duckOthers)
+        await audio.activate(.duckOthers)
         await speaker.say(AppConfig.Phrases.musicContinued)
-        audio.release()
+        await audio.release()
     }
 
     // MARK: Helpers

@@ -6,7 +6,7 @@ import AVFoundation
 
 final class AudioSessionManager {
 
-    enum Mode {
+    nonisolated enum Mode {
         /// Short prompt, navigation style: other apps keep playing, just quieter.
         case duckOthers
         /// Pauses other apps and turns on the microphone (car mic under CarPlay).
@@ -15,36 +15,53 @@ final class AudioSessionManager {
         case holdOthersPaused
     }
 
-    private let session = AVAudioSession.sharedInstance()
+    /// Activating/deactivating the session can block for a while, so it runs off the main thread
+    /// (iOS warns that doing it on the main thread can make the UI unresponsive).
+    private let queue = DispatchQueue(label: "LampTest.AudioSession")
 
     /// True when another app (e.g. a music app) is currently playing.
-    var isOtherAudioPlaying: Bool { session.isOtherAudioPlaying }
+    var isOtherAudioPlaying: Bool { AVAudioSession.sharedInstance().isOtherAudioPlaying }
 
-    func activate(_ mode: Mode) {
-        do {
-            switch mode {
-            case .duckOthers:
-                try session.setCategory(.playback, mode: .voicePrompt,
-                                        options: [.duckOthers, .interruptSpokenAudioAndMixWithOthers])
-            case .conversation:
-                // Not mixable, so other apps are interrupted (paused)
-                try session.setCategory(.playAndRecord, mode: .default,
-                                        options: [.defaultToSpeaker, .allowBluetoothHFP])
-            case .holdOthersPaused:
-                try session.setCategory(.playback, mode: .voicePrompt, options: [])
-            }
+    func activate(_ mode: Mode) async {
+        await perform("activate \(mode)") { session in
+            try Self.setCategory(for: mode, on: session)
             try session.setActive(true)
-        } catch {
-            print("Audio session (\(mode)) error:", error)
         }
     }
 
     /// Deactivates our session and tells other apps they may resume / un-duck.
-    func release() {
-        do {
+    func release() async {
+        await perform("release") { session in
             try session.setActive(false, options: .notifyOthersOnDeactivation)
-        } catch {
-            print("Audio session release error:", error)
+        }
+    }
+
+    // MARK: Helpers
+
+    private func perform(_ label: String, _ work: @escaping @Sendable (AVAudioSession) throws -> Void) async {
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            queue.async {
+                do {
+                    try work(AVAudioSession.sharedInstance())
+                } catch {
+                    print("Audio session \(label) error:", error)
+                }
+                done.resume()
+            }
+        }
+    }
+
+    private nonisolated static func setCategory(for mode: Mode, on session: AVAudioSession) throws {
+        switch mode {
+        case .duckOthers:
+            try session.setCategory(.playback, mode: .voicePrompt,
+                                    options: [.duckOthers, .interruptSpokenAudioAndMixWithOthers])
+        case .conversation:
+            // Not mixable, so other apps are interrupted (paused)
+            try session.setCategory(.playAndRecord, mode: .default,
+                                    options: [.defaultToSpeaker, .allowBluetoothHFP])
+        case .holdOthersPaused:
+            try session.setCategory(.playback, mode: .voicePrompt, options: [])
         }
     }
 }

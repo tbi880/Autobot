@@ -77,11 +77,11 @@ final class VoiceCoordinator {
         guard state != lastAnnouncedPowerState else { return }
         lastAnnouncedPowerState = state
 
-        audio.activate(.duckOthers)
+        await audio.activate(.duckOthers)
         switch state {
         case .redBreathing: await speaker.say(AppConfig.Phrases.powerOn, style: .robot)
         case .purpleSteady: await speaker.say(AppConfig.Phrases.powerOff, style: .assistant)
         }
-        audio.release()
+        await audio.release()
     }
 }
