@@ -1,8 +1,8 @@
 // Speaker.swift
 // Text-to-speech with two voices:
 //   .assistant - natural female voice (welcome, questions, "Power Mode Deactivated")
-//   .robot     - deep male voice through pitch-down + radio distortion + reverb
-//                ("Power Mode Activated")
+//   .robot     - clear male voice with a metallic effect (MetallicVoiceEffect) + slight
+//                pitch-down + plate reverb, a little louder ("Power Mode Activated")
 // `say` is async and returns when the speech has finished playing.
 // The caller is responsible for the audio session (see AudioSessionManager).
 
@@ -40,12 +40,11 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
             let buffers = await renderToBuffers(utterance)
             let voiceName = utterance.voice?.name ?? "default"
             onLog?("Robot voice: \(voiceName), \(buffers.count) audio buffers")
-            let played = await robotEffects.play(buffers)
-            if played {
-                onLog?("Robot voice: played through effects")
+            if let metallic = MetallicVoiceEffect.process(buffers), await robotEffects.play(metallic) {
+                onLog?("Robot voice: played with metallic effect")
             } else {
-                // Effects unavailable: still say it with the deep voice
-                onLog?("Robot voice: effects failed, speaking without effects")
+                // Effect unavailable: still say it with the same voice, just without the effect
+                onLog?("Robot voice: effect failed, speaking without it")
                 await speakDirectly(Voices.utterance(text, style: .robot))
             }
         }
@@ -113,20 +112,24 @@ private enum Voices {
             u.pitchMultiplier = 1.0
         case .robot:
             u.voice = robotVoice()
-            u.rate = AppConfig.RobotVoice.speechRate
+            u.rate = AVSpeechUtteranceDefaultSpeechRate * AppConfig.RobotVoice.rateFactor
             u.pitchMultiplier = AppConfig.RobotVoice.pitchMultiplier
         }
         return u
     }
 
-    /// "Fred" is Apple's classic robotic voice, "Ralph" a deep one; otherwise any English male voice.
+    /// Clearest available English male voice (premium > enhanced > any); the effect adds the robot.
     static func robotVoice() -> AVSpeechSynthesisVoice? {
-        for id in ["com.apple.speech.synthesis.voice.Fred", "com.apple.speech.synthesis.voice.Ralph"] {
-            if let voice = AVSpeechSynthesisVoice(identifier: id) { return voice }
-        }
-        let males = AVSpeechSynthesisVoice.speechVoices()
-            .filter { $0.language.hasPrefix("en") && $0.gender == .male }
-        return males.first { $0.quality == .enhanced } ?? males.first ?? AVSpeechSynthesisVoice(language: "en-US")
+        let males = AVSpeechSynthesisVoice.speechVoices().filter { $0.gender == .male }
+        let american = males.filter { $0.language == "en-US" }
+        let english = males.filter { $0.language.hasPrefix("en") }
+        return american.first { $0.quality == .premium }
+            ?? american.first { $0.quality == .enhanced }
+            ?? english.first { $0.quality == .premium }
+            ?? english.first { $0.quality == .enhanced }
+            ?? american.first
+            ?? english.first
+            ?? AVSpeechSynthesisVoice(language: "en-US")
     }
 
     /// Best available US English female voice.
@@ -143,34 +146,30 @@ private enum Voices {
 
 // MARK: - Robot effect chain
 
-/// AVAudioEngine graph: player -> pitch shift -> distortion -> reverb -> output
+/// AVAudioEngine graph: player -> pitch shift -> plate reverb -> output.
+/// The metallic sound itself is baked into the buffer by MetallicVoiceEffect.
 @MainActor
 private final class RobotEffectChain {
 
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
     private let pitch = AVAudioUnitTimePitch()
-    private let distortion = AVAudioUnitDistortion()
     private let reverb = AVAudioUnitReverb()
 
     init() {
         pitch.pitch = AppConfig.RobotVoice.pitchCents
-        pitch.rate = 0.92
-        distortion.loadFactoryPreset(.speechRadioTower)
-        distortion.wetDryMix = AppConfig.RobotVoice.distortionMix
-        reverb.loadFactoryPreset(.mediumHall)
+        reverb.loadFactoryPreset(.plate)
         reverb.wetDryMix = AppConfig.RobotVoice.reverbMix
-        [player, pitch, distortion, reverb].forEach { engine.attach($0) }
+        player.volume = AppConfig.RobotVoice.volume
+        [player, pitch, reverb].forEach { engine.attach($0) }
     }
 
-    /// Plays the buffers through the effects. Returns false if nothing could be played.
-    func play(_ buffers: [AVAudioPCMBuffer]) async -> Bool {
-        guard let format = buffers.first?.format else { return false }
-
+    /// Plays the buffer. Returns false if the audio engine couldn't start.
+    func play(_ buffer: AVAudioPCMBuffer) async -> Bool {
+        let format = buffer.format
         engine.stop()
         engine.connect(player, to: pitch, format: format)
-        engine.connect(pitch, to: distortion, format: format)
-        engine.connect(distortion, to: reverb, format: format)
+        engine.connect(pitch, to: reverb, format: format)
         engine.connect(reverb, to: engine.mainMixerNode, format: format)
         do {
             engine.prepare()
@@ -181,22 +180,19 @@ private final class RobotEffectChain {
         }
 
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            for (index, buffer) in buffers.enumerated() {
-                let isLast = index == buffers.count - 1
-                player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { @Sendable _ in
-                    if isLast { continuation.resume() }
-                }
+            player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { @Sendable _ in
+                continuation.resume()
             }
             player.play()
         }
 
-        try? await Task.sleep(for: .milliseconds(600))   // let the reverb tail ring out
+        try? await Task.sleep(for: .milliseconds(400))   // let the reverb tail ring out
         engine.stop()
         return true
     }
 
     func stop() {
-        player.stop()   // also fires pending completion handlers
+        player.stop()   // also fires the pending completion handler
         engine.stop()
     }
 }

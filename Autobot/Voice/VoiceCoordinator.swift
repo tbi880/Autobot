@@ -91,7 +91,7 @@ final class VoiceCoordinator {
     private func speakPowerPhrase(for state: LampState) async {
         await audio.activate(.duckOthers)
         switch state {
-        case .redBreathing: await speaker.say(AppConfig.Phrases.powerOn, style: .assistant)
+        case .redBreathing: await speaker.say(AppConfig.Phrases.powerOn, style: .robot)
         case .purpleSteady: await speaker.say(AppConfig.Phrases.powerOff, style: .assistant)
         }
         await audio.release()
