@@ -42,8 +42,14 @@ nonisolated enum AppConfig {
     }
 
     enum Listening {
-        /// Speech recognition languages, tried in order.
-        static let localeIdentifiers = ["en-NZ", "en-US"]
+        /// Languages recognised at the same time. Each inner list is one language,
+        /// its locales tried in order until one is available on this iPhone.
+        static let languages: [[String]] = [
+            ["en-NZ", "en-US"],     // English
+            ["zh-CN"],              // Mandarin
+        ]
+        /// After you stop talking, wait at most this long for the final (most accurate) results.
+        static let finalResultTimeout: TimeInterval = 1.5
         /// Give up if nothing has been said within this time.
         static let noSpeechTimeout: TimeInterval = 10
         /// Stop listening after this much silence following the last word.

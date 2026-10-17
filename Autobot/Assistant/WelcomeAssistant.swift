@@ -102,16 +102,25 @@ final class WelcomeAssistant: ObservableObject {
         lastHeard = nil
         lastDestination = nil
 
-        guard let reply = await listener.listen() else {
+        // English and Mandarin are recognised at the same time; most confident first,
+        // and on a tie the language listed first in AppConfig.Listening.languages (English)
+        let transcripts = await listener.listen()
+            .enumerated()
+            .sorted { ($0.element.confidence, -$0.offset) > ($1.element.confidence, -$1.offset) }
+            .map(\.element)
+        guard let best = transcripts.first else {
             status = "No reply"
             return .none
         }
-        lastHeard = reply
+        lastHeard = transcripts.map { "\($0.text) [\($0.localeID)]" }.joined(separator: "  /  ")
 
-        // 1. A saved place named in the reply ("home", "take me home")
-        if let place = places.place(mentionedIn: reply) {
-            return target(for: place)
+        // 1. A saved place named in any language's version ("home", "take me home", "回家")
+        for transcript in transcripts {
+            if let place = places.place(mentionedIn: transcript.text) {
+                return target(for: place)
+            }
         }
+        let reply = best.text
 
         // 2. Anything else that sounds like a destination
         status = "Understanding (\(understandingEngine))…"
