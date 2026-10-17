@@ -1,0 +1,236 @@
+// Speaker.swift
+// Text-to-speech with two voices:
+//   .assistant - natural female voice (welcome, questions, "Power Mode Deactivated")
+//   .robot     - deep male voice through pitch-down + radio distortion + reverb
+//                ("Power Mode Activated")
+// `say` is async and returns when the speech has finished playing.
+// The caller is responsible for the audio session (see AudioSessionManager).
+
+import AVFoundation
+
+final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
+
+    enum Style {
+        case assistant
+        case robot
+    }
+
+    private let synthesizer = AVSpeechSynthesizer()   // speaks directly
+    private let renderer = AVSpeechSynthesizer()      // renders robot speech into buffers
+    private let robotEffects = RobotEffectChain()
+    private var speechFinished: CheckedContinuation<Void, Never>?
+
+    override init() {
+        super.init()
+        synthesizer.delegate = self
+        synthesizer.usesApplicationAudioSession = true
+    }
+
+    func say(_ text: String, style: Style = .assistant) async {
+        stop()
+        let utterance = Voices.utterance(text, style: style)
+        switch style {
+        case .assistant:
+            await speakDirectly(utterance)
+        case .robot:
+            let buffers = await renderToBuffers(utterance)
+            let played = await robotEffects.play(buffers)
+            if !played {
+                // Effects unavailable: still say it with the deep voice
+                await speakDirectly(Voices.utterance(text, style: .robot))
+            }
+        }
+    }
+
+    func stop() {
+        synthesizer.stopSpeaking(at: .immediate)
+        robotEffects.stop()
+        finishDirectSpeech()
+    }
+
+    // MARK: Direct speech
+
+    private func speakDirectly(_ utterance: AVSpeechUtterance) async {
+        await withCheckedContinuation { continuation in
+            speechFinished = continuation
+            synthesizer.speak(utterance)
+        }
+    }
+
+    private func finishDirectSpeech() {
+        speechFinished?.resume()
+        speechFinished = nil
+    }
+
+    nonisolated func speechSynthesizer(_ s: AVSpeechSynthesizer, didFinish u: AVSpeechUtterance) {
+        onMain { self.finishDirectSpeech() }
+    }
+
+    nonisolated func speechSynthesizer(_ s: AVSpeechSynthesizer, didCancel u: AVSpeechUtterance) {
+        onMain { self.finishDirectSpeech() }
+    }
+
+    // MARK: Rendering (for the robot effects)
+
+    private func renderToBuffers(_ utterance: AVSpeechUtterance) async -> [AVAudioPCMBuffer] {
+        await withCheckedContinuation { continuation in
+            let collector = BufferCollector(continuation)
+            renderer.write(utterance) { @Sendable buffer in
+                guard let pcm = buffer as? AVAudioPCMBuffer else { return }
+                if pcm.frameLength == 0 {
+                    collector.finish()                   // an empty buffer marks the end
+                } else if let float = AudioFormatting.toFloat32(pcm) {
+                    collector.append(float)
+                }
+            }
+            // Safety net in case the end marker never arrives
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { collector.finish() }
+        }
+    }
+}
+
+// MARK: - Voices
+
+private enum Voices {
+
+    static func utterance(_ text: String, style: Speaker.Style) -> AVSpeechUtterance {
+        let u = AVSpeechUtterance(string: text)
+        u.volume = 1.0
+        switch style {
+        case .assistant:
+            u.voice = femaleVoice()
+            u.rate = AVSpeechUtteranceDefaultSpeechRate
+            u.pitchMultiplier = 1.0
+        case .robot:
+            u.voice = robotVoice()
+            u.rate = AppConfig.RobotVoice.speechRate
+            u.pitchMultiplier = AppConfig.RobotVoice.pitchMultiplier
+        }
+        return u
+    }
+
+    /// "Fred" is Apple's classic robotic voice, "Ralph" a deep one; otherwise any English male voice.
+    static func robotVoice() -> AVSpeechSynthesisVoice? {
+        for id in ["com.apple.speech.synthesis.voice.Fred", "com.apple.speech.synthesis.voice.Ralph"] {
+            if let voice = AVSpeechSynthesisVoice(identifier: id) { return voice }
+        }
+        let males = AVSpeechSynthesisVoice.speechVoices()
+            .filter { $0.language.hasPrefix("en") && $0.gender == .male }
+        return males.first { $0.quality == .enhanced } ?? males.first ?? AVSpeechSynthesisVoice(language: "en-US")
+    }
+
+    /// Best available US English female voice.
+    static func femaleVoice() -> AVSpeechSynthesisVoice? {
+        let females = AVSpeechSynthesisVoice.speechVoices()
+            .filter { $0.language == "en-US" && $0.gender == .female }
+        return females.first { $0.quality == .premium }
+            ?? females.first { $0.quality == .enhanced }
+            ?? AVSpeechSynthesisVoice(identifier: "com.apple.voice.compact.en-US.Samantha")
+            ?? females.first
+            ?? AVSpeechSynthesisVoice(language: "en-US")
+    }
+}
+
+// MARK: - Robot effect chain
+
+/// AVAudioEngine graph: player -> pitch shift -> distortion -> reverb -> output
+private final class RobotEffectChain {
+
+    private let engine = AVAudioEngine()
+    private let player = AVAudioPlayerNode()
+    private let pitch = AVAudioUnitTimePitch()
+    private let distortion = AVAudioUnitDistortion()
+    private let reverb = AVAudioUnitReverb()
+
+    init() {
+        pitch.pitch = AppConfig.RobotVoice.pitchCents
+        pitch.rate = 0.92
+        distortion.loadFactoryPreset(.speechRadioTower)
+        distortion.wetDryMix = AppConfig.RobotVoice.distortionMix
+        reverb.loadFactoryPreset(.mediumHall)
+        reverb.wetDryMix = AppConfig.RobotVoice.reverbMix
+        [player, pitch, distortion, reverb].forEach { engine.attach($0) }
+    }
+
+    /// Plays the buffers through the effects. Returns false if nothing could be played.
+    func play(_ buffers: [AVAudioPCMBuffer]) async -> Bool {
+        guard let format = buffers.first?.format else { return false }
+
+        engine.stop()
+        engine.connect(player, to: pitch, format: format)
+        engine.connect(pitch, to: distortion, format: format)
+        engine.connect(distortion, to: reverb, format: format)
+        engine.connect(reverb, to: engine.mainMixerNode, format: format)
+        do {
+            engine.prepare()
+            try engine.start()
+        } catch {
+            print("Robot voice engine error:", error)
+            return false
+        }
+
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            for (index, buffer) in buffers.enumerated() {
+                let isLast = index == buffers.count - 1
+                player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { @Sendable _ in
+                    if isLast { continuation.resume() }
+                }
+            }
+            player.play()
+        }
+
+        try? await Task.sleep(for: .milliseconds(600))   // let the reverb tail ring out
+        engine.stop()
+        return true
+    }
+
+    func stop() {
+        player.stop()   // also fires pending completion handlers
+        engine.stop()
+    }
+}
+
+// MARK: - Helpers
+
+/// Collects rendered buffers from a background thread and delivers them once.
+private nonisolated final class BufferCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var buffers: [AVAudioPCMBuffer] = []
+    private var continuation: CheckedContinuation<[AVAudioPCMBuffer], Never>?
+
+    init(_ continuation: CheckedContinuation<[AVAudioPCMBuffer], Never>) {
+        self.continuation = continuation
+    }
+
+    func append(_ buffer: AVAudioPCMBuffer) {
+        lock.withLock { buffers.append(buffer) }
+    }
+
+    func finish() {
+        lock.withLock {
+            continuation?.resume(returning: buffers)
+            continuation = nil
+        }
+    }
+}
+
+nonisolated enum AudioFormatting {
+    /// Speech buffers are often 16-bit integers; audio effect nodes need 32-bit float.
+    static func toFloat32(_ buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+        let source = buffer.format
+        if source.commonFormat == .pcmFormatFloat32 && !source.isInterleaved { return buffer }
+        guard let target = AVAudioFormat(commonFormat: .pcmFormatFloat32,
+                                         sampleRate: source.sampleRate,
+                                         channels: source.channelCount,
+                                         interleaved: false),
+              let converter = AVAudioConverter(from: source, to: target),
+              let output = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: buffer.frameLength)
+        else { return nil }
+        do {
+            try converter.convert(to: output, from: buffer)
+            return output
+        } catch {
+            return nil
+        }
+    }
+}
