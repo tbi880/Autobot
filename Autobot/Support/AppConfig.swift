@@ -20,6 +20,17 @@ nonisolated enum AppConfig {
         static let maxSpeedAccuracy: Double = 5
     }
 
+    enum Lamp {
+        /// How many times to resend a mode command if the lamp reports a different mode afterwards.
+        static let modeRetries = 2
+        /// How many times to resend a packet the lamp answered with "busy" or "checksum error".
+        static let nackRetries = 2
+        /// Set the lamp's custom colour to red before red gradient breathing. Some firmware breathes
+        /// the custom colour instead of the gradient parameter (seen as purple breathing after the
+        /// purple steady state). Set to false if this ever makes the breathing colourful instead.
+        static let setRedBeforeBreathing = true
+    }
+
     enum CarPlay {
         /// Wait this long after the car audio route appears before treating CarPlay as connected.
         static let settleDelay: Duration = .seconds(3)
