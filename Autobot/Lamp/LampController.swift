@@ -67,6 +67,7 @@ final class LampController: NSObject, ObservableObject, CBCentralManagerDelegate
         switch desiredState {
         case .purpleSteady: purpleSteady()
         case .redBreathing: redBreathing()
+        case .redBurstFlash: redBurstFlash()
         }
     }
 
@@ -81,6 +82,13 @@ final class LampController: NSObject, ObservableObject, CBCentralManagerDelegate
             ? [{ LampProtocol.setColor(0xFF, 0x00, 0x00) }]
             : []
         setModeVerified(mode2: 2, param: 1, prepare: prepare)
+    }
+
+    /// Red Burst Flash (single-colour strobe), done by the lamp firmware.
+    /// Original app: mode list "Burst Flash" = mode2 3, parameter list "Red Burst Flash" = 1
+    /// (0 would be the multicolour flash). Brightness is left unchanged so restoring is exact.
+    func redBurstFlash() {
+        setModeVerified(mode2: 3, param: 1, prepare: [{ LampProtocol.setColor(0xFF, 0x00, 0x00) }])
     }
 
     /// Purple steady: monocolor mode, purple, Zone 1 = 50, Zone 2 = 100

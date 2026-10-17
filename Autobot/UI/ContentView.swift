@@ -11,7 +11,8 @@ struct ContentView: View {
         VStack(spacing: 16) {
             ConnectionStatusView(lamp: app.lamp, carPlay: app.carPlay)
             SpeedView(speed: app.speed)
-            LampStateView(speed: app.speed, lamp: app.lamp)
+            LampStateView(lighting: app.lighting, lamp: app.lamp)
+            DoorTestView(doors: app.doors)
             AssistantView(assistant: app.assistant, onTest: app.testWelcome)
             VoiceTestView(onTest: app.testPowerVoice)
             SavedPlacesButton(store: app.places) { showingPlaces = true }
@@ -62,21 +63,45 @@ private struct SpeedView: View {
 }
 
 private struct LampStateView: View {
-    @ObservedObject var speed: SpeedMonitor
+    @ObservedObject var lighting: LightingArbiter
     @ObservedObject var lamp: LampController
 
     var body: some View {
         VStack(spacing: 4) {
-            HStack {
-                Circle()
-                    .fill(speed.state == .redBreathing ? Color.red : Color(red: 0.5, green: 0, blue: 1))
-                    .frame(width: 16, height: 16)
-                Text(speed.state.label).font(.title3.bold())
+            if let active = lighting.active {
+                HStack {
+                    Circle()
+                        .fill(active.scene == .purpleSteady ? Color(red: 0.5, green: 0, blue: 1) : Color.red)
+                        .frame(width: 16, height: 16)
+                    Text(active.scene.label).font(.title3.bold())
+                }
+                Text("By: \(active.source.label)  ·  "
+                     + (lamp.appliedState == active.scene ? "Sent to lamp" : "Waiting for lamp…"))
+                    .font(.caption)
+                    .foregroundColor(.secondary)
             }
-            Text(lamp.appliedState == speed.state ? "Sent to lamp" : "Waiting for lamp…")
-                .font(.caption)
-                .foregroundColor(.secondary)
         }
+    }
+}
+
+/// Test buttons until the OBD2 connection provides real door data.
+private struct DoorTestView: View {
+    @ObservedObject var doors: DoorMonitor
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Door test").font(.headline)
+            HStack(spacing: 6) {
+                ForEach(DoorMonitor.Opening.allCases) { opening in
+                    let isOpen = doors.open.contains(opening)
+                    Button(opening.rawValue) { doors.toggle(opening) }
+                        .font(.caption)
+                        .buttonStyle(.bordered)
+                        .tint(isOpen ? Color.red : Color.gray)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

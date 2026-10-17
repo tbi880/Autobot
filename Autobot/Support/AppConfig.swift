@@ -82,6 +82,7 @@ nonisolated enum AppConfig {
         static let musicContinued = "The music is now continued."
         static let powerOn = "Power Mode Activated"
         static let powerOff = "Power Mode Deactivated"
+        static let doorOpen = "Door open detected"
     }
 
     /// "Power Mode Activated": calm, refined British male voice with a light digital
