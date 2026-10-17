@@ -14,6 +14,7 @@ final class VoiceCoordinator {
     private nonisolated enum Job {
         case conversation(@MainActor () async -> Void)
         case powerAnnouncement
+        case voiceTest(LampState)
 
         var isAnnouncement: Bool {
             if case .powerAnnouncement = self { return true }
@@ -50,6 +51,12 @@ final class VoiceCoordinator {
         runNextJob()
     }
 
+    /// Debug: plays the Power Mode phrase for `state` now, without changing what has been announced.
+    func testPowerVoice(for state: LampState) {
+        jobs.append(.voiceTest(state))
+        runNextJob()
+    }
+
     // MARK: Queue
 
     private func runNextJob() {
@@ -69,6 +76,8 @@ final class VoiceCoordinator {
             await work()
         case .powerAnnouncement:
             await announceLatestPowerState()
+        case .voiceTest(let state):
+            await speakPowerPhrase(for: state)
         }
     }
 
@@ -76,7 +85,10 @@ final class VoiceCoordinator {
         let state = latestPowerState
         guard state != lastAnnouncedPowerState else { return }
         lastAnnouncedPowerState = state
+        await speakPowerPhrase(for: state)
+    }
 
+    private func speakPowerPhrase(for state: LampState) async {
         await audio.activate(.duckOthers)
         switch state {
         case .redBreathing: await speaker.say(AppConfig.Phrases.powerOn, style: .robot)

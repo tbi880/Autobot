@@ -21,6 +21,9 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
     private let robotEffects = RobotEffectChain()
     private var speechFinished: CheckedContinuation<Void, Never>?
 
+    /// Diagnostic messages (shown in the app's log).
+    var onLog: ((String) -> Void)?
+
     override init() {
         super.init()
         synthesizer.delegate = self
@@ -35,9 +38,14 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
             await speakDirectly(utterance)
         case .robot:
             let buffers = await renderToBuffers(utterance)
+            let voiceName = utterance.voice?.name ?? "default"
+            onLog?("Robot voice: \(voiceName), \(buffers.count) audio buffers")
             let played = await robotEffects.play(buffers)
-            if !played {
+            if played {
+                onLog?("Robot voice: played through effects")
+            } else {
                 // Effects unavailable: still say it with the deep voice
+                onLog?("Robot voice: effects failed, speaking without effects")
                 await speakDirectly(Voices.utterance(text, style: .robot))
             }
         }

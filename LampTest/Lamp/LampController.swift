@@ -112,7 +112,7 @@ final class LampController: NSObject, ObservableObject, CBCentralManagerDelegate
         pump()
     }
 
-    private func addLog(_ s: String) {
+    func addLog(_ s: String) {
         log.append(s)
         if log.count > 40 { log.removeFirst(log.count - 40) }
         print(s)

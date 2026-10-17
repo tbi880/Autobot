@@ -12,6 +12,7 @@ struct ContentView: View {
             SpeedView(speed: app.speed)
             LampStateView(speed: app.speed, lamp: app.lamp)
             AssistantView(assistant: app.assistant, onTest: app.testWelcome)
+            VoiceTestView(onTest: app.testPowerVoice)
             PacketLogView(lamp: app.lamp)
         }
         .padding()
@@ -102,6 +103,23 @@ private struct AssistantView: View {
         .padding(10)
         .background(Color.secondary.opacity(0.1))
         .cornerRadius(10)
+    }
+}
+
+private struct VoiceTestView: View {
+    let onTest: (LampState) -> Void
+
+    var body: some View {
+        HStack {
+            Text("Voice test").font(.headline)
+            Spacer()
+            Button("Power ON") { onTest(.redBreathing) }
+                .tint(.red)
+            Button("Power OFF") { onTest(.purpleSteady) }
+                .tint(Color(red: 0.5, green: 0, blue: 1))
+        }
+        .font(.caption)
+        .buttonStyle(.bordered)
     }
 }
 

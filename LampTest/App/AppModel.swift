@@ -26,7 +26,10 @@ final class AppModel: ObservableObject {
         let speaker = Speaker()
         let speed = SpeedMonitor()
 
-        self.lamp = LampController()
+        let lamp = LampController()
+        speaker.onLog = { [weak lamp] message in lamp?.addLog(message) }
+
+        self.lamp = lamp
         self.speed = speed
         self.carPlay = CarPlayMonitor()
         self.voice = VoiceCoordinator(audio: audio, speaker: speaker)
@@ -55,6 +58,11 @@ final class AppModel: ObservableObject {
     /// Debug: run the welcome flow without a car.
     func testWelcome() {
         runWelcome()
+    }
+
+    /// Debug: plays "Power Mode Activated" (red) or "Power Mode Deactivated" (purple).
+    func testPowerVoice(_ state: LampState) {
+        voice.testPowerVoice(for: state)
     }
 
     // MARK: Wiring
