@@ -3,6 +3,7 @@
 
 import Combine
 import Foundation
+import SwiftUI   // for Array.remove(atOffsets:)
 
 final class SavedPlacesStore: ObservableObject {
 
