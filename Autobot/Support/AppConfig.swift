@@ -72,26 +72,28 @@ nonisolated enum AppConfig {
         static let powerOff = "Power Mode Deactivated"
     }
 
-    /// "Power Mode Activated": clear male voice with a metallic, robotic finish.
-    /// If the words get hard to understand, lower combMix / ringModMix first.
+    /// "Power Mode Activated": calm, refined British male voice with a light digital
+    /// "AI assistant" sheen (not a heavy robot). Raise combMix / ringModMix for more metal.
     enum RobotVoice {
-        /// Speech rate relative to the normal voice (1.0 = same).
-        static let rateFactor: Float = 0.95
-        /// Voice pitch (0.5…2.0). Slightly lower than normal, not deep.
-        static let pitchMultiplier: Float = 0.9
+        /// Preferred accent, tried first (falls back to any English male voice).
+        static let language = "en-GB"
+        /// Speech rate relative to the normal voice (1.0 = same). Unhurried.
+        static let rateFactor: Float = 0.92
+        /// Voice pitch (0.5…2.0). Close to natural.
+        static let pitchMultiplier: Float = 0.95
         /// Extra pitch shift in cents (−2400…2400). Lower = deeper.
-        static let pitchCents: Float = -150
-        /// Comb filter (metal-tube ring): delay in ms, feedback 0…0.9, mix 0…1.
-        static let combDelayMs: Double = 4
-        static let combFeedback: Float = 0.55
-        static let combMix: Float = 0.5
-        /// Ring modulator (robotic buzz): carrier frequency and mix 0…1.
+        static let pitchCents: Float = -50
+        /// Comb filter (digital sheen): delay in ms, feedback 0…0.9, mix 0…1.
+        static let combDelayMs: Double = 2
+        static let combFeedback: Float = 0.35
+        static let combMix: Float = 0.2
+        /// Ring modulator (robotic buzz): carrier frequency and mix 0…1. Almost off.
         static let ringModHz: Double = 90
-        static let ringModMix: Float = 0.25
-        /// Plate reverb amount 0…100 (metallic room).
-        static let reverbMix: Float = 10
+        static let ringModMix: Float = 0.04
+        /// Plate reverb amount 0…100 (a bit of space, like a speaker in a room).
+        static let reverbMix: Float = 8
         /// Loudness: soft-limiter drive (1 = plain normalisation, higher = denser/louder).
-        static let drive: Float = 1.6
+        static let drive: Float = 1.4
         /// Player volume 0…1. The voice is already normalised to full scale.
         static let volume: Float = 1.0
     }

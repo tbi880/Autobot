@@ -1,8 +1,8 @@
 // Speaker.swift
 // Text-to-speech with two voices:
 //   .assistant - natural female voice (welcome, questions, "Power Mode Deactivated")
-//   .robot     - clear male voice with a metallic effect (MetallicVoiceEffect) + slight
-//                pitch-down + plate reverb, a little louder ("Power Mode Activated")
+//   .robot     - calm British male voice with a light digital sheen (MetallicVoiceEffect)
+//                + a touch of reverb, a little louder ("Power Mode Activated")
 // `say` is async and returns when the speech has finished playing.
 // The caller is responsible for the audio session (see AudioSessionManager).
 
@@ -118,18 +118,19 @@ private enum Voices {
         return u
     }
 
-    /// Clearest available English male voice (premium > enhanced > any); the effect adds the robot.
+    /// Best male voice in the preferred accent (AppConfig.RobotVoice.language, British by default),
+    /// premium > enhanced > any; then any English male voice. The effect adds the digital sheen.
     static func robotVoice() -> AVSpeechSynthesisVoice? {
         let males = AVSpeechSynthesisVoice.speechVoices().filter { $0.gender == .male }
-        let american = males.filter { $0.language == "en-US" }
+        let preferred = males.filter { $0.language == AppConfig.RobotVoice.language }
         let english = males.filter { $0.language.hasPrefix("en") }
-        return american.first { $0.quality == .premium }
-            ?? american.first { $0.quality == .enhanced }
+        return preferred.first { $0.quality == .premium }
+            ?? preferred.first { $0.quality == .enhanced }
+            ?? preferred.first
             ?? english.first { $0.quality == .premium }
             ?? english.first { $0.quality == .enhanced }
-            ?? american.first
             ?? english.first
-            ?? AVSpeechSynthesisVoice(language: "en-US")
+            ?? AVSpeechSynthesisVoice(language: AppConfig.RobotVoice.language)
     }
 
     /// Best available US English female voice.
