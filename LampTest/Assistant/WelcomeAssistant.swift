@@ -10,7 +10,10 @@
 //   5. listen (ends 1.5 s after speaking; gives up after 10 s of silence)
 //   6. open Google Maps, searching the destination if one was heard
 //   7. "Find these places, you can finalize the destination manually." (only with a destination)
-//   8. let the music resume, then "The music is now continued." (only if it really resumed)
+//   8. music:
+//      - was playing  -> let it resume, then "The music is now continued." (if it really resumed)
+//      - was not      -> run the "Lamp Drive" shortcut, which starts QQ Music "我喜欢的歌"
+//                        and then opens Google Maps; announce once the music is playing
 //
 // App in the background or phone locked:
 //   only "Welcome back, Tim." (music is lowered, not paused)
@@ -75,12 +78,14 @@ final class WelcomeAssistant: ObservableObject {
 
         let destination = await askForDestination()
 
-        audio.activate(.holdOthersPaused)                        // mic off, music still paused
-        await openMaps(searching: destination)
-        audio.release()                                          // music app may resume now
-
         if musicWasPlaying {
+            audio.activate(.holdOthersPaused)                    // mic off, music still paused
+            await openMaps(searching: destination)
+            audio.release()                                      // music app may resume now
             await announceMusicIfResumed()
+        } else {
+            audio.release()
+            await startMusicAndOpenMaps(searching: destination)
         }
         status = "Done - " + (destination.map { "searched \"\($0)\"" } ?? "opened Google Maps")
     }
@@ -115,6 +120,38 @@ final class WelcomeAssistant: ObservableObject {
             try? await Task.sleep(for: .seconds(1))   // let Google Maps come up first
             await speaker.say(AppConfig.Phrases.foundPlaces)
         }
+    }
+
+    /// No music was playing: the shortcut starts QQ Music, then opens Google Maps.
+    /// Both announcements wait until the music is actually playing (or the timeout passes).
+    private func startMusicAndOpenMaps(searching destination: String?) async {
+        guard Self.isAppInForeground, let mapsURL = MapsLauncher.url(searching: destination) else {
+            status = "Skipped Google Maps (app no longer in foreground)"
+            return
+        }
+        status = "Starting QQ Music + Google Maps"
+        ShortcutsLauncher.run(named: AppConfig.Music.shortcutName, input: mapsURL.absoluteString)
+
+        let musicStarted = await waitForOtherAudio(timeout: AppConfig.Music.startTimeout)
+        var lines: [String] = []
+        if destination != nil { lines.append(AppConfig.Phrases.foundPlaces) }
+        if musicStarted { lines.append(AppConfig.Phrases.musicContinued) }
+        guard !lines.isEmpty else { return }
+
+        audio.activate(.duckOthers)
+        for line in lines {
+            await speaker.say(line)
+        }
+        audio.release()
+    }
+
+    private func waitForOtherAudio(timeout: TimeInterval) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if audio.isOtherAudioPlaying { return true }
+            try? await Task.sleep(for: .milliseconds(500))
+        }
+        return false
     }
 
     /// Music apps decide for themselves whether to resume, so check before saying it did.

@@ -5,6 +5,7 @@
 	<key>LSApplicationQueriesSchemes</key>
 	<array>
 		<string>comgooglemaps</string>
+		<string>shortcuts</string>
 	</array>
 	<key>UIBackgroundModes</key>
 	<array>

@@ -257,11 +257,11 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "LampTest-Info.plist";
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "上车时听你说出目的地";
-				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "把你说的目的地转成文字";
 				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "用于连接并控制灯";
 				INFOPLIST_KEY_NSLocationAlwaysAndWhenInUseUsageDescription = "锁屏时也根据车速自动切换氛围灯";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "根据车速自动切换氛围灯";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "上车时听你说出目的地";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "把你说的目的地转成文字";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -295,11 +295,11 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "LampTest-Info.plist";
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "上车时听你说出目的地";
-				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "把你说的目的地转成文字";
 				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "用于连接并控制灯";
 				INFOPLIST_KEY_NSLocationAlwaysAndWhenInUseUsageDescription = "锁屏时也根据车速自动切换氛围灯";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "根据车速自动切换氛围灯";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "上车时听你说出目的地";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "把你说的目的地转成文字";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;

@@ -12,7 +12,7 @@ enum MapsLauncher {
         UIApplication.shared.open(url)
     }
 
-    private static func url(searching place: String?) -> URL? {
+    static func url(searching place: String?) -> URL? {
         let query = place.flatMap(encode)
         if isGoogleMapsInstalled {
             return URL(string: query.map { "comgooglemaps://?q=\($0)" } ?? "comgooglemaps://")

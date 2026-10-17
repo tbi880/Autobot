@@ -44,6 +44,14 @@ nonisolated enum AppConfig {
         static let requestTimeout: TimeInterval = 4
     }
 
+    enum Music {
+        /// Shortcut that starts QQ Music "我喜欢的歌" and then opens the Google Maps link it receives.
+        /// Used only when no music was playing when the car connected.
+        static let shortcutName = "Lamp Drive"
+        /// How long to wait for the music to start before giving up on "The music is now continued".
+        static let startTimeout: TimeInterval = 10
+    }
+
     enum Phrases {
         static var welcome: String { "Welcome back, \(Driver.name)." }
         static let askDestination = "Where is our destination today?"
