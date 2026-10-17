@@ -45,7 +45,7 @@ nonisolated enum AppConfig {
     }
 
     enum Music {
-        /// Shortcut that starts QQ Music "我喜欢的歌" and then opens the Google Maps link it receives.
+        /// Shortcut that starts QQ Music "继续播放" (resume the last song) and then opens the Google Maps link it receives.
         /// Used only when no music was playing when the car connected.
         static let shortcutName = "Lamp Drive"
         /// How long to wait for the music to start before giving up on "The music is now continued".

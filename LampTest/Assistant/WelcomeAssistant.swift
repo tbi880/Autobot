@@ -12,7 +12,7 @@
 //   7. "Find these places, you can finalize the destination manually." (only with a destination)
 //   8. music:
 //      - was playing  -> let it resume, then "The music is now continued." (if it really resumed)
-//      - was not      -> run the "Lamp Drive" shortcut, which starts QQ Music "我喜欢的歌"
+//      - was not      -> run the "Lamp Drive" shortcut, which starts QQ Music "继续播放" (resume the last song)
 //                        and then opens Google Maps; announce once the music is playing
 //
 // App in the background or phone locked:

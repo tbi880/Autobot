@@ -2,9 +2,9 @@
 // Runs a shortcut from the Shortcuts app.
 //
 // Why: iOS gives apps no way to tell QQ Music to play. The Shortcuts app can,
-// through QQ Music's own "我喜欢的歌" action. So the welcome flow hands over to a
+// through QQ Music's own "继续播放" action. So the welcome flow hands over to a
 // small user-made shortcut (AppConfig.Music.shortcutName) that
-//   1. runs QQ Music "我喜欢的歌", then
+//   1. runs QQ Music "继续播放" (resume the last song), then
 //   2. opens the Google Maps link passed in as the shortcut's input.
 
 import UIKit
