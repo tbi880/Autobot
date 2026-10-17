@@ -1,13 +1,16 @@
 // CarPlayMonitor.swift
-// Detects CarPlay by watching the audio route: when CarPlay is connected the
-// iPhone's audio output becomes a "car audio" port.
+// Detects CarPlay through the audio system: when CarPlay is connected the iPhone gets a
+// "car audio" port, as an output and/or as an input (the car's microphone).
 //
-// Every route change is re-checked after a settle delay (3 s), which
-//   - gives the head unit time to finish connecting, and
-//   - ignores short route blips (e.g. while this app switches its own audio mode).
+//   - connected:    reported immediately, the moment car audio is seen
+//   - disconnected: reported only after car audio has been gone for a few seconds
+//                   (AppConfig.CarPlay.disconnectGrace), so short blips don't count
+//
+// It re-checks on every route-change notification and also polls once a second, because
+// with nothing playing iOS may not send a route change when CarPlay connects.
 
-import Combine
 import AVFoundation
+import Combine
 import SwiftUI
 
 final class CarPlayMonitor: ObservableObject {
@@ -15,33 +18,63 @@ final class CarPlayMonitor: ObservableObject {
     @Published private(set) var isConnected = false
 
     private var observer: NSObjectProtocol?
-    private var settleTask: Task<Void, Never>?
+    private var pollTask: Task<Void, Never>?
+    private var disconnectTask: Task<Void, Never>?
 
     func start() {
         guard observer == nil else { return }
+        prepareSessionForInputDetection()
+
         observer = NotificationCenter.default.addObserver(
             forName: AVAudioSession.routeChangeNotification,
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.routeChanged() }
+            MainActor.assumeIsolated { self?.check() }
         }
-        routeChanged()   // CarPlay may already be connected when the app starts
-    }
 
-    private func routeChanged() {
-        settleTask?.cancel()
-        settleTask = Task { [weak self] in
-            try? await Task.sleep(for: AppConfig.CarPlay.settleDelay)
-            guard !Task.isCancelled, let self else { return }
-            let connected = Self.isCarAudioRoute
-            if connected != self.isConnected {
-                self.isConnected = connected
+        pollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                self?.check()
+                try? await Task.sleep(for: AppConfig.CarPlay.pollInterval)
             }
         }
     }
 
-    private static var isCarAudioRoute: Bool {
-        AVAudioSession.sharedInstance().currentRoute.outputs.contains { $0.portType == .carAudio }
+    // MARK: Detection
+
+    private func check() {
+        if Self.carAudioPresent {
+            disconnectTask?.cancel()
+            disconnectTask = nil
+            if !isConnected { isConnected = true }          // immediately
+        } else if isConnected, disconnectTask == nil {
+            disconnectTask = Task { [weak self] in
+                try? await Task.sleep(for: AppConfig.CarPlay.disconnectGrace)
+                guard !Task.isCancelled, let self else { return }
+                self.disconnectTask = nil
+                if !Self.carAudioPresent { self.isConnected = false }
+            }
+        }
+    }
+
+    private static var carAudioPresent: Bool {
+        let session = AVAudioSession.sharedInstance()
+        let outputs = session.currentRoute.outputs.contains { $0.portType == .carAudio }
+        let inputs = session.availableInputs?.contains { $0.portType == .carAudio } ?? false
+        return outputs || inputs
+    }
+
+    /// `availableInputs` is only filled in for a record-capable category. Setting the category
+    /// without activating the session has no effect on other apps' audio; AudioSessionManager
+    /// sets the real category whenever it activates the session.
+    private func prepareSessionForInputDetection() {
+        do {
+            try AVAudioSession.sharedInstance().setCategory(
+                .playAndRecord, mode: .default,
+                options: [.mixWithOthers, .defaultToSpeaker, .allowBluetoothHFP])
+        } catch {
+            print("CarPlay detection category error:", error)
+        }
     }
 }

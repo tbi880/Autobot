@@ -32,8 +32,13 @@ nonisolated enum AppConfig {
     }
 
     enum CarPlay {
-        /// Wait this long after the car audio route appears before treating CarPlay as connected.
-        static let settleDelay: Duration = .seconds(3)
+        /// CarPlay counts as connected the moment car audio appears (no delay).
+        /// It only counts as disconnected after car audio has been gone this long, so short
+        /// route blips (e.g. while this app switches audio modes) don't start a new "drive".
+        static let disconnectGrace: Duration = .seconds(3)
+        /// Re-check the audio route this often, in case no route-change notification arrives
+        /// (e.g. CarPlay connects while nothing is playing).
+        static let pollInterval: Duration = .seconds(1)
     }
 
     enum Listening {
