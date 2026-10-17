@@ -2,6 +2,7 @@
 // List of saved places: add, edit (tap), delete (swipe).
 
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct SavedPlacesView: View {
     @ObservedObject var store: SavedPlacesStore
