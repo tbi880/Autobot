@@ -16,7 +16,7 @@ struct SavedPlacesView: View {
                         Button { editing = place } label: { PlaceRow(place: place) }
                             .foregroundStyle(.primary)
                     }
-                    .onDelete(perform: store.delete)
+                    .onDelete { store.delete(at: $0) }
                 } footer: {
                     Text("Say the name when asked \"Where is our destination today?\". "
                          + "Exact street addresses start navigation right away; "
@@ -57,7 +57,7 @@ private struct PlaceRow: View {
             Label(place.isExactAddress ? "Starts navigation" : "Searches (address not exact)",
                   systemImage: place.isExactAddress ? "location.fill" : "magnifyingglass")
                 .font(.caption)
-                .foregroundStyle(place.isExactAddress ? .green : .orange)
+                .foregroundStyle(place.isExactAddress ? Color.green : Color.orange)
         }
     }
 }
