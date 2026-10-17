@@ -72,6 +72,7 @@ nonisolated enum AppConfig {
         static var welcome: String { "Welcome back, \(Driver.name)." }
         static let askDestination = "Where is our destination today?"
         static let foundPlaces = "Find these places, you can finalize the destination manually."
+        static func navigating(to name: String) -> String { "Navigating to \(name)." }
         static let musicContinued = "The music is now continued."
         static let powerOn = "Power Mode Activated"
         static let powerOff = "Power Mode Deactivated"

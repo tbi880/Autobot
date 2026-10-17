@@ -8,8 +8,11 @@
 //   3. weather briefing (6:00-11:59 only)
 //   4. "Where is our destination today?"
 //   5. listen (ends 1.5 s after speaking; gives up after 10 s of silence)
-//   6. open Google Maps, searching the destination if one was heard
-//   7. "Find these places, you can finalize the destination manually." (only with a destination)
+//   6. open Google Maps:
+//      - a saved place was named and its address is exact -> start navigation to it
+//      - a saved place with a vague address, or any other place -> search it
+//      - nothing / not a destination -> just open the app
+//   7. "Navigating to home." or "Find these places, you can finalize…" (nothing if no destination)
 //   8. music:
 //      - was playing  -> let it resume, then "The music is now continued." (if it really resumed)
 //      - was not      -> run the "Lamp Drive" shortcut, which starts QQ Music "继续播放" (resume the last song)
@@ -33,11 +36,14 @@ final class WelcomeAssistant: ObservableObject {
     private let listener = SpeechListener()
     private let parser = DestinationParser()
     private let weather = WeatherService()
+    private let places: SavedPlacesStore
     private let currentLocation: @MainActor () -> CLLocation?
 
-    init(audio: AudioSessionManager, speaker: Speaker, currentLocation: @escaping @MainActor () -> CLLocation?) {
+    init(audio: AudioSessionManager, speaker: Speaker, places: SavedPlacesStore,
+         currentLocation: @escaping @MainActor () -> CLLocation?) {
         self.audio = audio
         self.speaker = speaker
+        self.places = places
         self.currentLocation = currentLocation
     }
 
@@ -76,56 +82,70 @@ final class WelcomeAssistant: ObservableObject {
         }
         await speaker.say(AppConfig.Phrases.askDestination)
 
-        let destination = await askForDestination()
+        let target = await askForDestination()
 
         if musicWasPlaying {
             await audio.activate(.holdOthersPaused)                    // mic off, music still paused
-            await openMaps(searching: destination)
+            await openMaps(target)
             await audio.release()                                      // music app may resume now
             await announceMusicIfResumed()
         } else {
             await audio.release()
-            await startMusicAndOpenMaps(searching: destination)
+            await startMusicAndOpenMaps(target)
         }
-        status = "Done - " + (destination.map { "searched \"\($0)\"" } ?? "opened Google Maps")
+        status = "Done - " + target.summary
     }
 
-    /// Listens for the reply and extracts a destination. nil = no reply, or not a destination.
-    private func askForDestination() async -> String? {
+    /// Listens for the reply and decides what to do in Google Maps.
+    private func askForDestination() async -> MapsTarget {
         status = "Listening…"
         lastHeard = nil
         lastDestination = nil
 
         guard let reply = await listener.listen() else {
             status = "No reply"
-            return nil
+            return .none
         }
         lastHeard = reply
 
+        // 1. A saved place named in the reply ("home", "take me home")
+        if let place = places.place(mentionedIn: reply) {
+            return target(for: place)
+        }
+
+        // 2. Anything else that sounds like a destination
         status = "Understanding (\(understandingEngine))…"
-        let destination = await parser.destination(in: reply)
+        guard let destination = await parser.destination(in: reply) else { return .none }
+        if let place = places.place(mentionedIn: destination) {
+            return target(for: place)
+        }
         lastDestination = destination
-        return destination
+        return .search(destination)
     }
 
-    private func openMaps(searching destination: String?) async {
+    private func target(for place: SavedPlace) -> MapsTarget {
+        lastDestination = "\(place.name) - \(place.address)"
+        return place.isExactAddress ? .navigate(place) : .search(place.address)
+    }
+
+    private func openMaps(_ target: MapsTarget) async {
         guard Self.isAppInForeground else {
             status = "Skipped Google Maps (app no longer in foreground)"
             return
         }
         status = "Opening Google Maps"
-        MapsLauncher.open(searching: destination)
+        MapsLauncher.open(target)
 
-        if destination != nil {
+        if let line = target.announcement {
             try? await Task.sleep(for: .seconds(1))   // let Google Maps come up first
-            await speaker.say(AppConfig.Phrases.foundPlaces)
+            await speaker.say(line)
         }
     }
 
     /// No music was playing: the shortcut starts QQ Music, then opens Google Maps.
     /// Both announcements wait until the music is actually playing (or the timeout passes).
-    private func startMusicAndOpenMaps(searching destination: String?) async {
-        guard Self.isAppInForeground, let mapsURL = MapsLauncher.url(searching: destination) else {
+    private func startMusicAndOpenMaps(_ target: MapsTarget) async {
+        guard Self.isAppInForeground, let mapsURL = MapsLauncher.url(for: target) else {
             status = "Skipped Google Maps (app no longer in foreground)"
             return
         }
@@ -134,7 +154,7 @@ final class WelcomeAssistant: ObservableObject {
 
         let musicStarted = await waitForOtherAudio(timeout: AppConfig.Music.startTimeout)
         var lines: [String] = []
-        if destination != nil { lines.append(AppConfig.Phrases.foundPlaces) }
+        if let line = target.announcement { lines.append(line) }
         if musicStarted { lines.append(AppConfig.Phrases.musicContinued) }
         guard !lines.isEmpty else { return }
 

@@ -1,24 +1,84 @@
 // MapsLauncher.swift
-// Opens Google Maps, searching for a place if one is given.
+// Opens Google Maps in one of three ways (MapsTarget):
+//   .none              just open the app
+//   .search(text)      search, the driver picks the result
+//   .navigate(place)   saved place with an exact address: start turn-by-turn navigation
 // Falls back to Google Maps on the web if the app isn't installed.
 // Only works while this app is in the foreground (an iOS rule).
 
 import UIKit
 
+enum MapsTarget: Equatable {
+    case none
+    case search(String)
+    case navigate(SavedPlace)
+
+    /// What the assistant should say after Google Maps opens (nil = nothing).
+    var announcement: String? {
+        switch self {
+        case .none: return nil
+        case .search: return AppConfig.Phrases.foundPlaces
+        case .navigate(let place): return AppConfig.Phrases.navigating(to: place.name)
+        }
+    }
+
+    var summary: String {
+        switch self {
+        case .none: return "opened Google Maps"
+        case .search(let text): return "searched \"\(text)\""
+        case .navigate(let place): return "navigating to \(place.name)"
+        }
+    }
+}
+
 enum MapsLauncher {
 
-    static func open(searching place: String?) {
-        guard let url = url(searching: place) else { return }
+    static func open(_ target: MapsTarget) {
+        if case .navigate(let place) = target {
+            // Universal link opens the Google Maps app and starts navigation;
+            // if that doesn't open the app, use its own URL scheme (shows the route).
+            guard let link = navigationLink(to: place.address) else { return }
+            UIApplication.shared.open(link, options: [.universalLinksOnly: true]) { opened in
+                guard !opened, let fallback = directionsURL(to: place.address) else { return }
+                UIApplication.shared.open(fallback)
+            }
+            return
+        }
+        guard let url = url(for: target) else { return }
         UIApplication.shared.open(url)
     }
 
-    static func url(searching place: String?) -> URL? {
-        let query = place.flatMap(encode)
+    /// One URL for the target (used when handing over to the Lamp Drive shortcut).
+    static func url(for target: MapsTarget) -> URL? {
+        switch target {
+        case .none: return searchURL(nil)
+        case .search(let text): return searchURL(text)
+        case .navigate(let place): return navigationLink(to: place.address)
+        }
+    }
+
+    // MARK: URLs
+
+    private static func searchURL(_ text: String?) -> URL? {
+        let query = text.flatMap(encode)
         if isGoogleMapsInstalled {
             return URL(string: query.map { "comgooglemaps://?q=\($0)" } ?? "comgooglemaps://")
         }
         return URL(string: query.map { "https://www.google.com/maps/search/?api=1&query=\($0)" }
                    ?? "https://www.google.com/maps")
+    }
+
+    /// Google Maps URL that starts driving navigation (dir_action=navigate).
+    private static func navigationLink(to address: String) -> URL? {
+        guard let destination = encode(address) else { return nil }
+        return URL(string: "https://www.google.com/maps/dir/?api=1&destination=\(destination)"
+                   + "&travelmode=driving&dir_action=navigate")
+    }
+
+    /// Google Maps app scheme with a driving route to the address.
+    private static func directionsURL(to address: String) -> URL? {
+        guard let destination = encode(address) else { return nil }
+        return URL(string: "comgooglemaps://?daddr=\(destination)&directionsmode=driving")
     }
 
     /// Needs "comgooglemaps" in LSApplicationQueriesSchemes (Autobot-Info.plist).

@@ -15,6 +15,7 @@ final class AppModel: ObservableObject {
     let speed: SpeedMonitor
     let carPlay: CarPlayMonitor
     let assistant: WelcomeAssistant
+    let places: SavedPlacesStore
     private let voice: VoiceCoordinator
 
     private var hasStarted = false
@@ -33,7 +34,9 @@ final class AppModel: ObservableObject {
         self.speed = speed
         self.carPlay = CarPlayMonitor()
         self.voice = VoiceCoordinator(audio: audio, speaker: speaker)
-        self.assistant = WelcomeAssistant(audio: audio, speaker: speaker,
+        let places = SavedPlacesStore()
+        self.places = places
+        self.assistant = WelcomeAssistant(audio: audio, speaker: speaker, places: places,
                                           currentLocation: { speed.lastLocation })
     }
 

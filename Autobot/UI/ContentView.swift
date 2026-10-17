@@ -5,6 +5,7 @@ import SwiftUI
 
 struct ContentView: View {
     @StateObject private var app = AppModel()
+    @State private var showingPlaces = false
 
     var body: some View {
         VStack(spacing: 16) {
@@ -13,10 +14,14 @@ struct ContentView: View {
             LampStateView(speed: app.speed, lamp: app.lamp)
             AssistantView(assistant: app.assistant, onTest: app.testWelcome)
             VoiceTestView(onTest: app.testPowerVoice)
+            SavedPlacesButton(store: app.places) { showingPlaces = true }
             PacketLogView(lamp: app.lamp)
         }
         .padding()
         .onAppear { app.start() }
+        .sheet(isPresented: $showingPlaces) {
+            SavedPlacesView(store: app.places)
+        }
     }
 }
 
@@ -120,6 +125,24 @@ private struct VoiceTestView: View {
         }
         .font(.caption)
         .buttonStyle(.bordered)
+    }
+}
+
+private struct SavedPlacesButton: View {
+    @ObservedObject var store: SavedPlacesStore
+    let onTap: () -> Void
+
+    var body: some View {
+        Button(action: onTap) {
+            HStack {
+                Label("Saved places", systemImage: "mappin.and.ellipse")
+                Spacer()
+                Text("\(store.places.count)").foregroundStyle(.secondary)
+                Image(systemName: "chevron.right").foregroundStyle(.secondary)
+            }
+            .font(.headline)
+        }
+        .buttonStyle(.plain)
     }
 }
 
