@@ -34,6 +34,32 @@ final class SavedPlacesStore: ObservableObject {
         persist()
     }
 
+    /// Replaces every place (restore from backup).
+    func replaceAll(with newPlaces: [SavedPlace]) {
+        places = newPlaces
+        persist()
+    }
+
+    /// Adds places from a backup. A place with the same name (ignoring case/punctuation)
+    /// takes the backup's address instead of being added twice.
+    func merge(_ incoming: [SavedPlace]) -> (added: Int, updated: Int) {
+        var added = 0, updated = 0
+        for place in incoming {
+            let key = SavedPlace.normalize(place.name)
+            if let index = places.firstIndex(where: { $0.id == place.id || SavedPlace.normalize($0.name) == key }) {
+                if places[index].address != place.address {
+                    places[index].address = place.address
+                    updated += 1
+                }
+            } else {
+                places.append(place)
+                added += 1
+            }
+        }
+        persist()
+        return (added, updated)
+    }
+
     // MARK: Matching
 
     /// The saved place whose name appears in what was said. Longer names win,

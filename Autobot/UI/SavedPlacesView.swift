@@ -5,8 +5,14 @@ import SwiftUI
 
 struct SavedPlacesView: View {
     @ObservedObject var store: SavedPlacesStore
+    let backup: BackupManager
     @Environment(\.dismiss) private var dismiss
     @State private var editing: SavedPlace?
+
+    // Import flow: pick file -> choose merge/replace -> show result
+    @State private var showingImporter = false
+    @State private var pendingBackup: AppBackup?
+    @State private var resultMessage: String?
 
     var body: some View {
         NavigationStack {
@@ -39,11 +45,65 @@ struct SavedPlacesView: View {
                         Image(systemName: "plus")
                     }
                 }
+                ToolbarItem(placement: .secondaryAction) {
+                    ShareLink(item: BackupFile(backup: backup.makeBackup()),
+                              preview: SharePreview("Autobot backup")) {
+                        Label("Export backup (JSON)", systemImage: "square.and.arrow.up")
+                    }
+                }
+                ToolbarItem(placement: .secondaryAction) {
+                    Button { showingImporter = true } label: {
+                        Label("Import backup", systemImage: "square.and.arrow.down")
+                    }
+                }
             }
             .sheet(item: $editing) { place in
                 PlaceEditor(place: place) { store.save($0) }
             }
+            .fileImporter(isPresented: $showingImporter, allowedContentTypes: [.json]) { result in
+                do {
+                    pendingBackup = try backup.readBackup(at: result.get())
+                } catch {
+                    resultMessage = error.localizedDescription
+                }
+            }
+            .confirmationDialog("Import backup", isPresented: isAskingImportMode, titleVisibility: .visible) {
+                Button("Merge with my places") { restore(.merge) }
+                Button("Replace all my places", role: .destructive) { restore(.replace) }
+                Button("Cancel", role: .cancel) { pendingBackup = nil }
+            } message: {
+                Text(importSummary)
+            }
+            .alert("Import", isPresented: isShowingResult) {
+                Button("OK") { resultMessage = nil }
+            } message: {
+                Text(resultMessage ?? "")
+            }
         }
+    }
+}
+
+private extension SavedPlacesView {
+
+    var isAskingImportMode: Binding<Bool> {
+        Binding(get: { pendingBackup != nil }, set: { if !$0 { pendingBackup = nil } })
+    }
+
+    var isShowingResult: Binding<Bool> {
+        Binding(get: { resultMessage != nil }, set: { if !$0 { resultMessage = nil } })
+    }
+
+    var importSummary: String {
+        guard let b = pendingBackup else { return "" }
+        let count = b.data.savedPlaces?.count ?? 0
+        let date = b.exportedAt.formatted(date: .abbreviated, time: .shortened)
+        return "\(count) saved places, exported \(date)."
+    }
+
+    func restore(_ mode: BackupManager.RestoreMode) {
+        guard let pending = pendingBackup else { return }
+        pendingBackup = nil
+        resultMessage = backup.restore(pending, mode: mode)
     }
 }
 

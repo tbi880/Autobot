@@ -20,7 +20,7 @@ struct ContentView: View {
         .padding()
         .onAppear { app.start() }
         .sheet(isPresented: $showingPlaces) {
-            SavedPlacesView(store: app.places)
+            SavedPlacesView(store: app.places, backup: app.backup)
         }
     }
 }

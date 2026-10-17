@@ -8,6 +8,20 @@ nonisolated struct SavedPlace: Identifiable, Codable, Equatable, Hashable {
     var name: String
     var address: String
 
+    init(id: UUID = UUID(), name: String, address: String) {
+        self.id = id
+        self.name = name
+        self.address = address
+    }
+
+    /// Lenient decoding for backups: "id" may be missing (e.g. a hand-written file).
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        name = try c.decode(String.self, forKey: .name)
+        address = try c.decode(String.self, forKey: .address)
+    }
+
     /// True when the address looks like an exact street address ("6 Neilon Place, Northcross, Auckland"):
     /// a house number followed by a street name, plus at least a suburb or city.
     /// Exact addresses start navigation straight away; anything vaguer is searched instead.
