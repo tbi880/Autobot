@@ -1,7 +1,7 @@
 import SwiftUI
 
 @main
-struct LampTestApp: App {
+struct AutobotApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()

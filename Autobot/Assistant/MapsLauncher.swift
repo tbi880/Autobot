@@ -21,7 +21,7 @@ enum MapsLauncher {
                    ?? "https://www.google.com/maps")
     }
 
-    /// Needs "comgooglemaps" in LSApplicationQueriesSchemes (LampTest-Info.plist).
+    /// Needs "comgooglemaps" in LSApplicationQueriesSchemes (Autobot-Info.plist).
     private static var isGoogleMapsInstalled: Bool {
         guard let url = URL(string: "comgooglemaps://") else { return false }
         return UIApplication.shared.canOpenURL(url)

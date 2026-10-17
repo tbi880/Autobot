@@ -17,7 +17,7 @@ final class AudioSessionManager {
 
     /// Activating/deactivating the session can block for a while, so it runs off the main thread
     /// (iOS warns that doing it on the main thread can make the UI unresponsive).
-    private let queue = DispatchQueue(label: "LampTest.AudioSession")
+    private let queue = DispatchQueue(label: "Autobot.AudioSession")
 
     /// True when another app (e.g. a music app) is currently playing.
     var isOtherAudioPlaying: Bool { AVAudioSession.sharedInstance().isOtherAudioPlaying }
