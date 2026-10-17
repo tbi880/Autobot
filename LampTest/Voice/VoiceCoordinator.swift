@@ -11,9 +11,14 @@ import Foundation
 
 final class VoiceCoordinator {
 
-    private enum Job {
+    private nonisolated enum Job {
         case conversation(@MainActor () async -> Void)
         case powerAnnouncement
+
+        var isAnnouncement: Bool {
+            if case .powerAnnouncement = self { return true }
+            return false
+        }
     }
 
     private let audio: AudioSessionManager
@@ -31,7 +36,7 @@ final class VoiceCoordinator {
 
     /// Queues a conversation ahead of any pending Power Mode announcement.
     func runConversation(_ work: @escaping @MainActor () async -> Void) {
-        let firstAnnouncement = jobs.firstIndex(where: Self.isAnnouncement) ?? jobs.count
+        let firstAnnouncement = jobs.firstIndex(where: \.isAnnouncement) ?? jobs.count
         jobs.insert(.conversation(work), at: firstAnnouncement)
         runNextJob()
     }
@@ -39,7 +44,7 @@ final class VoiceCoordinator {
     /// Queues "Power Mode Activated/Deactivated" for the given state.
     func announcePowerChange(to state: LampState) {
         latestPowerState = state
-        if !jobs.contains(where: Self.isAnnouncement) {
+        if !jobs.contains(where: \.isAnnouncement) {
             jobs.append(.powerAnnouncement)
         }
         runNextJob()
@@ -78,10 +83,5 @@ final class VoiceCoordinator {
         case .purpleSteady: await speaker.say(AppConfig.Phrases.powerOff, style: .assistant)
         }
         audio.release()
-    }
-
-    private static func isAnnouncement(_ job: Job) -> Bool {
-        if case .powerAnnouncement = job { return true }
-        return false
     }
 }

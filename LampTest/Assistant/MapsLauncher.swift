@@ -28,7 +28,7 @@ enum MapsLauncher {
     }
 
     /// Percent-encodes everything except ASCII unreserved characters (so "&", "+", "#" and Chinese are safe).
-    private static func encode(_ text: String) -> String? {
+    private nonisolated static func encode(_ text: String) -> String? {
         let allowed = CharacterSet(charactersIn:
             "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~")
         return text.addingPercentEncoding(withAllowedCharacters: allowed)

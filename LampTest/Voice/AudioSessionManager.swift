@@ -29,7 +29,7 @@ final class AudioSessionManager {
             case .conversation:
                 // Not mixable, so other apps are interrupted (paused)
                 try session.setCategory(.playAndRecord, mode: .default,
-                                        options: [.defaultToSpeaker, .allowBluetooth])
+                                        options: [.defaultToSpeaker, .allowBluetoothHFP])
             case .holdOthersPaused:
                 try session.setCategory(.playback, mode: .voicePrompt, options: [])
             }

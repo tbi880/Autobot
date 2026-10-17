@@ -8,6 +8,7 @@
 
 import AVFoundation
 
+@MainActor
 final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
 
     enum Style {
@@ -91,6 +92,7 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
 
 // MARK: - Voices
 
+@MainActor
 private enum Voices {
 
     static func utterance(_ text: String, style: Speaker.Style) -> AVSpeechUtterance {
@@ -134,6 +136,7 @@ private enum Voices {
 // MARK: - Robot effect chain
 
 /// AVAudioEngine graph: player -> pitch shift -> distortion -> reverb -> output
+@MainActor
 private final class RobotEffectChain {
 
     private let engine = AVAudioEngine()
