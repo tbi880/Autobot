@@ -4,9 +4,7 @@
 // Queue order:
 //   1. Urgent announcements (e.g. "Door open detected") go to the front of the queue.
 //   2. The welcome conversation comes next.
-//   3. Normal announcements and Power Mode announcements wait their turn. If the speed
-//      state flips several times meanwhile, only the latest Power Mode state is announced,
-//      and nothing is said if it ends up back where it was last announced.
+//   3. Normal announcements (including Power Mode) wait their turn.
 // Something already playing is never cut off.
 //
 // Every announcement is spoken navigation-style: other apps' audio is ducked, not paused.
@@ -18,12 +16,6 @@ final class VoiceCoordinator {
     private nonisolated enum Job {
         case conversation(@MainActor () async -> Void)
         case announcement(String, Speaker.Style, urgent: Bool)
-        case powerAnnouncement
-
-        var isPowerAnnouncement: Bool {
-            if case .powerAnnouncement = self { return true }
-            return false
-        }
 
         var isUrgent: Bool {
             if case .announcement(_, _, urgent: true) = self { return true }
@@ -36,8 +28,6 @@ final class VoiceCoordinator {
 
     private var jobs: [Job] = []
     private var isBusy = false
-    private var latestPowerState: LampState = .purpleSteady
-    private var lastAnnouncedPowerState: LampState = .purpleSteady
 
     init(audio: AudioSessionManager, speaker: Speaker) {
         self.audio = audio
@@ -58,7 +48,7 @@ final class VoiceCoordinator {
         runNextJob()
     }
 
-    /// Queues a conversation ahead of normal and Power Mode announcements
+    /// Queues a conversation ahead of normal announcements
     /// (but behind urgent ones already waiting).
     func runConversation(_ work: @escaping @MainActor () async -> Void) {
         let firstNormal = jobs.firstIndex { !$0.isUrgent && !Self.isConversation($0) } ?? jobs.count
@@ -66,19 +56,15 @@ final class VoiceCoordinator {
         runNextJob()
     }
 
-    /// Queues "Power Mode Activated/Deactivated" for the given speed state.
+    /// "Power Mode Activated" (red breathing) or "Power Mode Deactivated" (purple steady).
     func announcePowerChange(to state: LampState) {
-        latestPowerState = state
-        if !jobs.contains(where: \.isPowerAnnouncement) {
-            jobs.append(.powerAnnouncement)
-        }
-        runNextJob()
-    }
-
-    /// Debug: plays the Power Mode phrase for `state`, without changing what has been announced.
-    func testPowerVoice(for state: LampState) {
         guard let phrase = Self.powerPhrase(for: state) else { return }
         announce(phrase.text, style: phrase.style)
+    }
+
+    /// Debug: same as announcePowerChange.
+    func testPowerVoice(for state: LampState) {
+        announcePowerChange(to: state)
     }
 
     // MARK: Queue
@@ -105,16 +91,7 @@ final class VoiceCoordinator {
             await work()
         case .announcement(let text, let style, _):
             await speak(text, style: style)
-        case .powerAnnouncement:
-            await announceLatestPowerState()
         }
-    }
-
-    private func announceLatestPowerState() async {
-        let state = latestPowerState
-        guard state != lastAnnouncedPowerState, let phrase = Self.powerPhrase(for: state) else { return }
-        lastAnnouncedPowerState = state
-        await speak(phrase.text, style: phrase.style)
     }
 
     /// Navigation-style: duck other audio, speak, restore.

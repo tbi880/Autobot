@@ -1,10 +1,10 @@
 // AppModel.swift
 // Creates every component and wires them together:
 //
-//   SpeedMonitor ──scene (priority: speed)──▶ LightingArbiter ──winning scene──▶ LampController
-//   DoorMonitor ──▶ DoorSafetyAlert ──scene (priority: doorAlert)──┘
+//   SpeedMonitor ──▶ PowerModeController ──scenes (speed, powerTransition)──▶ LightingArbiter ──▶ LampController
+//                                        └─"Power Mode Activated/Deactivated"──▶ VoiceCoordinator
+//   DoorMonitor ──▶ DoorSafetyAlert ──scene (doorAlert)──▶ LightingArbiter
 //                                   └─"Door open detected"──▶ VoiceCoordinator
-//   SpeedMonitor ──"Power Mode Activated/Deactivated"──▶ VoiceCoordinator
 //   LampController.isReady ┐
 //   CarPlayMonitor.isConnected ┴──▶ WelcomeAssistant (once per drive, via VoiceCoordinator)
 
@@ -21,6 +21,7 @@ final class AppModel: ObservableObject {
     let backup: BackupManager
     let lighting: LightingArbiter
     let doors: DoorMonitor
+    let powerMode: PowerModeController
     private let voice: VoiceCoordinator
     private let doorAlert: DoorSafetyAlert
 
@@ -46,6 +47,7 @@ final class AppModel: ObservableObject {
         self.lighting = lighting
         self.doors = doors
         self.doorAlert = DoorSafetyAlert(doors: doors, lighting: lighting, voice: voice)
+        self.powerMode = PowerModeController(speed: speed, lighting: lighting, voice: voice)
         let places = SavedPlacesStore()
         self.places = places
         self.backup = BackupManager(places: places)
@@ -60,8 +62,7 @@ final class AppModel: ObservableObject {
         SpeechListener.requestPermissions()
 
         lighting.onSceneChange = { [weak self] scene in self?.lamp.setDesired(scene) }
-        speed.onStateChange = { [weak self] state in self?.speedStateChanged(to: state) }
-        lighting.request(speed.state, from: .speed)
+        powerMode.start()
         speed.start()
         carPlay.start()
 
@@ -83,11 +84,6 @@ final class AppModel: ObservableObject {
     }
 
     // MARK: Wiring
-
-    private func speedStateChanged(to state: LampState) {
-        lighting.request(state, from: .speed)       // shown unless something more important is active
-        voice.announcePowerChange(to: state)
-    }
 
     /// Greets once per drive, when both the lamp and CarPlay are connected (in either order).
     private func connectionChanged(lampReady: Bool, carPlayConnected: Bool) {

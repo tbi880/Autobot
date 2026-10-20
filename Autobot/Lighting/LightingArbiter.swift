@@ -16,14 +16,16 @@ final class LightingArbiter: ObservableObject {
 
     /// Higher priority wins. Leave gaps so new features can slot in between.
     enum Source: Int, Comparable, CaseIterable {
-        case speed = 10          // purple steady / red breathing (Power Mode)
-        case doorAlert = 1000    // door or boot open: overrides everything
+        case speed = 10              // purple steady / red breathing (Power Mode)
+        case powerTransition = 500   // 3-second red flash while Power Mode switches
+        case doorAlert = 1000        // door or boot open: overrides everything
 
         static func < (a: Source, b: Source) -> Bool { a.rawValue < b.rawValue }
 
         var label: String {
             switch self {
             case .speed: return "Speed"
+            case .powerTransition: return "Power Mode switch"
             case .doorAlert: return "Door alert"
             }
         }

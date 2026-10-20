@@ -16,6 +16,9 @@ nonisolated enum AppConfig {
         /// Consecutive GPS readings (about 1 per second) needed before switching state,
         /// so the lamp doesn't flicker while hovering around the threshold.
         static let confirmReadings = 2
+        /// "Buffer zone" when Power Mode switches: red burst flash + announcement for this long,
+        /// then the speed is checked again before the new lighting is applied.
+        static let switchBufferDuration: Duration = .seconds(3)
         /// Ignore GPS speed readings less accurate than this (m/s).
         static let maxSpeedAccuracy: Double = 5
     }
