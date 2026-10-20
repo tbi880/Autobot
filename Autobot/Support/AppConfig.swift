@@ -36,7 +36,9 @@ nonisolated enum AppConfig {
     }
 
     enum CarPlay {
-        /// CarPlay counts as connected the moment car audio appears (no delay).
+        /// CarPlay counts as connected once car audio has been present this long, giving the
+        /// head unit a moment before the greeting starts (and ignoring one-off blips).
+        static let connectDelay: Duration = .milliseconds(500)
         /// It only counts as disconnected after car audio has been gone this long, so short
         /// route blips (e.g. while this app switches audio modes) don't start a new "drive".
         static let disconnectGrace: Duration = .seconds(3)

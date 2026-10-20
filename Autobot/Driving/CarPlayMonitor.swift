@@ -2,7 +2,8 @@
 // Detects CarPlay through the audio system: when CarPlay is connected the iPhone gets a
 // "car audio" port, as an output and/or as an input (the car's microphone).
 //
-//   - connected:    reported immediately, the moment car audio is seen
+//   - connected:    reported once car audio has been present for AppConfig.CarPlay.connectDelay
+//                   (0.5 s), so the head unit is ready before the greeting starts
 //   - disconnected: reported only after car audio has been gone for a few seconds
 //                   (AppConfig.CarPlay.disconnectGrace), so short blips don't count
 //
@@ -19,6 +20,7 @@ final class CarPlayMonitor: ObservableObject {
 
     private var observer: NSObjectProtocol?
     private var pollTask: Task<Void, Never>?
+    private var connectTask: Task<Void, Never>?
     private var disconnectTask: Task<Void, Never>?
 
     func start() {
@@ -47,14 +49,31 @@ final class CarPlayMonitor: ObservableObject {
         if Self.carAudioPresent {
             disconnectTask?.cancel()
             disconnectTask = nil
-            if !isConnected { isConnected = true }          // immediately
-        } else if isConnected, disconnectTask == nil {
-            disconnectTask = Task { [weak self] in
-                try? await Task.sleep(for: AppConfig.CarPlay.disconnectGrace)
-                guard !Task.isCancelled, let self else { return }
-                self.disconnectTask = nil
-                if !Self.carAudioPresent { self.isConnected = false }
-            }
+            if !isConnected, connectTask == nil { scheduleConnect() }
+        } else {
+            connectTask?.cancel()                // gone before the delay passed
+            connectTask = nil
+            if isConnected, disconnectTask == nil { scheduleDisconnect() }
+        }
+    }
+
+    /// Connected once car audio is still there after the short connect delay.
+    private func scheduleConnect() {
+        connectTask = Task { [weak self] in
+            try? await Task.sleep(for: AppConfig.CarPlay.connectDelay)
+            guard !Task.isCancelled, let self else { return }
+            self.connectTask = nil
+            if Self.carAudioPresent { self.isConnected = true }
+        }
+    }
+
+    /// Disconnected only if car audio is still gone after the grace period.
+    private func scheduleDisconnect() {
+        disconnectTask = Task { [weak self] in
+            try? await Task.sleep(for: AppConfig.CarPlay.disconnectGrace)
+            guard !Task.isCancelled, let self else { return }
+            self.disconnectTask = nil
+            if !Self.carAudioPresent { self.isConnected = false }
         }
     }
 
