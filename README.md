@@ -26,7 +26,7 @@ voice assistant when the phone connects to CarPlay.
   lamp disagrees, "busy" / checksum-error replies are retried.
 
 ### Voice
-- "Power Mode Activated" (calm British male voice with a light digital effect) and
+- "Power Mode Activated" (sci-fi female AI voice with a metallic shimmer) and
   "Power Mode Deactivated" (female voice), spoken navigation-style: other audio is ducked,
   not stopped.
 - A single voice queue so prompts never overlap; urgent alerts go first.
@@ -67,8 +67,8 @@ supported language) to navigate there directly. Export / import as a versioned J
    **Lamp Drive** that receives text/URL input, with two actions in this order:
    *Open URLs* (Shortcut Input) → *QQ音乐 – 继续播放*. Google Maps opens first, so a failing QQ
    Music step can't leave you in Shortcuts; on error the app's x-callback opens Maps again.
-4. Optional: in Settings → Accessibility → Spoken Content → Voices, download an enhanced
-   English (UK) male voice (e.g. Daniel) for the Power Mode voice.
+4. Optional: in Settings → Accessibility → Spoken Content → Voices, download an enhanced or
+   premium English (US) female voice (e.g. Zoe or Ava) for clearer voices.
 
 The dashboard has test buttons for the welcome flow, both Power Mode voices and every door.
 

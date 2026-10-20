@@ -103,7 +103,7 @@ final class VoiceCoordinator {
 
     private static func powerPhrase(for state: LampState) -> (text: String, style: Speaker.Style)? {
         switch state {
-        case .redBreathing: return (AppConfig.Phrases.powerOn, .robot)
+        case .redBreathing: return (AppConfig.Phrases.powerOn, .sciFi)
         case .purpleSteady: return (AppConfig.Phrases.powerOff, .assistant)
         case .redBurstFlash: return nil   // not a speed state
         }

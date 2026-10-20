@@ -1,13 +1,13 @@
 // MetallicVoiceEffect.swift
-// Turns rendered speech into a clear "metallic robot" voice, entirely in code:
+// Gives rendered speech a clear sci-fi / metallic character, entirely in code:
 //
-//   1. comb filter   - a very short echo fed back into itself; gives the hollow, metal-tube ring
-//   2. ring modulator - mixes in a little of the voice multiplied by a sine wave; adds the robotic buzz
+//   1. comb filter   - a very short echo fed back into itself; gives a metallic shimmer
+//   2. ring modulator - mixes in a little of the voice multiplied by a sine wave; adds a digital texture
 //   3. loudness      - normalises the peak and soft-limits, so it sounds a bit louder than the
 //                      normal voice without clipping
 //
 // Pitch shift and a touch of plate reverb are added afterwards by the player (Speaker.swift).
-// All strengths are in AppConfig.RobotVoice; lower them if the words get hard to understand.
+// All strengths are in AppConfig.SciFiVoice; lower them if the words get hard to understand.
 
 import AVFoundation
 
@@ -54,9 +54,9 @@ nonisolated enum MetallicVoiceEffect {
 
     /// y[n] = x[n] + feedback * y[n - delay], blended with the dry voice.
     private static func combFilter(_ x: [Float], sampleRate: Double) -> [Float] {
-        let delay = max(1, Int(sampleRate * AppConfig.RobotVoice.combDelayMs / 1000))
-        let feedback = AppConfig.RobotVoice.combFeedback
-        let mix = AppConfig.RobotVoice.combMix
+        let delay = max(1, Int(sampleRate * AppConfig.SciFiVoice.combDelayMs / 1000))
+        let feedback = AppConfig.SciFiVoice.combFeedback
+        let mix = AppConfig.SciFiVoice.combMix
         var wet = [Float](repeating: 0, count: x.count)
         for n in 0..<x.count {
             wet[n] = x[n] + (n >= delay ? feedback * wet[n - delay] : 0)
@@ -67,8 +67,8 @@ nonisolated enum MetallicVoiceEffect {
 
     /// Blends in the signal multiplied by a sine carrier.
     private static func ringModulate(_ x: [Float], sampleRate: Double) -> [Float] {
-        let frequency = AppConfig.RobotVoice.ringModHz
-        let mix = AppConfig.RobotVoice.ringModMix
+        let frequency = AppConfig.SciFiVoice.ringModHz
+        let mix = AppConfig.SciFiVoice.ringModMix
         return x.enumerated().map { n, sample in
             let carrier = Float(sin(2 * Double.pi * frequency * Double(n) / sampleRate))
             return sample * (1 - mix) + sample * carrier * mix
@@ -79,7 +79,7 @@ nonisolated enum MetallicVoiceEffect {
     private static func louden(_ x: [Float]) -> [Float] {
         let peak = x.reduce(0) { max($0, abs($1)) }
         guard peak > 0 else { return x }
-        let drive = AppConfig.RobotVoice.drive
+        let drive = AppConfig.SciFiVoice.drive
         let gain = drive / peak
         let normaliser = tanh(drive)
         return x.map { tanh($0 * gain) / normaliser }

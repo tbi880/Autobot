@@ -2,6 +2,7 @@
 // Every user-facing phrase and tuning value lives here, so behaviour can be
 // adjusted without digging through the rest of the code.
 
+import AVFoundation   // AVSpeechSynthesisVoiceGender
 import Foundation
 
 nonisolated enum AppConfig {
@@ -89,26 +90,28 @@ nonisolated enum AppConfig {
         static let doorOpen = "Door open detected"
     }
 
-    /// "Power Mode Activated": calm, refined British male voice with a light digital
-    /// "AI assistant" sheen (not a heavy robot). Raise combMix / ringModMix for more metal.
-    enum RobotVoice {
-        /// Preferred accent, tried first (falls back to any English male voice).
-        static let language = "en-GB"
-        /// Speech rate relative to the normal voice (1.0 = same). Unhurried.
-        static let rateFactor: Float = 0.92
-        /// Voice pitch (0.5…2.0). Close to natural.
-        static let pitchMultiplier: Float = 0.95
-        /// Extra pitch shift in cents (−2400…2400). Lower = deeper.
-        static let pitchCents: Float = -50
-        /// Comb filter (digital sheen): delay in ms, feedback 0…0.9, mix 0…1.
-        static let combDelayMs: Double = 2
-        static let combFeedback: Float = 0.35
-        static let combMix: Float = 0.2
-        /// Ring modulator (robotic buzz): carrier frequency and mix 0…1. Almost off.
-        static let ringModHz: Double = 90
-        static let ringModMix: Float = 0.04
-        /// Plate reverb amount 0…100 (a bit of space, like a speaker in a room).
-        static let reverbMix: Float = 8
+    /// "Power Mode Activated": sci-fi female AI voice - clear, slightly bright, with a
+    /// shimmering digital/metallic sheen and some space. Raise combMix / ringModMix for more effect.
+    enum SciFiVoice {
+        /// .female or .male.
+        static let gender: AVSpeechSynthesisVoiceGender = .female
+        /// Preferred accent, tried first (falls back to any English voice of that gender).
+        static let language = "en-US"
+        /// Speech rate relative to the normal voice (1.0 = same). Slightly measured.
+        static let rateFactor: Float = 0.95
+        /// Voice pitch (0.5…2.0). A touch brighter than natural.
+        static let pitchMultiplier: Float = 1.05
+        /// Extra pitch shift in cents (−2400…2400).
+        static let pitchCents: Float = 0
+        /// Comb filter (metallic shimmer): delay in ms, feedback 0…0.9, mix 0…1.
+        static let combDelayMs: Double = 1.5
+        static let combFeedback: Float = 0.45
+        static let combMix: Float = 0.3
+        /// Ring modulator (digital texture): carrier frequency and mix 0…1.
+        static let ringModHz: Double = 220
+        static let ringModMix: Float = 0.06
+        /// Plate reverb amount 0…100 (a spaceship-cabin sense of space).
+        static let reverbMix: Float = 14
         /// Loudness: soft-limiter drive (1 = plain normalisation, higher = denser/louder).
         static let drive: Float = 1.4
         /// Player volume 0…1. The voice is already normalised to full scale.

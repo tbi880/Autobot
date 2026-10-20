@@ -1,8 +1,8 @@
 // Speaker.swift
 // Text-to-speech with two voices:
 //   .assistant - natural female voice (welcome, questions, "Power Mode Deactivated")
-//   .robot     - calm British male voice with a light digital sheen (MetallicVoiceEffect)
-//                + a touch of reverb, a little louder ("Power Mode Activated")
+//   .sciFi     - sci-fi AI voice (female by default): shimmering metallic effect
+//                (MetallicVoiceEffect) + plate reverb, a little louder ("Power Mode Activated")
 // `say` is async and returns when the speech has finished playing.
 // The caller is responsible for the audio session (see AudioSessionManager).
 
@@ -13,12 +13,12 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
 
     enum Style {
         case assistant
-        case robot
+        case sciFi
     }
 
     private let synthesizer = AVSpeechSynthesizer()   // speaks directly
-    private let renderer = AVSpeechSynthesizer()      // renders robot speech into buffers
-    private let robotEffects = RobotEffectChain()
+    private let renderer = AVSpeechSynthesizer()      // renders sci-fi speech into buffers
+    private let sciFiEffects = SciFiEffectChain()
     private var speechFinished: CheckedContinuation<Void, Never>?
 
     /// Diagnostic messages (shown in the app's log).
@@ -36,23 +36,23 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
         switch style {
         case .assistant:
             await speakDirectly(utterance)
-        case .robot:
+        case .sciFi:
             let buffers = await renderToBuffers(utterance)
             let voiceName = utterance.voice?.name ?? "default"
-            onLog?("Robot voice: \(voiceName), \(buffers.count) audio buffers")
-            if let metallic = MetallicVoiceEffect.process(buffers), await robotEffects.play(metallic) {
-                onLog?("Robot voice: played with metallic effect")
+            onLog?("Sci-fi voice: \(voiceName), \(buffers.count) audio buffers")
+            if let metallic = MetallicVoiceEffect.process(buffers), await sciFiEffects.play(metallic) {
+                onLog?("Sci-fi voice: played with metallic effect")
             } else {
                 // Effect unavailable: still say it with the same voice, just without the effect
-                onLog?("Robot voice: effect failed, speaking without it")
-                await speakDirectly(Voices.utterance(text, style: .robot))
+                onLog?("Sci-fi voice: effect failed, speaking without it")
+                await speakDirectly(Voices.utterance(text, style: .sciFi))
             }
         }
     }
 
     func stop() {
         synthesizer.stopSpeaking(at: .immediate)
-        robotEffects.stop()
+        sciFiEffects.stop()
         finishDirectSpeech()
     }
 
@@ -78,7 +78,7 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
         onMain { self.finishDirectSpeech() }
     }
 
-    // MARK: Rendering (for the robot effects)
+    // MARK: Rendering (for the sci-fi effect)
 
     private func renderToBuffers(_ utterance: AVSpeechUtterance) async -> [AVAudioPCMBuffer] {
         await withCheckedContinuation { continuation in
@@ -110,27 +110,27 @@ private enum Voices {
             u.voice = femaleVoice()
             u.rate = AVSpeechUtteranceDefaultSpeechRate
             u.pitchMultiplier = 1.0
-        case .robot:
-            u.voice = robotVoice()
-            u.rate = AVSpeechUtteranceDefaultSpeechRate * AppConfig.RobotVoice.rateFactor
-            u.pitchMultiplier = AppConfig.RobotVoice.pitchMultiplier
+        case .sciFi:
+            u.voice = sciFiVoice()
+            u.rate = AVSpeechUtteranceDefaultSpeechRate * AppConfig.SciFiVoice.rateFactor
+            u.pitchMultiplier = AppConfig.SciFiVoice.pitchMultiplier
         }
         return u
     }
 
-    /// Best male voice in the preferred accent (AppConfig.RobotVoice.language, British by default),
-    /// premium > enhanced > any; then any English male voice. The effect adds the digital sheen.
-    static func robotVoice() -> AVSpeechSynthesisVoice? {
-        let males = AVSpeechSynthesisVoice.speechVoices().filter { $0.gender == .male }
-        let preferred = males.filter { $0.language == AppConfig.RobotVoice.language }
-        let english = males.filter { $0.language.hasPrefix("en") }
+    /// Best voice of the configured gender and accent (AppConfig.SciFiVoice), premium > enhanced
+    /// > any; then any English voice of that gender. The effect adds the sci-fi character.
+    static func sciFiVoice() -> AVSpeechSynthesisVoice? {
+        let candidates = AVSpeechSynthesisVoice.speechVoices().filter { $0.gender == AppConfig.SciFiVoice.gender }
+        let preferred = candidates.filter { $0.language == AppConfig.SciFiVoice.language }
+        let english = candidates.filter { $0.language.hasPrefix("en") }
         return preferred.first { $0.quality == .premium }
             ?? preferred.first { $0.quality == .enhanced }
             ?? preferred.first
             ?? english.first { $0.quality == .premium }
             ?? english.first { $0.quality == .enhanced }
             ?? english.first
-            ?? AVSpeechSynthesisVoice(language: AppConfig.RobotVoice.language)
+            ?? AVSpeechSynthesisVoice(language: AppConfig.SciFiVoice.language)
     }
 
     /// Best available US English female voice.
@@ -145,12 +145,12 @@ private enum Voices {
     }
 }
 
-// MARK: - Robot effect chain
+// MARK: - Sci-fi effect chain
 
 /// AVAudioEngine graph: player -> pitch shift -> plate reverb -> output.
 /// The metallic sound itself is baked into the buffer by MetallicVoiceEffect.
 @MainActor
-private final class RobotEffectChain {
+private final class SciFiEffectChain {
 
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
@@ -158,10 +158,10 @@ private final class RobotEffectChain {
     private let reverb = AVAudioUnitReverb()
 
     init() {
-        pitch.pitch = AppConfig.RobotVoice.pitchCents
+        pitch.pitch = AppConfig.SciFiVoice.pitchCents
         reverb.loadFactoryPreset(.plate)
-        reverb.wetDryMix = AppConfig.RobotVoice.reverbMix
-        player.volume = AppConfig.RobotVoice.volume
+        reverb.wetDryMix = AppConfig.SciFiVoice.reverbMix
+        player.volume = AppConfig.SciFiVoice.volume
         [player, pitch, reverb].forEach { engine.attach($0) }
     }
 
@@ -176,7 +176,7 @@ private final class RobotEffectChain {
             engine.prepare()
             try engine.start()
         } catch {
-            print("Robot voice engine error:", error)
+            print("Sci-fi voice engine error:", error)
             return false
         }
 
