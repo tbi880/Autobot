@@ -1,29 +1,28 @@
 // ShortcutsLauncher.swift
-// Runs a shortcut from the Shortcuts app, then opens a URL when it finishes.
+// Runs a shortcut from the Shortcuts app.
 //
 // Why: iOS gives apps no way to tell QQ Music to play. The Shortcuts app can, through
-// QQ Music's own "继续播放" action, so the welcome flow runs a one-step user shortcut
-// (AppConfig.Music.shortcutName).
-//
-// Google Maps is opened through x-callback-url (x-success / x-error / x-cancel), not by a
-// step inside the shortcut: if the QQ Music step fails, times out or brings QQ Music to the
-// front, a later step in the shortcut would never run and you'd be left in Shortcuts.
-// The callback opens Google Maps in every case.
+// QQ Music's own "继续播放" action, so the welcome flow runs a user shortcut
+// (AppConfig.Music.shortcutName) with two steps, Google Maps first:
+//   1. Open URLs  (Shortcut Input = the Google Maps link we pass in)
+//   2. QQ音乐 - 继续播放
+// Opening Maps first means a failing or slow QQ Music step can't leave you in Shortcuts.
+// As a safety net, x-error / x-cancel open the Google Maps link again.
 
 import UIKit
 
 enum ShortcutsLauncher {
 
-    /// shortcuts://x-callback-url/run-shortcut?name=…&x-success=…&x-error=…&x-cancel=…
-    static func run(named name: String, thenOpen next: URL) {
-        guard let url = url(named: name, thenOpen: next) else { return }
+    /// shortcuts://x-callback-url/run-shortcut?name=…&input=text&text=…&x-error=…&x-cancel=…
+    static func run(named name: String, input: URL) {
+        guard let url = url(named: name, input: input) else { return }
         UIApplication.shared.open(url)
     }
 
-    private static func url(named name: String, thenOpen next: URL) -> URL? {
-        guard let name = encode(name), let next = encode(next.absoluteString) else { return nil }
+    private static func url(named name: String, input: URL) -> URL? {
+        guard let name = encode(name), let link = encode(input.absoluteString) else { return nil }
         return URL(string: "shortcuts://x-callback-url/run-shortcut?name=\(name)"
-                   + "&x-success=\(next)&x-error=\(next)&x-cancel=\(next)")
+                   + "&input=text&text=\(link)&x-error=\(link)&x-cancel=\(link)")
     }
 
     /// Encodes everything except ASCII unreserved characters, so the Google Maps link

@@ -67,8 +67,8 @@ nonisolated enum AppConfig {
     }
 
     enum Music {
-        /// Shortcut with a single step: QQ Music "继续播放" (resume the last song).
-        /// Google Maps is opened afterwards by the Shortcuts app's callback, even if that step fails.
+        /// Shortcut: 1. Open URLs (Shortcut Input = Google Maps link)  2. QQ音乐 - 继续播放.
+        /// If it fails or is cancelled, the Google Maps link is opened again (x-error / x-cancel).
         /// Used only when no music was playing when the car connected.
         static let shortcutName = "Lamp Drive"
         /// How long to wait for the music to start before giving up on "The music is now continued".

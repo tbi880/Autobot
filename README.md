@@ -61,8 +61,9 @@ supported language) to navigate there directly. Export / import as a versioned J
    re-signed every 7 days.
 2. Allow Bluetooth, Location ("While Using" is enough), Microphone and Speech Recognition.
 3. For "resume music when nothing was playing", create a shortcut in the Shortcuts app named
-   **Lamp Drive** with a single action: *QQ音乐 – 继续播放*. The app opens Google Maps through
-   the shortcut's x-callback when it finishes (even if the QQ Music step fails).
+   **Lamp Drive** that receives text/URL input, with two actions in this order:
+   *Open URLs* (Shortcut Input) → *QQ音乐 – 继续播放*. Google Maps opens first, so a failing QQ
+   Music step can't leave you in Shortcuts; on error the app's x-callback opens Maps again.
 4. Optional: in Settings → Accessibility → Spoken Content → Voices, download an enhanced
    English (UK) male voice (e.g. Daniel) for the Power Mode voice.
 
