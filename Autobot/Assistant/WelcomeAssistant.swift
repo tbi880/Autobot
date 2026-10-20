@@ -16,7 +16,8 @@
 //   8. music:
 //      - was playing  -> let it resume, then "The music is now continued." (if it really resumed)
 //      - was not      -> run the "Lamp Drive" shortcut, which starts QQ Music "继续播放" (resume the last song)
-//                        and then opens Google Maps; announce once the music is playing
+//                        and opens Google Maps when it finishes (x-callback, also on error);
+//                        announce once the music is playing
 //
 // App in the background or phone locked:
 //   only "Welcome back, Tim." (music is lowered, not paused)
@@ -159,7 +160,7 @@ final class WelcomeAssistant: ObservableObject {
             return
         }
         status = "Starting QQ Music + Google Maps"
-        ShortcutsLauncher.run(named: AppConfig.Music.shortcutName, input: mapsURL.absoluteString)
+        ShortcutsLauncher.run(named: AppConfig.Music.shortcutName, thenOpen: mapsURL)
 
         let musicStarted = await waitForOtherAudio(timeout: AppConfig.Music.startTimeout)
         var lines: [String] = []
