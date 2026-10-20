@@ -26,8 +26,7 @@ voice assistant when the phone connects to CarPlay.
   lamp disagrees, "busy" / checksum-error replies are retried.
 
 ### Voice
-- "Power Mode Activated" (sci-fi female AI voice with a metallic shimmer) and
-  "Power Mode Deactivated" (female voice), spoken navigation-style: other audio is ducked,
+- "Power Mode Activated" / "Power Mode Deactivated" in the assistant's female voice, spoken navigation-style: other audio is ducked,
   not stopped.
 - A single voice queue so prompts never overlap; urgent alerts go first.
 
