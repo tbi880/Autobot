@@ -21,6 +21,9 @@ final class PowerModeController: ObservableObject {
     @Published private(set) var committed: LampState
     /// Set during the 3-second buffer zone: the state being switched to.
     @Published private(set) var switchingTo: LampState?
+    /// Test override (Power ON / OFF buttons): treated as the speed state until the real
+    /// speed state changes or another test button is pressed.
+    @Published private(set) var simulated: LampState?
 
     private let speed: SpeedMonitor
     private let lighting: LightingArbiter
@@ -36,12 +39,25 @@ final class PowerModeController: ObservableObject {
 
     func start() {
         lighting.request(committed, from: .speed)
-        speed.onStateChange = { [weak self] state in self?.speedStateChanged(to: state) }
+        speed.onStateChange = { [weak self] state in
+            self?.simulated = nil              // real driving takes over from a test
+            self?.stateChanged(to: state)
+        }
     }
+
+    /// Debug: pretend the speed is on the given side of the threshold. Goes through the
+    /// buffer zone (flash + announcement) exactly like real driving.
+    func simulate(_ state: LampState) {
+        simulated = state
+        stateChanged(to: state)
+    }
+
+    /// The speed state that counts: the test override if set, otherwise the real one.
+    private var currentState: LampState { simulated ?? speed.state }
 
     // MARK: Buffer zone
 
-    private func speedStateChanged(to state: LampState) {
+    private func stateChanged(to state: LampState) {
         guard bufferTask == nil, state != committed else { return }   // decided at the end of a running buffer
         beginBuffer(switchingTo: state)
     }
@@ -61,7 +77,7 @@ final class PowerModeController: ObservableObject {
         bufferTask = nil
         switchingTo = nil
 
-        let now = speed.state
+        let now = currentState
         if now != committed {
             committed = now
             lighting.request(now, from: .speed)   // set before the flash is withdrawn: no flicker

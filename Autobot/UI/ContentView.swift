@@ -11,10 +11,10 @@ struct ContentView: View {
         VStack(spacing: 16) {
             ConnectionStatusView(lamp: app.lamp, carPlay: app.carPlay)
             SpeedView(speed: app.speed)
-            LampStateView(lighting: app.lighting, lamp: app.lamp)
+            LampStateView(lighting: app.lighting, lamp: app.lamp, powerMode: app.powerMode)
             DoorTestView(doors: app.doors)
             AssistantView(assistant: app.assistant, onTest: app.testWelcome)
-            VoiceTestView(onTest: app.testPowerVoice)
+            PowerModeTestView(powerMode: app.powerMode, onTest: app.testPowerMode)
             SavedPlacesButton(store: app.places) { showingPlaces = true }
             PacketLogView(lamp: app.lamp)
         }
@@ -65,21 +65,52 @@ private struct SpeedView: View {
 private struct LampStateView: View {
     @ObservedObject var lighting: LightingArbiter
     @ObservedObject var lamp: LampController
+    @ObservedObject var powerMode: PowerModeController
 
     var body: some View {
         VStack(spacing: 4) {
             if let active = lighting.active {
                 HStack {
-                    Circle()
-                        .fill(active.scene == .purpleSteady ? Color(red: 0.5, green: 0, blue: 1) : Color.red)
-                        .frame(width: 16, height: 16)
+                    SceneIndicator(scene: active.scene)
                     Text(active.scene.label).font(.title3.bold())
+                }
+                if let target = powerMode.switchingTo {
+                    Text("Buffer zone → \(target.label)")
+                        .font(.subheadline.bold())
+                        .foregroundColor(.red)
                 }
                 Text("By: \(active.source.label)  ·  "
                      + (lamp.appliedState == active.scene ? "Sent to lamp" : "Waiting for lamp…"))
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
+        }
+    }
+}
+
+/// Coloured dot that mimics the lamp: steady, slowly breathing, or flashing.
+private struct SceneIndicator: View {
+    let scene: LampState
+
+    var body: some View {
+        TimelineView(.animation) { context in
+            Circle()
+                .fill(color)
+                .frame(width: 18, height: 18)
+                .opacity(opacity(at: context.date))
+        }
+    }
+
+    private var color: Color {
+        scene == .purpleSteady ? Color(red: 0.5, green: 0, blue: 1) : Color.red
+    }
+
+    private func opacity(at date: Date) -> Double {
+        let t = date.timeIntervalSinceReferenceDate
+        switch scene {
+        case .purpleSteady: return 1
+        case .redBreathing: return 0.25 + 0.75 * (0.5 + 0.5 * sin(t * 2 * .pi / 2.5))   // ~2.5 s breath
+        case .redBurstFlash: return Int(t * 8) % 2 == 0 ? 1 : 0.1                       // fast flash
         }
     }
 }
@@ -136,12 +167,17 @@ private struct AssistantView: View {
     }
 }
 
-private struct VoiceTestView: View {
+/// Pretends the speed crossed the threshold: buffer zone flash, announcement, then the new lighting.
+private struct PowerModeTestView: View {
+    @ObservedObject var powerMode: PowerModeController
     let onTest: (LampState) -> Void
 
     var body: some View {
         HStack {
-            Text("Voice test").font(.headline)
+            Text("Power Mode test").font(.headline)
+            if powerMode.simulated != nil {
+                Text("(simulated)").font(.caption2).foregroundColor(.secondary)
+            }
             Spacer()
             Button("Power ON") { onTest(.redBreathing) }
                 .tint(.red)

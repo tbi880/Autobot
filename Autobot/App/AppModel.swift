@@ -78,9 +78,9 @@ final class AppModel: ObservableObject {
         runWelcome()
     }
 
-    /// Debug: plays "Power Mode Activated" (red) or "Power Mode Deactivated" (purple).
-    func testPowerVoice(_ state: LampState) {
-        voice.testPowerVoice(for: state)
+    /// Debug: behave as if the speed crossed into `state` (buffer zone, announcement, lighting).
+    func testPowerMode(_ state: LampState) {
+        powerMode.simulate(state)
     }
 
     // MARK: Wiring

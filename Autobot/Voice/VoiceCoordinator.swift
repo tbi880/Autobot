@@ -62,10 +62,6 @@ final class VoiceCoordinator {
         announce(phrase.text, style: phrase.style)
     }
 
-    /// Debug: same as announcePowerChange.
-    func testPowerVoice(for state: LampState) {
-        announcePowerChange(to: state)
-    }
 
     // MARK: Queue
 
