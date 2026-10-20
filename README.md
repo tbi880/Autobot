@@ -14,6 +14,9 @@ voice assistant when the phone connects to CarPlay.
   - below 90 km/h: steady purple (zone 1 at 50 %, zone 2 at 100 %)
   - at or above 90 km/h: firmware *Red Gradient* breathing
   - debounced, so hovering around the threshold doesn't flicker
+  - switching goes through a 3-second *buffer zone*: red burst flash + the Power Mode
+    announcement, then the speed is checked again and the new lighting is applied, or the
+    old one restored if the speed went back
 - **Door safety alert** (highest priority): any door or the boot open → *Red Burst Flash* and
   "Door open detected"; when everything is closed the previous lighting comes back.
   Door state currently comes from test buttons; OBD2 / ECU input is planned.
@@ -102,7 +105,7 @@ Autobot/
 ├── Lamp/        LampProtocol (packets), LampController (BLE), LampState (scenes)
 ├── Lighting/    LightingArbiter (priority between lighting features)
 ├── Vehicle/     DoorMonitor (door state), DoorSafetyAlert
-├── Driving/     SpeedMonitor (GPS), CarPlayMonitor (audio route)
+├── Driving/     SpeedMonitor (GPS), PowerModeController (buffer zone), CarPlayMonitor
 ├── Voice/       AudioSessionManager, Speaker, MetallicVoiceEffect, VoiceCoordinator (queue)
 ├── Assistant/   WelcomeAssistant (flow), SpeechListener, DestinationParser,
 │                WeatherService, MapsLauncher, ShortcutsLauncher
