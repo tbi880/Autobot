@@ -48,6 +48,11 @@ final class LampController: NSObject, ObservableObject, CBCentralManagerDelegate
 
     /// Turns on Bluetooth and starts looking for the lamp. Called when ENGINE START is pressed.
     func start() {
+        if AppConfig.TestMode.enabled {
+            status = "Connected: simulated lamp"
+            isReady = true
+            return
+        }
         guard central == nil else { return }
         central = CBCentralManager(delegate: self, queue: .main)
     }
