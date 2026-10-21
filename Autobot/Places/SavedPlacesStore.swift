@@ -71,6 +71,66 @@ final class SavedPlacesStore: ObservableObject {
             .max { SavedPlace.normalize($0.name).count < SavedPlace.normalize($1.name).count }
     }
 
+    /// Finds the saved place whose name or address is within a small character edit
+    /// distance of an extracted destination. If several places qualify, the closest
+    /// proportional match wins.
+    func place(similarTo text: String, maxCharacterDifferences: Int = 2) -> SavedPlace? {
+        let spoken = Self.compact(text)
+        guard !spoken.isEmpty, maxCharacterDifferences >= 0 else { return nil }
+
+        return places.compactMap { place -> (place: SavedPlace, score: Double, distance: Int)? in
+            let keys = [place.name, place.address]
+                .map(Self.compact)
+                .filter { !$0.isEmpty }
+            return keys
+                .map { key -> (place: SavedPlace, score: Double, distance: Int)? in
+                    let distance = Self.editDistance(spoken, key)
+                    guard distance <= maxCharacterDifferences else { return nil }
+                    let length = max(spoken.count, key.count)
+                    let score = length == 0 ? 1 : 1 - Double(distance) / Double(length)
+                    return (place, score, distance)
+                }
+                .compactMap { $0 }
+                .max {
+                    if $0.score == $1.score { return $0.distance > $1.distance }
+                    return $0.score < $1.score
+                }
+        }
+        .max {
+            if $0.score == $1.score { return $0.distance > $1.distance }
+            return $0.score < $1.score
+        }?
+        .place
+    }
+
+    private static func compact(_ text: String) -> String {
+        SavedPlace.normalize(text).filter { !$0.isWhitespace }
+    }
+
+    /// Levenshtein distance over extended grapheme clusters, so Chinese characters
+    /// and composed accented letters each count as one character.
+    private static func editDistance(_ lhs: String, _ rhs: String) -> Int {
+        let left = Array(lhs)
+        let right = Array(rhs)
+        guard !left.isEmpty else { return right.count }
+        guard !right.isEmpty else { return left.count }
+
+        var previous = Array(0...right.count)
+        for (leftIndex, leftCharacter) in left.enumerated() {
+            var current = Array(repeating: 0, count: right.count + 1)
+            current[0] = leftIndex + 1
+            for (rightIndex, rightCharacter) in right.enumerated() {
+                let substitutionCost = leftCharacter == rightCharacter ? 0 : 1
+                current[rightIndex + 1] = min(
+                    min(previous[rightIndex + 1] + 1, current[rightIndex] + 1),
+                    previous[rightIndex] + substitutionCost
+                )
+            }
+            previous = current
+        }
+        return previous[right.count]
+    }
+
     // MARK: Storage
 
     private func load() {

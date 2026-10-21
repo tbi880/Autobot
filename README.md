@@ -47,7 +47,9 @@ If the phone is locked or the app is in the background, it only says the greetin
 
 ### Saved places
 Name + address pairs ("home" → "6 Example Street, Suburb, City"). Say the name (in any
-supported language) to navigate there directly. Export / import as a versioned JSON backup.
+supported language) to navigate there directly. If speech recognition gets one or two
+characters wrong, the closest matching saved name or address is used. Export / import as a
+versioned JSON backup.
 
 ## Requirements
 

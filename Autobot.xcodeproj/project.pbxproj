@@ -262,7 +262,7 @@
 				INFOPLIST_KEY_NSLocationAlwaysAndWhenInUseUsageDescription = "锁屏时也根据车速自动切换氛围灯";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "根据车速自动切换氛围灯";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "上车时听你说出目的地";
-				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "把你说的目的地转成文字";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "识别目的地时，语音可能发送给 Apple 服务器处理，也可能由设备本地处理";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -301,7 +301,7 @@
 				INFOPLIST_KEY_NSLocationAlwaysAndWhenInUseUsageDescription = "锁屏时也根据车速自动切换氛围灯";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "根据车速自动切换氛围灯";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "上车时听你说出目的地";
-				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "把你说的目的地转成文字";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "识别目的地时，语音可能发送给 Apple 服务器处理，也可能由设备本地处理";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;

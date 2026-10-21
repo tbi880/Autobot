@@ -87,6 +87,7 @@ final class WelcomeAssistant: ObservableObject {
             await speaker.say(briefing)
         }
         await speaker.say(AppConfig.Phrases.askDestination)
+        SpeechDiagnosticLog.write("WelcomeAssistant: destination prompt finished; starting speech listener")
 
         let target = await askForDestination()
 
@@ -110,11 +111,13 @@ final class WelcomeAssistant: ObservableObject {
 
         // English and Mandarin are recognised at the same time; most confident first,
         // and on a tie the language listed first in AppConfig.Listening.languages (English)
-        let transcripts = await listener.listen()
+        let transcripts = await listener.listen(contextualStrings: places.places.map(\.name))
             .enumerated()
             .sorted { ($0.element.confidence, -$0.offset) > ($1.element.confidence, -$1.offset) }
             .map(\.element)
+        SpeechDiagnosticLog.write("WelcomeAssistant: listener returned \(transcripts.count) transcript(s)")
         guard let best = transcripts.first else {
+            SpeechDiagnosticLog.write("WelcomeAssistant: no reply because listener returned no transcript")
             status = "No reply"
             return .none
         }
@@ -132,6 +135,9 @@ final class WelcomeAssistant: ObservableObject {
         status = "Understanding (\(understandingEngine))…"
         guard let destination = await parser.destination(in: reply) else { return .none }
         if let place = places.place(mentionedIn: destination) {
+            return target(for: place)
+        }
+        if let place = places.place(similarTo: destination) {
             return target(for: place)
         }
         lastDestination = destination
