@@ -84,6 +84,11 @@ nonisolated enum AppConfig {
         static let engineVolume: Float = 1.0
     }
 
+    enum TestMode {
+        /// Simulates successful lamp Bluetooth and CarPlay connections at start-up.
+        static let enabled = false
+    }
+
     enum Listening {
         /// Languages recognised at the same time. Each inner list is one language,
         /// its locales tried in order until one is available on this iPhone.

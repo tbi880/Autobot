@@ -24,6 +24,10 @@ final class CarPlayMonitor: ObservableObject {
     private var disconnectTask: Task<Void, Never>?
 
     func start() {
+        if AppConfig.TestMode.enabled {
+            isConnected = true
+            return
+        }
         guard observer == nil else { return }
         prepareSessionForInputDetection()
 
