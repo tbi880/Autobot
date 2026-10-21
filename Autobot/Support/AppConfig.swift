@@ -54,6 +54,13 @@ nonisolated enum AppConfig {
             ["en-NZ", "en-US"],     // English
             ["zh-CN"],              // Mandarin
         ]
+        /// Apple's voice processing on the microphone (as in FaceTime/phone calls): echo
+        /// cancellation (removes sound coming from the car speakers), noise suppression
+        /// (road/wind/fan noise) and automatic gain for speech.
+        static let voiceProcessing = true
+        /// In the final result, words recognised with less confidence than this (0…1) are dropped
+        /// as background noise. 0 keeps everything.
+        static let minWordConfidence: Float = 0.3
         /// After you stop talking, wait at most this long for the final (most accurate) results.
         static let finalResultTimeout: TimeInterval = 1.5
         /// Give up if nothing has been said within this time.

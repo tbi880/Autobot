@@ -1,6 +1,8 @@
 // SpeechListener.swift
 // Listens for one reply using Apple speech recognition (on-device when supported),
 // in several languages at once (AppConfig.Listening.languages: English + Mandarin).
+// Only the voice should count, so the microphone uses Apple's voice processing (echo
+// cancellation + noise suppression) and low-confidence words are dropped as noise.
 // The same microphone audio goes to one recogniser per language; every language that
 // heard something returns a Transcript, and the caller decides which one to use.
 // Under CarPlay the car's microphone is used automatically.
@@ -86,6 +88,7 @@ final class SpeechListener {
     private func start() throws {
         // Microphone -> every language's recogniser
         let input = engine.inputNode
+        enableVoiceProcessing(on: input)                // before reading the format: it can change it
         let format = input.outputFormat(forBus: 0)
         guard format.sampleRate > 0 else { throw ListenerError.noMicrophone }
         nonisolated(unsafe) let sinks = channels.map(\.request)
@@ -99,8 +102,10 @@ final class SpeechListener {
             channel.task = channel.recognizer.recognitionTask(with: channel.request) {
                 @Sendable [weak self] result, error in
                 guard let self else { return }
-                let text = result?.bestTranscription.formattedString
                 let isFinal = result?.isFinal ?? false
+                let text = result.map {
+                    isFinal ? Self.confidentText($0.bestTranscription) : $0.bestTranscription.formattedString
+                }
                 let confidence = result.map { Self.averageConfidence($0.bestTranscription) } ?? 0
                 let failed = error != nil
                 onMain {
@@ -125,7 +130,9 @@ final class SpeechListener {
         guard result != nil, channels.indices.contains(index) else { return }
         let channel = channels[index]
 
-        if let text, !text.isEmpty, text != channel.text {
+        if isFinal, let text {
+            channel.text = text                          // final, noise words removed (may be empty)
+        } else if let text, !text.isEmpty, text != channel.text {
             channel.text = text
             if !isFinishing {
                 // Restart the end-of-speech countdown whenever any language hears a new word
@@ -207,6 +214,33 @@ final class SpeechListener {
             }
             return nil
         }
+    }
+
+    /// Voice processing: echo cancellation, noise suppression, automatic gain.
+    /// If the device refuses, listening continues without it.
+    private func enableVoiceProcessing(on input: AVAudioInputNode) {
+        guard AppConfig.Listening.voiceProcessing, !input.isVoiceProcessingEnabled else { return }
+        do {
+            try input.setVoiceProcessingEnabled(true)
+            input.isVoiceProcessingAGCEnabled = true
+            input.isVoiceProcessingBypassed = false
+        } catch {
+            print("Voice processing unavailable:", error)
+        }
+    }
+
+    /// The final transcription without words below AppConfig.Listening.minWordConfidence.
+    /// Works on character ranges, so Chinese (no spaces between words) stays intact.
+    private nonisolated static func confidentText(_ transcription: SFTranscription) -> String {
+        let minimum = AppConfig.Listening.minWordConfidence
+        let text = NSMutableString(string: transcription.formattedString)
+        for segment in transcription.segments.reversed()
+        where segment.confidence > 0 && segment.confidence < minimum {
+            text.replaceCharacters(in: segment.substringRange, with: "")
+        }
+        return (text as String)
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
     }
 
     private nonisolated static func averageConfidence(_ transcription: SFTranscription) -> Float {
