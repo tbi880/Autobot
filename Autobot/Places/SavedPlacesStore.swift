@@ -66,9 +66,55 @@ final class SavedPlacesStore: ObservableObject {
     /// The saved place whose name appears in what was said. Longer names win,
     /// so "mum's home" beats "home".
     func place(mentionedIn text: String) -> SavedPlace? {
-        places
+        let exactMatch = places
             .filter { $0.isMentioned(in: text) }
             .max { SavedPlace.normalize($0.name).count < SavedPlace.normalize($1.name).count }
+        if let exactMatch { return exactMatch }
+        return fuzzyMatch(for: text)
+    }
+
+    private func fuzzyMatch(for text: String) -> SavedPlace? {
+        let spoken = SavedPlace.normalize(text)
+        guard !spoken.isEmpty else { return nil }
+
+        let candidates = places.compactMap { place -> (place: SavedPlace, score: Double)? in
+            let name = SavedPlace.normalize(place.name)
+            guard !name.isEmpty else { return nil }
+            let distance = Self.levenshteinDistance(spoken, name)
+            guard (1...2).contains(distance) else { return nil }
+            let maxLength = max(spoken.count, name.count)
+            guard maxLength > 0 else { return nil }
+            let score = 1 - (Double(distance) / Double(maxLength))
+            return (place, score)
+        }
+
+        return candidates.max { lhs, rhs in
+            if lhs.score == rhs.score {
+                return SavedPlace.normalize(lhs.place.name).count < SavedPlace.normalize(rhs.place.name).count
+            }
+            return lhs.score < rhs.score
+        }?.place
+    }
+
+    private static func levenshteinDistance(_ left: String, _ right: String) -> Int {
+        let leftChars = Array(left)
+        let rightChars = Array(right)
+        guard !leftChars.isEmpty else { return rightChars.count }
+        guard !rightChars.isEmpty else { return leftChars.count }
+
+        var previousRow = Array(0...rightChars.count)
+        for (leftIndex, leftChar) in leftChars.enumerated() {
+            var currentRow = [leftIndex + 1]
+            currentRow.reserveCapacity(rightChars.count + 1)
+            for (rightIndex, rightChar) in rightChars.enumerated() {
+                let insertion = currentRow[rightIndex] + 1
+                let deletion = previousRow[rightIndex + 1] + 1
+                let substitution = previousRow[rightIndex] + (leftChar == rightChar ? 0 : 1)
+                currentRow.append(min(insertion, deletion, substitution))
+            }
+            previousRow = currentRow
+        }
+        return previousRow[rightChars.count]
     }
 
     // MARK: Storage
