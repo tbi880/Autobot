@@ -58,8 +58,9 @@ final class SpeechListener {
 
     /// Ask once at launch, so the prompts never appear while driving.
     static func requestPermissions() {
-        SFSpeechRecognizer.requestAuthorization { @Sendable _ in }
-        AVAudioApplication.requestRecordPermission { @Sendable _ in }
+        Task.detached(priority: .utility) {
+            _ = await ensureAuthorized()
+        }
     }
 
     static var isAuthorized: Bool {
@@ -71,7 +72,7 @@ final class SpeechListener {
 
     /// Returns what each language heard (empty if nothing was said).
     func listen() async -> [Transcript] {
-        guard Self.isAuthorized else { return [] }
+        guard await Self.ensureAuthorized() else { return [] }
         channels = Self.makeChannels()
         guard !channels.isEmpty else { return [] }
         isFinishing = false
@@ -263,5 +264,50 @@ final class SpeechListener {
 
     private enum ListenerError: Error {
         case noMicrophone
+    }
+}
+
+// MARK: - Permission helpers
+
+private extension SpeechListener {
+
+    static func ensureAuthorized() async -> Bool {
+        async let speech = ensureSpeechAuthorization()
+        async let record = ensureRecordPermission()
+        return await speech && record
+    }
+
+    static func ensureSpeechAuthorization() async -> Bool {
+        switch SFSpeechRecognizer.authorizationStatus() {
+        case .authorized:
+            return true
+        case .denied, .restricted:
+            return false
+        case .notDetermined:
+            return await withCheckedContinuation { continuation in
+                SFSpeechRecognizer.requestAuthorization { @Sendable status in
+                    continuation.resume(returning: status == .authorized)
+                }
+            }
+        @unknown default:
+            return false
+        }
+    }
+
+    static func ensureRecordPermission() async -> Bool {
+        switch AVAudioApplication.shared.recordPermission {
+        case .granted:
+            return true
+        case .denied:
+            return false
+        case .undetermined:
+            return await withCheckedContinuation { continuation in
+                AVAudioApplication.requestRecordPermission { @Sendable granted in
+                    continuation.resume(returning: granted)
+                }
+            }
+        @unknown default:
+            return false
+        }
     }
 }
