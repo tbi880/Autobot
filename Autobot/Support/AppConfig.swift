@@ -55,9 +55,10 @@ nonisolated enum AppConfig {
             ["zh-CN"],              // Mandarin
         ]
         /// Apple's voice processing on the microphone (as in FaceTime/phone calls): echo
-        /// cancellation (removes sound coming from the car speakers), noise suppression
-        /// (road/wind/fan noise) and automatic gain for speech.
-        static let voiceProcessing = true
+        /// cancellation, noise suppression and automatic gain.
+        /// OFF: on this setup the voice-processing unit failed to render ("vpio render err -1")
+        /// and no audio reached the recogniser, so nothing was recognised.
+        static let voiceProcessing = false
         /// In the final result, words recognised with less confidence than this (0…1) are dropped
         /// as background noise. 0 keeps everything.
         static let minWordConfidence: Float = 0.3
