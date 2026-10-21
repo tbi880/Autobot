@@ -45,7 +45,9 @@ final class SpeechListener {
         }
     }
 
-    private let engine = AVAudioEngine()
+    /// A fresh engine for every reply, torn down afterwards: a voice-processing engine left
+    /// behind keeps failing to render ("vpio render err -1") once the audio session moves on.
+    private var engine: AVAudioEngine?
     private var channels: [Channel] = []
     private var timers: [Task<Void, Never>] = []
     private var silenceTimer: Task<Void, Never>?
@@ -87,6 +89,8 @@ final class SpeechListener {
 
     private func start() throws {
         // Microphone -> every language's recogniser
+        let engine = AVAudioEngine()
+        self.engine = engine
         let input = engine.inputNode
         enableVoiceProcessing(on: input)                // before reading the format: it can change it
         let format = input.outputFormat(forBus: 0)
@@ -157,8 +161,7 @@ final class SpeechListener {
         isFinishing = true
         cancelTimers()
 
-        engine.stop()
-        engine.inputNode.removeTap(onBus: 0)
+        tearDownEngine()
         channels.forEach { $0.request.endAudio() }
 
         if channels.allSatisfy({ $0.text.isEmpty }) || channels.allSatisfy(\.isDone) {
@@ -172,10 +175,7 @@ final class SpeechListener {
         guard let continuation = result else { return }
         result = nil
         cancelTimers()
-        if engine.isRunning {
-            engine.stop()
-            engine.inputNode.removeTap(onBus: 0)
-        }
+        tearDownEngine()
         channels.forEach { $0.task?.cancel() }
 
         let transcripts = channels.compactMap { channel -> Transcript? in
@@ -213,6 +213,18 @@ final class SpeechListener {
                 }
             }
             return nil
+        }
+    }
+
+    /// Stops the microphone, switches voice processing off and drops the engine.
+    private func tearDownEngine() {
+        guard let engine else { return }
+        self.engine = nil
+        engine.stop()
+        let input = engine.inputNode
+        input.removeTap(onBus: 0)
+        if input.isVoiceProcessingEnabled {
+            try? input.setVoiceProcessingEnabled(false)
         }
     }
 
