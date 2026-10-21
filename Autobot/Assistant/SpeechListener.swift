@@ -92,7 +92,7 @@ final class SpeechListener {
         let engine = AVAudioEngine()
         self.engine = engine
         let input = engine.inputNode
-        enableVoiceProcessing(on: input)                // before reading the format: it can change it
+        enableVoiceProcessing(on: engine)               // before reading the format: it can change it
         let format = input.outputFormat(forBus: 0)
         guard format.sampleRate > 0 else { throw ListenerError.noMicrophone }
         nonisolated(unsafe) let sinks = channels.map(\.request)
@@ -230,12 +230,17 @@ final class SpeechListener {
 
     /// Voice processing: echo cancellation, noise suppression, automatic gain.
     /// If the device refuses, listening continues without it.
-    private func enableVoiceProcessing(on input: AVAudioInputNode) {
+    private func enableVoiceProcessing(on engine: AVAudioEngine) {
+        let input = engine.inputNode
         guard AppConfig.Listening.voiceProcessing, !input.isVoiceProcessingEnabled else { return }
         do {
             try input.setVoiceProcessingEnabled(true)
             input.isVoiceProcessingAGCEnabled = true
             input.isVoiceProcessingBypassed = false
+            // Voice processing runs input AND output together. With nothing on the output
+            // side it fails every render cycle ("vpio render err -1"), so give it a silent
+            // mixer to pull from (mainMixerNode connects itself to the output node).
+            engine.mainMixerNode.outputVolume = 0
         } catch {
             print("Voice processing unavailable:", error)
         }
