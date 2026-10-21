@@ -54,7 +54,10 @@ final class BootSequence: ObservableObject {
     var isHolding: Bool { phase == .booting && cap < 100 && progress >= cap - 0.01 }
 
     /// The lamp controller's own status ("Scanning for Pocket Link…", "Bluetooth is off…").
-    var lampStatus: String { lamp.status }
+    var lampStatus: String {
+        guard AppConfig.Testing.simulateBootConnections, lampConnected else { return lamp.status }
+        return "Connected: Pocket Link (simulated)"
+    }
 
     var statusText: String {
         if completedAt != nil { return "All systems go" }
@@ -83,12 +86,17 @@ final class BootSequence: ObservableObject {
         let sound = engineSound
         Task { await sound.play() }
 
-        lamp.$isReady.filter { $0 }.first()
-            .sink { [weak self] _ in self?.lampConnected = true }
-            .store(in: &subscriptions)
-        carPlay.$isConnected.filter { $0 }.first()
-            .sink { [weak self] _ in self?.carAudioConnected = true }
-            .store(in: &subscriptions)
+        if AppConfig.Testing.simulateBootConnections {
+            lampConnected = true
+            carAudioConnected = true
+        } else {
+            lamp.$isReady.filter { $0 }.first()
+                .sink { [weak self] _ in self?.lampConnected = true }
+                .store(in: &subscriptions)
+            carPlay.$isConnected.filter { $0 }.first()
+                .sink { [weak self] _ in self?.carAudioConnected = true }
+                .store(in: &subscriptions)
+        }
 
         runTask = Task { [weak self] in await self?.run() }
     }

@@ -84,6 +84,12 @@ nonisolated enum AppConfig {
         static let engineVolume: Float = 1.0
     }
 
+    enum Testing {
+        /// Test mode for the start screen: pretend lamp Bluetooth and CarPlay are both connected,
+        /// so boot progress can run straight to 100 % and continue to the normal dashboard flow.
+        static let simulateBootConnections = false
+    }
+
     enum Listening {
         /// Languages recognised at the same time. Each inner list is one language,
         /// its locales tried in order until one is available on this iPhone.
