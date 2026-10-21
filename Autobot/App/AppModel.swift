@@ -6,8 +6,14 @@
 //   DoorMonitor ──▶ DoorSafetyAlert ──scene (doorAlert)──▶ LightingArbiter
 //                                   └─"Door open detected"──▶ VoiceCoordinator
 //   LampController.isReady ┐
-//   CarPlayMonitor.isConnected ┴──▶ WelcomeAssistant (once per drive, via VoiceCoordinator)
+//   CarPlayMonitor.isConnected ┼──▶ WelcomeAssistant (once per drive, via VoiceCoordinator)
+//   BootSequence finished ─────┘
+//
+// Nothing starts until the ENGINE START button is pressed (ignite): then the lamp Bluetooth
+// search and CarPlay detection start together, and the start screen (BootSequence) follows
+// them. The first Welcome waits until the start screen has finished.
 
+import AVFoundation
 import Combine
 import SwiftUI
 
@@ -22,11 +28,13 @@ final class AppModel: ObservableObject {
     let lighting: LightingArbiter
     let doors: DoorMonitor
     let powerMode: PowerModeController
+    let boot: BootSequence
     private let voice: VoiceCoordinator
     private let doorAlert: DoorSafetyAlert
 
     private var hasStarted = false
     private var greetedThisDrive = false
+    private var bootFinished = false
     private var subscriptions = Set<AnyCancellable>()
 
     init() {
@@ -39,7 +47,8 @@ final class AppModel: ObservableObject {
 
         self.lamp = lamp
         self.speed = speed
-        self.carPlay = CarPlayMonitor()
+        let carPlay = CarPlayMonitor()
+        self.carPlay = carPlay
         let voice = VoiceCoordinator(audio: audio, speaker: speaker)
         let lighting = LightingArbiter()
         let doors = DoorMonitor()
@@ -53,6 +62,14 @@ final class AppModel: ObservableObject {
         self.backup = BackupManager(places: places)
         self.assistant = WelcomeAssistant(audio: audio, speaker: speaker, places: places,
                                           currentLocation: { speed.lastLocation })
+        self.boot = BootSequence(lamp: lamp, carPlay: carPlay, engineSound: EngineSoundPlayer(audio: audio))
+        boot.onFinished = { [weak self] in self?.bootDidFinish() }
+    }
+
+    /// ENGINE START pressed: start-up effects, and everything start() connects.
+    func ignite() {
+        boot.ignite()
+        start()
     }
 
     func start() {
@@ -60,6 +77,9 @@ final class AppModel: ObservableObject {
         hasStarted = true
 
         SpeechListener.requestPermissions()
+        lamp.start()
+        Self.warmUpSpeech()
+        assistant.prepare()
 
         lighting.onSceneChange = { [weak self] scene in self?.lamp.setDesired(scene) }
         powerMode.start()
@@ -85,15 +105,36 @@ final class AppModel: ObservableObject {
 
     // MARK: Wiring
 
-    /// Greets once per drive, when both the lamp and CarPlay are connected (in either order).
+    /// Greets once per drive, when both the lamp and CarPlay are connected (in either order),
+    /// after the start screen has finished.
     private func connectionChanged(lampReady: Bool, carPlayConnected: Bool) {
         guard carPlayConnected else {
             greetedThisDrive = false   // car disconnected: next connection is a new drive
             return
         }
-        guard lampReady, !greetedThisDrive else { return }
+        guard lampReady, bootFinished, !greetedThisDrive else { return }
         greetedThisDrive = true
         runWelcome()
+    }
+
+    /// Start screen done (engine sound already stopped). The Welcome may start once the
+    /// transition into the dashboard has played, so it doesn't make the animation stutter.
+    private func bootDidFinish() {
+        let delay = AppConfig.Boot.dashboardTransition + AppConfig.Boot.welcomeDelayAfterTransition
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard let self else { return }
+            self.bootFinished = true
+            self.connectionChanged(lampReady: self.lamp.isReady, carPlayConnected: self.carPlay.isConnected)
+        }
+    }
+
+    /// The first look-up of the installed voices can take a while; doing it in the background
+    /// during the start screen means the Welcome doesn't pay for it on the main thread.
+    private static func warmUpSpeech() {
+        Task.detached(priority: .utility) {
+            _ = AVSpeechSynthesisVoice.speechVoices().count
+        }
     }
 
     private func runWelcome() {

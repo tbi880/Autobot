@@ -91,7 +91,7 @@ final class CarPlayMonitor: ObservableObject {
         do {
             try AVAudioSession.sharedInstance().setCategory(
                 .playAndRecord, mode: .default,
-                options: [.mixWithOthers, .defaultToSpeaker, .allowBluetoothHFP])
+                options: [.mixWithOthers, .defaultToSpeaker, .allowBluetoothA2DP])
         } catch {
             print("CarPlay detection category error:", error)
         }

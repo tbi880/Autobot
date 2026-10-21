@@ -13,6 +13,10 @@ final class AudioSessionManager {
         case conversation
         /// Playback only; other apps stay paused until `release()`.
         case holdOthersPaused
+        /// Engine start-up sound on the start screen: plays alongside other apps' audio, out of
+        /// the current output (phone speaker, or the car under CarPlay). Record-capable, so
+        /// car-audio detection keeps working meanwhile.
+        case engineSound
     }
 
     /// Activating/deactivating the session can block for a while, so it runs off the main thread
@@ -62,6 +66,12 @@ final class AudioSessionManager {
                                     options: [.defaultToSpeaker, .allowBluetoothHFP])
         case .holdOthersPaused:
             try session.setCategory(.playback, mode: .voicePrompt, options: [])
+        case .engineSound:
+            // Same as CarPlayMonitor's detection category, so starting detection mid-sound
+            // doesn't change the route. No Bluetooth HFP: an active HFP (phone-call) link to
+            // headphones / the car takes Bluetooth radio time away from the lamp's BLE connection.
+            try session.setCategory(.playAndRecord, mode: .default,
+                                    options: [.mixWithOthers, .defaultToSpeaker, .allowBluetoothA2DP])
         }
     }
 }

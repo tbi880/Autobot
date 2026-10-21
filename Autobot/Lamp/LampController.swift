@@ -46,8 +46,9 @@ final class LampController: NSObject, ObservableObject, CBCentralManagerDelegate
     }
     private var modeCheck: ModeCheck?
 
-    override init() {
-        super.init()
+    /// Turns on Bluetooth and starts looking for the lamp. Called when ENGINE START is pressed.
+    func start() {
+        guard central == nil else { return }
         central = CBCentralManager(delegate: self, queue: .main)
     }
 

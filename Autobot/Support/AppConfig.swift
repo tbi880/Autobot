@@ -47,6 +47,43 @@ nonisolated enum AppConfig {
         static let pollInterval: Duration = .seconds(1)
     }
 
+    /// Start screen: ENGINE START button, then the boot progress ring (BootSequence, BootView,
+    /// EngineSoundPlayer).
+    enum Boot {
+        /// Start-up timeline in seconds after the button is pressed. Sound, haptics and animation
+        /// all follow it: the starter cranks from `crankStart`, the engine fires at `catchTime`.
+        static let crankStart = 0.12
+        static let catchTime = 0.95
+        /// The button turns into the progress ring over this long, starting when the engine fires.
+        static let morphDuration = 0.8
+        /// The percentage starts counting this long after the press.
+        static let progressStart = 1.5
+        /// Progress speed in % per second.
+        /// 0 → 50 % always runs, even with nothing connected (faster if the lamp is already there);
+        /// 50 → 90 % needs the lamp; 90 → 100 % needs car audio (CarPlay).
+        static let rateToHalf = 9.0
+        static let rateToHalfLampReady = 16.0
+        static let rateToNinety = 14.0
+        static let rateToFull = 20.0
+        /// Within this many % of a point where it has to wait (50 or 90) the progress slows down,
+        /// so it eases in instead of stopping dead.
+        static let easeZone = 8.0
+        /// Pause at 100 % before the dashboard appears.
+        static let holdAtFull: Duration = .milliseconds(450)
+        /// Length of the fly-through-the-ring transition into the dashboard (seconds).
+        static let dashboardTransition = 1.1
+        /// The Welcome starts only after the transition (plus this margin), so starting the
+        /// voice, microphone and audio session doesn't make the animation stutter.
+        static let welcomeDelayAfterTransition = 0.25
+        /// The engine sound always plays at least this long (the whole start-up), even if car audio
+        /// is already connected; after that it stops as soon as car audio is connected.
+        static let minEngineSound = 3.6
+        /// Fade-out when the engine sound stops (seconds).
+        static let engineFadeOut = 0.8
+        /// Engine sound volume 0…1.
+        static let engineVolume: Float = 1.0
+    }
+
     enum Listening {
         /// Languages recognised at the same time. Each inner list is one language,
         /// its locales tried in order until one is available on this iPhone.
@@ -81,10 +118,18 @@ nonisolated enum AppConfig {
     }
 
     enum Music {
-        /// Shortcut: 1. Open URLs (Shortcut Input = Google Maps link)  2. QQ音乐 - 继续播放.
-        /// If it fails or is cancelled, the Google Maps link is opened again (x-error / x-cancel).
-        /// Used only when no music was playing when the car connected.
+        /// The two shortcuts below are used only when no music was playing when the car connected.
+        ///
+        /// Searching a place / just opening Google Maps:
+        ///   1. Open URLs (Shortcut Input = Google Maps link)  2. QQ音乐 - 继续播放
+        /// When it finishes, fails or is cancelled, Shortcuts opens the Google Maps link again.
         static let shortcutName = "Lamp Drive"
+        /// Saved place with an exact address:
+        ///   1. Google Maps - Directions (destination = Shortcut Input, the address text)
+        ///   2. QQ音乐 - 继续播放
+        /// When it finishes, Google Maps is brought back to the front; if it fails or is
+        /// cancelled, the navigation link is opened instead.
+        static let directionsShortcutName = "Lamp Drive Directions"
         /// How long to wait for the music to start before giving up on "The music is now continued".
         static let startTimeout: TimeInterval = 10
     }

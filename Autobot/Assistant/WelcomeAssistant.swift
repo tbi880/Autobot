@@ -49,6 +49,12 @@ final class WelcomeAssistant: ObservableObject {
 
     var understandingEngine: String { parser.engine.rawValue }
 
+    /// Gets Apple Intelligence ready during the start screen, so the first Welcome after
+    /// launch understands the reply as well as later ones.
+    func prepare() {
+        parser.prewarm()
+    }
+
     /// Entry point. Call through VoiceCoordinator so nothing else speaks at the same time.
     func run() async {
         if Self.isAppInForeground {
@@ -159,7 +165,19 @@ final class WelcomeAssistant: ObservableObject {
             return
         }
         status = "Starting QQ Music + Google Maps"
-        ShortcutsLauncher.run(named: AppConfig.Music.shortcutName, input: mapsURL)
+        if case .navigate(let place) = target {
+            // Saved place with an exact address: Google Maps' own Directions action
+            ShortcutsLauncher.run(named: AppConfig.Music.directionsShortcutName,
+                                  input: place.address,
+                                  onSuccess: MapsLauncher.bringToFrontURL ?? mapsURL,
+                                  onFailure: mapsURL)
+        } else {
+            // Search, or just open Google Maps: the shortcut opens the link
+            ShortcutsLauncher.run(named: AppConfig.Music.shortcutName,
+                                  input: mapsURL.absoluteString,
+                                  onSuccess: mapsURL,
+                                  onFailure: mapsURL)
+        }
 
         let musicStarted = await waitForOtherAudio(timeout: AppConfig.Music.startTimeout)
         var lines: [String] = []

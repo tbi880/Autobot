@@ -1,5 +1,6 @@
 // ShortcutsLauncher.swift
 // Runs a shortcut from the Shortcuts app.
+// (Which shortcut and what it gets: AppConfig.Music and WelcomeAssistant.startMusicAndOpenMaps.)
 //
 // Why: iOS gives apps no way to tell QQ Music to play. The Shortcuts app can, through
 // QQ Music's own "继续播放" action, so the welcome flow runs a user shortcut
@@ -7,22 +8,29 @@
 //   1. Open URLs  (Shortcut Input = the Google Maps link we pass in)
 //   2. QQ音乐 - 继续播放
 // Opening Maps first means a failing or slow QQ Music step can't leave you in Shortcuts.
-// As a safety net, x-error / x-cancel open the Google Maps link again.
+// Safety net: Shortcuts opens the Google Maps link again when the shortcut finishes
+// (x-success), fails (x-error) or is cancelled (x-cancel). So Google Maps always ends up
+// in front, even if step 1 got no input or QQ Music pulled itself / Shortcuts to the front.
+// (The shortcut can therefore also be just "QQ音乐 - 继续播放".)
 
 import UIKit
 
 enum ShortcutsLauncher {
 
-    /// shortcuts://x-callback-url/run-shortcut?name=…&input=text&text=…&x-error=…&x-cancel=…
-    static func run(named name: String, input: URL) {
-        guard let url = url(named: name, input: input) else { return }
+    /// shortcuts://x-callback-url/run-shortcut?name=…&input=text&text=…&x-success=…&x-error=…&x-cancel=…
+    /// - input: text handed to the shortcut as Shortcut Input
+    /// - onSuccess: opened by Shortcuts when the shortcut finishes
+    /// - onFailure: opened by Shortcuts when it fails or is cancelled
+    static func run(named name: String, input: String, onSuccess: URL, onFailure: URL) {
+        guard let name = encode(name),
+              let text = encode(input),
+              let success = encode(onSuccess.absoluteString),
+              let failure = encode(onFailure.absoluteString),
+              let url = URL(string: "shortcuts://x-callback-url/run-shortcut?name=\(name)"
+                            + "&input=text&text=\(text)"
+                            + "&x-success=\(success)&x-error=\(failure)&x-cancel=\(failure)")
+        else { return }
         UIApplication.shared.open(url)
-    }
-
-    private static func url(named name: String, input: URL) -> URL? {
-        guard let name = encode(name), let link = encode(input.absoluteString) else { return nil }
-        return URL(string: "shortcuts://x-callback-url/run-shortcut?name=\(name)"
-                   + "&input=text&text=\(link)&x-error=\(link)&x-cancel=\(link)")
     }
 
     /// Encodes everything except ASCII unreserved characters, so the Google Maps link

@@ -49,12 +49,22 @@ enum MapsLauncher {
     }
 
     /// One URL for the target (used when handing over to the Lamp Drive shortcut).
+    /// Navigation uses the app-only form of the link: when Shortcuts opens the plain https
+    /// link it ends up in Safari instead of Google Maps.
     static func url(for target: MapsTarget) -> URL? {
         switch target {
         case .none: return searchURL(nil)
         case .search(let text): return searchURL(text)
-        case .navigate(let place): return navigationLink(to: place.address)
+        case .navigate(let place):
+            guard let link = navigationLink(to: place.address) else { return nil }
+            return isGoogleMapsInstalled ? appOnly(link) : link
         }
+    }
+
+    /// Just brings the Google Maps app to the front, leaving whatever it shows (e.g. the route
+    /// the Directions shortcut opened). nil if Google Maps isn't installed.
+    static var bringToFrontURL: URL? {
+        isGoogleMapsInstalled ? URL(string: "comgooglemaps://") : nil
     }
 
     // MARK: URLs
@@ -73,6 +83,15 @@ enum MapsLauncher {
         guard let destination = encode(address) else { return nil }
         return URL(string: "https://www.google.com/maps/dir/?api=1&destination=\(destination)"
                    + "&travelmode=driving&dir_action=navigate")
+    }
+
+    /// The same Google Maps link, but opened by the Google Maps app itself (never Safari):
+    /// https://www.google.com/maps/… → comgooglemapsurl://www.google.com/maps/…
+    /// Keeps dir_action=navigate, so navigation still starts straight away.
+    private static func appOnly(_ link: URL) -> URL? {
+        guard var parts = URLComponents(url: link, resolvingAgainstBaseURL: false) else { return nil }
+        parts.scheme = "comgooglemapsurl"
+        return parts.url
     }
 
     /// Google Maps app scheme with a driving route to the address.

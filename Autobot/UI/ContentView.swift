@@ -1,10 +1,73 @@
 // ContentView.swift
-// Dashboard: connection status, speed, lamp state, assistant status, packet log.
+// Root: the start screen (BootView) first; once it reaches 100 % it flies through the ring into
+// the dashboard: connection status, speed, lamp state, assistant status, packet log.
 
+import Combine
 import SwiftUI
 
 struct ContentView: View {
     @StateObject private var app = AppModel()
+    @State private var showDashboard = false
+
+    var body: some View {
+        ZStack {
+            if showDashboard {
+                DashboardView(app: app)
+                    .transition(.dashboardReveal)
+            } else {
+                BootView(boot: app.boot, onIgnite: app.ignite)
+                    .transition(.bootExit)
+                    .zIndex(1)
+            }
+        }
+        .onReceive(app.boot.$phase) { phase in
+            guard phase == .finished, !showDashboard else { return }
+            withAnimation(.timingCurve(0.65, 0, 0.25, 1, duration: AppConfig.Boot.dashboardTransition)) {
+                showDashboard = true
+            }
+        }
+    }
+}
+
+// MARK: - Boot → dashboard transition
+
+/// The start screen zooms past the camera (as if driving through the ring) and fades out…
+private struct BootExit: ViewModifier {
+    let amount: Double
+
+    func body(content: Content) -> some View {
+        content
+            .scaleEffect(1 + 1.6 * amount)
+            .blur(radius: 10 * amount)
+            .opacity(1 - amount)
+    }
+}
+
+/// …while the dashboard settles in from slightly behind.
+private struct DashboardReveal: ViewModifier {
+    let amount: Double
+
+    func body(content: Content) -> some View {
+        content
+            .scaleEffect(1 - 0.08 * amount)
+            .opacity(1 - amount)
+    }
+}
+
+private extension AnyTransition {
+    static var bootExit: AnyTransition {
+        .modifier(active: BootExit(amount: 1), identity: BootExit(amount: 0))
+    }
+
+    static var dashboardReveal: AnyTransition {
+        .modifier(active: DashboardReveal(amount: 1), identity: DashboardReveal(amount: 0))
+    }
+}
+
+// MARK: - Dashboard
+
+private struct DashboardView: View {
+    @ObservedObject var app: AppModel
     @State private var showingPlaces = false
 
     var body: some View {
@@ -19,7 +82,6 @@ struct ContentView: View {
             PacketLogView(lamp: app.lamp)
         }
         .padding()
-        .onAppear { app.start() }
         .sheet(isPresented: $showingPlaces) {
             SavedPlacesView(store: app.places, backup: app.backup)
         }

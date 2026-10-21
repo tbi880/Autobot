@@ -19,15 +19,28 @@ final class DestinationParser {
         AppleIntelligenceDestinationParser.isAvailable ? .appleIntelligence : .keywords
     }
 
+    /// Kept alive until the first reply has been understood, so the model stays loaded.
+    private var warmUp: AnyObject?
+
+    /// Loads the on-device model ahead of time. Cold, the first answer after launch can take
+    /// longer than AppConfig.Listening.aiTimeout, and the reply then falls back to the keyword
+    /// rules (e.g. "回家" is searched instead of matching the saved place "home").
+    func prewarm() {
+        guard warmUp == nil else { return }
+        warmUp = AppleIntelligenceDestinationParser.prewarmedSession()
+    }
+
     /// Returns the place to search for, or nil if the reply isn't a destination.
     func destination(in reply: String) async -> String? {
         if engine == .appleIntelligence,
            let verdict = await AppleIntelligenceDestinationParser.parse(reply) {
+            warmUp = nil
             switch verdict {
             case .destination(let place): return place
             case .notDestination: return nil
             }
         }
+        warmUp = nil
         // No Apple Intelligence, or it failed / timed out
         return KeywordDestinationParser.parse(reply)
     }
@@ -64,6 +77,14 @@ nonisolated enum AppleIntelligenceDestinationParser {
         return false
     }
 
+    /// A session with the model and instructions already loaded into memory.
+    static func prewarmedSession() -> AnyObject? {
+        guard isAvailable else { return nil }
+        let session = LanguageModelSession(instructions: instructions)
+        session.prewarm()
+        return session
+    }
+
     /// Returns nil if Apple Intelligence failed or timed out.
     static func parse(_ reply: String) async -> DestinationVerdict? {
         let intent = await withTimeout(seconds: AppConfig.Listening.aiTimeout) {
@@ -84,6 +105,7 @@ nonisolated enum AppleIntelligenceDestinationParser {
 
 nonisolated enum AppleIntelligenceDestinationParser {
     static var isAvailable: Bool { false }
+    static func prewarmedSession() -> AnyObject? { nil }
     static func parse(_ reply: String) async -> DestinationVerdict? { nil }
 }
 
