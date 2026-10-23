@@ -22,7 +22,8 @@ nonisolated struct Transcript {
     let confidence: Float
 }
 
-enum SpeechDiagnosticLog {
+/// Callable from any thread (recognition callbacks, audio taps): it only reads a constant and prints.
+nonisolated enum SpeechDiagnosticLog {
     private static let startUptime = ProcessInfo.processInfo.systemUptime
 
     static func write(_ message: String) {

@@ -18,14 +18,19 @@ final class SavedPlacesStore: ObservableObject {
     // MARK: Editing
 
     /// Adds a new place, or updates the existing one with the same id.
+    /// If it is Home or Work, any other place loses that role.
     func save(_ place: SavedPlace) {
         let trimmed = SavedPlace(id: place.id,
                                  name: place.name.trimmingCharacters(in: .whitespacesAndNewlines),
-                                 address: place.address.trimmingCharacters(in: .whitespacesAndNewlines))
+                                 address: place.address.trimmingCharacters(in: .whitespacesAndNewlines),
+                                 role: place.role)
         if let index = places.firstIndex(where: { $0.id == trimmed.id }) {
             places[index] = trimmed
         } else {
             places.append(trimmed)
+        }
+        if let role = trimmed.role {
+            clearRole(role, exceptFor: trimmed.id)
         }
         persist()
     }
@@ -35,25 +40,79 @@ final class SavedPlacesStore: ObservableObject {
         persist()
     }
 
-    /// Replaces every place (restore from backup).
-    func replaceAll(with newPlaces: [SavedPlace]) {
-        places = newPlaces
+    func delete(_ place: SavedPlace) {
+        places.removeAll { $0.id == place.id }
         persist()
     }
 
+    /// Replaces every place (restore from backup).
+    func replaceAll(with newPlaces: [SavedPlace]) {
+        places = newPlaces
+        enforceUniqueRoles()
+        persist()
+    }
+
+    // MARK: Home / Work
+
+    var home: SavedPlace? { place(withRole: .home) }
+    var work: SavedPlace? { place(withRole: .work) }
+
+    func place(withRole role: SavedPlace.Role) -> SavedPlace? {
+        places.first { $0.role == role }
+    }
+
+    /// Makes the place Home or Work (taking the role from whichever place had it),
+    /// or clears its role with nil.
+    func setRole(_ role: SavedPlace.Role?, for place: SavedPlace) {
+        guard let index = places.firstIndex(where: { $0.id == place.id }) else { return }
+        places[index].role = role
+        if let role {
+            clearRole(role, exceptFor: place.id)
+        }
+        persist()
+    }
+
+    private func clearRole(_ role: SavedPlace.Role, exceptFor id: UUID) {
+        for index in places.indices where places[index].role == role && places[index].id != id {
+            places[index].role = nil
+        }
+    }
+
+    /// At most one place per role; the first one in the list keeps it.
+    private func enforceUniqueRoles() {
+        var taken = Set<SavedPlace.Role>()
+        for index in places.indices {
+            guard let role = places[index].role else { continue }
+            if !taken.insert(role).inserted {
+                places[index].role = nil
+            }
+        }
+    }
+
     /// Adds places from a backup. A place with the same name (ignoring case/punctuation)
-    /// takes the backup's address instead of being added twice.
+    /// takes the backup's address instead of being added twice. Home / Work set in the
+    /// backup move to the backup's place; a backup without them leaves yours as they are.
     func merge(_ incoming: [SavedPlace]) -> (added: Int, updated: Int) {
         var added = 0, updated = 0
         for place in incoming {
             let key = SavedPlace.normalize(place.name)
             if let index = places.firstIndex(where: { $0.id == place.id || SavedPlace.normalize($0.name) == key }) {
+                var changed = false
                 if places[index].address != place.address {
                     places[index].address = place.address
-                    updated += 1
+                    changed = true
                 }
+                if let role = place.role, places[index].role != role {
+                    places[index].role = role
+                    clearRole(role, exceptFor: places[index].id)
+                    changed = true
+                }
+                if changed { updated += 1 }
             } else {
                 places.append(place)
+                if let role = place.role {
+                    clearRole(role, exceptFor: place.id)
+                }
                 added += 1
             }
         }
@@ -103,13 +162,13 @@ final class SavedPlacesStore: ObservableObject {
         .place
     }
 
-    private static func compact(_ text: String) -> String {
+    private nonisolated static func compact(_ text: String) -> String {
         SavedPlace.normalize(text).filter { !$0.isWhitespace }
     }
 
     /// Levenshtein distance over extended grapheme clusters, so Chinese characters
     /// and composed accented letters each count as one character.
-    private static func editDistance(_ lhs: String, _ rhs: String) -> Int {
+    private nonisolated static func editDistance(_ lhs: String, _ rhs: String) -> Int {
         let left = Array(lhs)
         let right = Array(rhs)
         guard !left.isEmpty else { return right.count }
@@ -137,6 +196,7 @@ final class SavedPlacesStore: ObservableObject {
         guard let data = UserDefaults.standard.data(forKey: storageKey),
               let saved = try? JSONDecoder().decode([SavedPlace].self, from: data) else { return }
         places = saved
+        enforceUniqueRoles()
     }
 
     private func persist() {

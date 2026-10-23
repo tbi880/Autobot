@@ -12,7 +12,8 @@
 //   "app": { "name": "Autobot", "version": "1.0", "build": "1" },
 //   "data": {
 //     "savedPlaces": [
-//       { "id": "6F1C…", "name": "home", "address": "6 Neilon Place, Northcross, Auckland" }
+//       { "id": "6F1C…", "name": "home", "address": "6 Neilon Place, Northcross, Auckland",
+//         "role": "home" }                       // optional: "home" / "work"
 //     ]
 //   }
 // }

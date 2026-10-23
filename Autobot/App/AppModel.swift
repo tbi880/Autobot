@@ -98,6 +98,12 @@ final class AppModel: ObservableObject {
         runWelcome()
     }
 
+    /// Debug: the weekday-commute hand-over (navigation to Work + music) right now.
+    func testCommute() {
+        let assistant = self.assistant
+        voice.runConversation { await assistant.testCommute() }
+    }
+
     /// Debug: behave as if the speed crossed into `state` (buffer zone, announcement, lighting).
     func testPowerMode(_ state: LampState) {
         powerMode.simulate(state)

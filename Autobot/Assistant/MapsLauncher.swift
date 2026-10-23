@@ -33,22 +33,15 @@ enum MapsTarget: Equatable {
 
 enum MapsLauncher {
 
+    /// Opens Google Maps with the same link the music shortcut opens
+    /// (for navigation: the app-only link with dir_action=navigate, which starts the route).
     static func open(_ target: MapsTarget) {
-        if case .navigate(let place) = target {
-            // Universal link opens the Google Maps app and starts navigation;
-            // if that doesn't open the app, use its own URL scheme (shows the route).
-            guard let link = navigationLink(to: place.address) else { return }
-            UIApplication.shared.open(link, options: [.universalLinksOnly: true]) { opened in
-                guard !opened, let fallback = directionsURL(to: place.address) else { return }
-                UIApplication.shared.open(fallback)
-            }
-            return
-        }
         guard let url = url(for: target) else { return }
         UIApplication.shared.open(url)
     }
 
-    /// One URL for the target (used when handing over to the Lamp Drive shortcut).
+    /// One URL for the target: for navigation also the input of the "最近播放的歌" shortcut;
+    /// opened by the app directly if Shortcuts can't be opened.
     /// Navigation uses the app-only form of the link: when Shortcuts opens the plain https
     /// link it ends up in Safari instead of Google Maps.
     static func url(for target: MapsTarget) -> URL? {
@@ -59,12 +52,6 @@ enum MapsLauncher {
             guard let link = navigationLink(to: place.address) else { return nil }
             return isGoogleMapsInstalled ? appOnly(link) : link
         }
-    }
-
-    /// Just brings the Google Maps app to the front, leaving whatever it shows (e.g. the route
-    /// the Directions shortcut opened). nil if Google Maps isn't installed.
-    static var bringToFrontURL: URL? {
-        isGoogleMapsInstalled ? URL(string: "comgooglemaps://") : nil
     }
 
     // MARK: URLs
@@ -92,12 +79,6 @@ enum MapsLauncher {
         guard var parts = URLComponents(url: link, resolvingAgainstBaseURL: false) else { return nil }
         parts.scheme = "comgooglemapsurl"
         return parts.url
-    }
-
-    /// Google Maps app scheme with a driving route to the address.
-    private static func directionsURL(to address: String) -> URL? {
-        guard let destination = encode(address) else { return nil }
-        return URL(string: "comgooglemaps://?daddr=\(destination)&directionsmode=driving")
     }
 
     /// Needs "comgooglemaps" in LSApplicationQueriesSchemes (Autobot-Info.plist).

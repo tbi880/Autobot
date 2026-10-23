@@ -1,25 +1,53 @@
 // SavedPlace.swift
 // A place the driver saved by hand, e.g. name "home", address "6 Neilon Place, Northcross, Auckland".
+// One place can also be marked as Home and one as Work (used by the weekday-morning commute).
 
 import Foundation
 
 nonisolated struct SavedPlace: Identifiable, Codable, Equatable, Hashable {
+
+    /// What the place is for. At most one place is Home and one is Work (SavedPlacesStore keeps it so).
+    nonisolated enum Role: String, Codable, CaseIterable, Identifiable {
+        case home
+        case work
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .home: return "Home"
+            case .work: return "Work"
+            }
+        }
+
+        var systemImage: String {
+            switch self {
+            case .home: return "house.fill"
+            case .work: return "briefcase.fill"
+            }
+        }
+    }
+
     var id = UUID()
     var name: String
     var address: String
+    var role: Role?
 
-    init(id: UUID = UUID(), name: String, address: String) {
+    init(id: UUID = UUID(), name: String, address: String, role: Role? = nil) {
         self.id = id
         self.name = name
         self.address = address
+        self.role = role
     }
 
-    /// Lenient decoding for backups: "id" may be missing (e.g. a hand-written file).
+    /// Lenient decoding for backups: "id" and "role" may be missing (e.g. a hand-written file
+    /// or an older backup); an unknown role is ignored.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
         name = try c.decode(String.self, forKey: .name)
         address = try c.decode(String.self, forKey: .address)
+        role = try? c.decodeIfPresent(Role.self, forKey: .role)
     }
 
     /// True when the address looks like an exact street address ("6 Neilon Place, Northcross, Auckland"):

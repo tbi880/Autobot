@@ -6,17 +6,26 @@
 //   1. pause the music
 //   2. "Welcome back, Tim."
 //   3. weather briefing (6:00-11:59 only)
+//      Weekday commute (CommuteCheck: Mon-Fri 7:00-9:59, near the place marked Home, a place
+//      marked Work exists): no question - navigation to Work with the music handled as in step 8,
+//      announcing "Navigating to work." Otherwise:
 //   4. "Where is our destination today?"
 //   5. listen (ends 1.5 s after speaking; gives up after 10 s of silence)
-//   6. open Google Maps:
+//   6. Google Maps target:
 //      - a saved place was named and its address is exact -> start navigation to it
 //      - a saved place with a vague address, or any other place -> search it
 //      - nothing / not a destination -> just open the app
 //   7. "Navigating to home." or "Find these places, you can finalize…" (nothing if no destination)
-//   8. music:
-//      - was playing  -> let it resume, then "The music is now continued." (if it really resumed)
-//      - was not      -> run the "Lamp Drive" shortcut: opens Google Maps first, then QQ Music
-//                        "继续播放" (resume the last song); announce once the music is playing
+//   8. music + Google Maps:
+//      - was playing  -> open Google Maps, let the music resume, then "The music is now continued."
+//                        (if it really resumed)
+//      - was not      -> run a shortcut (AppConfig.Music):
+//                        navigation (commute, exact saved place) -> "最近播放的歌" with the
+//                          navigation link: opens it, then QQ Music 最近播放
+//                        search / no destination -> "Lamp Drive" with the search text:
+//                          QQ Music 继续播放, then Google Maps search (Maps ends up in front)
+//                        If iOS refuses to open Shortcuts, Google Maps is opened directly
+//                        (no music). Announce once the music is playing.
 //
 // App in the background or phone locked:
 //   only "Welcome back, Tim." (music is lowered, not paused)
@@ -30,6 +39,9 @@ final class WelcomeAssistant: ObservableObject {
     @Published private(set) var status = "Waiting for car"
     @Published private(set) var lastHeard: String?
     @Published private(set) var lastDestination: String?
+    /// Diagnostics: result of the weekday-commute check, and the last shortcut run (name + input).
+    @Published private(set) var lastCommuteCheck: String?
+    @Published private(set) var lastShortcut: String?
 
     private let audio: AudioSessionManager
     private let speaker: Speaker
@@ -37,6 +49,7 @@ final class WelcomeAssistant: ObservableObject {
     private let parser = DestinationParser()
     private let weather = WeatherService()
     private let places: SavedPlacesStore
+    private let commute: CommuteCheck
     private let currentLocation: @MainActor () -> CLLocation?
 
     init(audio: AudioSessionManager, speaker: Speaker, places: SavedPlacesStore,
@@ -44,6 +57,7 @@ final class WelcomeAssistant: ObservableObject {
         self.audio = audio
         self.speaker = speaker
         self.places = places
+        self.commute = CommuteCheck(places: places, currentLocation: currentLocation)
         self.currentLocation = currentLocation
     }
 
@@ -51,8 +65,10 @@ final class WelcomeAssistant: ObservableObject {
 
     /// Gets Apple Intelligence ready during the start screen, so the first Welcome after
     /// launch understands the reply as well as later ones.
+    /// Also looks up Home's coordinates for the commute check.
     func prepare() {
         parser.prewarm()
+        commute.prepare()
     }
 
     /// Entry point. Call through VoiceCoordinator so nothing else speaks at the same time.
@@ -79,6 +95,8 @@ final class WelcomeAssistant: ObservableObject {
     private func runConversation() async {
         let musicWasPlaying = audio.isOtherAudioPlaying
         let weatherBriefing = startWeatherBriefingIfMorning()   // fetched while we talk
+        let commute = self.commute
+        let commuteCheck = Task { await commute.workDestination() }   // checked while we talk
 
         await audio.activate(.conversation)                            // pauses the music
         status = "Greeting"
@@ -86,21 +104,64 @@ final class WelcomeAssistant: ObservableObject {
         if let briefing = await weatherBriefing?.value {
             await speaker.say(briefing)
         }
+
+        let work = await commuteCheck.value
+        lastCommuteCheck = commute.lastResult
+        if let work {
+            await driveToWork(work, musicWasPlaying: musicWasPlaying)
+            return
+        }
+
         await speaker.say(AppConfig.Phrases.askDestination)
         SpeechDiagnosticLog.write("WelcomeAssistant: destination prompt finished; starting speech listener")
 
         let target = await askForDestination()
 
+        await openMapsAndMusic(target, announcement: target.announcement,
+                               musicWasPlaying: musicWasPlaying)
+        status = "Done - " + target.summary
+    }
+
+    /// Step 8: Google Maps, and the music resumed (was playing) or started (wasn't).
+    /// Expects the audio session still active from the conversation (music paused).
+    private func openMapsAndMusic(_ target: MapsTarget, announcement: String?,
+                                  musicWasPlaying: Bool) async {
         if musicWasPlaying {
             await audio.activate(.holdOthersPaused)                    // mic off, music still paused
-            await openMaps(target)
+            await openMaps(target, announcement: announcement)
             await audio.release()                                      // music app may resume now
             await announceMusicIfResumed()
         } else {
             await audio.release()
-            await startMusicAndOpenMaps(target)
+            await startMusicAndOpenMaps(target, announcement: announcement)
         }
-        status = "Done - " + target.summary
+    }
+
+    /// Debug: the commute hand-over right now, ignoring the day, time and distance from Home
+    /// (needs a place marked Work). Call through VoiceCoordinator.
+    func testCommute() async {
+        guard let work = places.work else {
+            status = "Commute test: no saved place is marked Work"
+            return
+        }
+        guard Self.isAppInForeground else {
+            status = "Commute test: app not in foreground"
+            return
+        }
+        lastCommuteCheck = "Test: day, time and distance from Home not checked"
+        let musicWasPlaying = audio.isOtherAudioPlaying
+        await audio.activate(.conversation)                            // as in the Welcome: music paused
+        await driveToWork(work, musicWasPlaying: musicWasPlaying)
+    }
+
+    /// Weekday-morning commute from Home: no question, straight to Work (navigation link),
+    /// with the music handled as for any other destination.
+    private func driveToWork(_ work: SavedPlace, musicWasPlaying: Bool) async {
+        lastHeard = nil
+        lastDestination = "\(work.name) - \(work.address) (commute)"
+        await openMapsAndMusic(.navigate(work), announcement: AppConfig.Phrases.navigatingToWork,
+                               musicWasPlaying: musicWasPlaying)
+        status = "Done - commute: navigating to work"
     }
 
     /// Listens for the reply and decides what to do in Google Maps.
@@ -149,7 +210,7 @@ final class WelcomeAssistant: ObservableObject {
         return place.isExactAddress ? .navigate(place) : .search(place.address)
     }
 
-    private func openMaps(_ target: MapsTarget) async {
+    private func openMaps(_ target: MapsTarget, announcement: String?) async {
         guard Self.isAppInForeground else {
             status = "Skipped Google Maps (app no longer in foreground)"
             return
@@ -157,37 +218,32 @@ final class WelcomeAssistant: ObservableObject {
         status = "Opening Google Maps"
         MapsLauncher.open(target)
 
-        if let line = target.announcement {
+        if let line = announcement {
             try? await Task.sleep(for: .seconds(1))   // let Google Maps come up first
             await speaker.say(line)
         }
     }
 
-    /// No music was playing: the shortcut starts QQ Music, then opens Google Maps.
-    /// Both announcements wait until the music is actually playing (or the timeout passes).
-    private func startMusicAndOpenMaps(_ target: MapsTarget) async {
+    /// No music was playing: the QQ Music shortcut runs, then opens Google Maps itself.
+    /// `announcement` (where we're going) and "The music is now continued." wait until the
+    /// music is actually playing (or the timeout passes).
+    private func startMusicAndOpenMaps(_ target: MapsTarget, announcement: String?) async {
         guard Self.isAppInForeground, let mapsURL = MapsLauncher.url(for: target) else {
             status = "Skipped Google Maps (app no longer in foreground)"
             return
         }
         status = "Starting QQ Music + Google Maps"
-        if case .navigate(let place) = target {
-            // Saved place with an exact address: Google Maps' own Directions action
-            ShortcutsLauncher.run(named: AppConfig.Music.directionsShortcutName,
-                                  input: place.address,
-                                  onSuccess: MapsLauncher.bringToFrontURL ?? mapsURL,
-                                  onFailure: mapsURL)
-        } else {
-            // Search, or just open Google Maps: the shortcut opens the link
-            ShortcutsLauncher.run(named: AppConfig.Music.shortcutName,
-                                  input: mapsURL.absoluteString,
-                                  onSuccess: mapsURL,
-                                  onFailure: mapsURL)
-        }
+        let (name, input) = Self.shortcut(for: target, mapsURL: mapsURL)
+        let outcome = await playMusicThenOpenMaps(shortcut: name, input: input, mapsURL: mapsURL)
+        lastShortcut = "\(name) <- " + (input.map { "\"\($0)\"" } ?? "no input") + ": \(outcome)"
+        SpeechDiagnosticLog.write("WelcomeAssistant: shortcut " + (lastShortcut ?? ""))
 
+        // Let the shortcut bring Google Maps up first (music that was only paused by us
+        // resumes almost at once, so don't announce before the hand-over has started)
+        try? await Task.sleep(for: .seconds(1))
         let musicStarted = await waitForOtherAudio(timeout: AppConfig.Music.startTimeout)
         var lines: [String] = []
-        if let line = target.announcement { lines.append(line) }
+        if let line = announcement { lines.append(line) }
         if musicStarted { lines.append(AppConfig.Phrases.musicContinued) }
         guard !lines.isEmpty else { return }
 
@@ -196,6 +252,37 @@ final class WelcomeAssistant: ObservableObject {
             await speaker.say(line)
         }
         await audio.release()
+    }
+
+    /// Which shortcut, and its input:
+    /// - navigation (commute, saved place with an exact address): the navigation link, so the
+    ///   shortcut opens it first (the route starts by itself) and then starts QQ Music
+    /// - search: the text, for Lamp Drive's Google Maps Search action (Maps ends up in front)
+    /// - no destination: Lamp Drive without input (it just opens Google Maps)
+    private static func shortcut(for target: MapsTarget, mapsURL: URL) -> (name: String, input: String?) {
+        switch target {
+        case .navigate: return (AppConfig.Music.navigateShortcutName, mapsURL.absoluteString)
+        case .search(let text): return (AppConfig.Music.searchShortcutName, text)
+        case .none: return (AppConfig.Music.searchShortcutName, nil)
+        }
+    }
+
+    /// Runs the shortcut, which starts QQ Music and opens Google Maps itself. If iOS refuses to
+    /// open Shortcuts, Google Maps is opened directly instead (no music), so Maps always opens.
+    /// Returns what happened, for the dashboard and the diagnostic log.
+    private func playMusicThenOpenMaps(shortcut name: String, input: String?, mapsURL: URL) async -> String {
+        if let url = ShortcutsLauncher.url(named: name, input: input),
+           await ShortcutsLauncher.open(url) {
+            return "opened"
+        }
+        let canOpen = ShortcutsLauncher.canOpenShortcuts
+        SpeechDiagnosticLog.write("WelcomeAssistant: iOS refused to open Shortcuts "
+                                  + "(app state \(UIApplication.shared.applicationState.rawValue), "
+                                  + "canOpenURL(shortcuts://) = \(canOpen))")
+        guard Self.isAppInForeground else { return "Shortcuts refused; app left the foreground" }
+        let mapsOpened = await UIApplication.shared.open(mapsURL, options: [:])
+        return "Shortcuts REFUSED (canOpenURL(shortcuts://) = \(canOpen)); no music; "
+            + "Google Maps opened directly: " + (mapsOpened ? "yes" : "NO")
     }
 
     private func waitForOtherAudio(timeout: TimeInterval) async -> Bool {

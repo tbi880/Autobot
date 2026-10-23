@@ -76,7 +76,8 @@ private struct DashboardView: View {
             SpeedView(speed: app.speed)
             LampStateView(lighting: app.lighting, lamp: app.lamp, powerMode: app.powerMode)
             DoorTestView(doors: app.doors)
-            AssistantView(assistant: app.assistant, onTest: app.testWelcome)
+            AssistantView(assistant: app.assistant, onTest: app.testWelcome,
+                          onTestCommute: app.testCommute)
             PowerModeTestView(powerMode: app.powerMode, onTest: app.testPowerMode)
             SavedPlacesButton(store: app.places) { showingPlaces = true }
             PacketLogView(lamp: app.lamp)
@@ -201,12 +202,16 @@ private struct DoorTestView: View {
 private struct AssistantView: View {
     @ObservedObject var assistant: WelcomeAssistant
     let onTest: () -> Void
+    let onTestCommute: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
                 Text("Assistant").font(.headline)
                 Spacer()
+                Button("Test commute", action: onTestCommute)
+                    .font(.caption)
+                    .buttonStyle(.bordered)
                 Button("Test welcome", action: onTest)
                     .font(.caption)
                     .buttonStyle(.bordered)
@@ -217,6 +222,13 @@ private struct AssistantView: View {
             }
             if let destination = assistant.lastDestination {
                 Text("Destination: \(destination)").font(.caption.bold())
+            }
+            if let commute = assistant.lastCommuteCheck {
+                Text(commute).font(.caption)
+            }
+            if let shortcut = assistant.lastShortcut {
+                Text("Shortcut: \(shortcut)").font(.caption)
+                    .textSelection(.enabled)
             }
             Text("Understanding: \(assistant.understandingEngine)")
                 .font(.caption2)

@@ -1,36 +1,44 @@
 // ShortcutsLauncher.swift
 // Runs a shortcut from the Shortcuts app.
-// (Which shortcut and what it gets: AppConfig.Music and WelcomeAssistant.startMusicAndOpenMaps.)
+// (Which shortcut and what it gets: AppConfig.Music and WelcomeAssistant.shortcut(for:).)
 //
 // Why: iOS gives apps no way to tell QQ Music to play. The Shortcuts app can, through
-// QQ Music's own "继续播放" action, so the welcome flow runs a user shortcut
-// (AppConfig.Music.shortcutName) with two steps, Google Maps first:
-//   1. Open URLs  (Shortcut Input = the Google Maps link we pass in)
-//   2. QQ音乐 - 继续播放
-// Opening Maps first means a failing or slow QQ Music step can't leave you in Shortcuts.
-// Safety net: Shortcuts opens the Google Maps link again when the shortcut finishes
-// (x-success), fails (x-error) or is cancelled (x-cancel). So Google Maps always ends up
-// in front, even if step 1 got no input or QQ Music pulled itself / Shortcuts to the front.
-// (The shortcut can therefore also be just "QQ音乐 - 继续播放".)
+// QQ Music's own actions, so the welcome flow runs a user shortcut that starts QQ Music and
+// opens Google Maps itself. (An app can only open other apps while it is in the foreground,
+// so once Shortcuts is open the app can't open Google Maps any more.)
+//
+// The plain run-shortcut link is used: since iOS 26.5's security fixes, iOS refuses to open
+// the x-callback-url form (x-success / x-error / x-cancel) from another app
+// ("LSApplicationWorkspaceErrorDomain Code=115"), so the shortcut never ran.
 
 import UIKit
 
 enum ShortcutsLauncher {
 
-    /// shortcuts://x-callback-url/run-shortcut?name=…&input=text&text=…&x-success=…&x-error=…&x-cancel=…
-    /// - input: text handed to the shortcut as Shortcut Input
-    /// - onSuccess: opened by Shortcuts when the shortcut finishes
-    /// - onFailure: opened by Shortcuts when it fails or is cancelled
-    static func run(named name: String, input: String, onSuccess: URL, onFailure: URL) {
-        guard let name = encode(name),
-              let text = encode(input),
-              let success = encode(onSuccess.absoluteString),
-              let failure = encode(onFailure.absoluteString),
-              let url = URL(string: "shortcuts://x-callback-url/run-shortcut?name=\(name)"
-                            + "&input=text&text=\(text)"
-                            + "&x-success=\(success)&x-error=\(failure)&x-cancel=\(failure)")
-        else { return }
-        UIApplication.shared.open(url)
+    /// shortcuts://run-shortcut?name=…[&input=text&text=…]
+    /// - input: text handed to the shortcut as Shortcut Input (nil = none)
+    /// nil if the link couldn't be built.
+    static func url(named name: String, input: String? = nil) -> URL? {
+        guard let name = encode(name) else { return nil }
+        var link = "shortcuts://run-shortcut?name=\(name)"
+        if let input {
+            guard let text = encode(input) else { return nil }
+            link += "&input=text&text=\(text)"
+        }
+        return URL(string: link)
+    }
+
+    /// Whether iOS reports the Shortcuts app as able to open shortcuts:// links
+    /// (needs "shortcuts" in LSApplicationQueriesSchemes, which Autobot-Info.plist has).
+    static var canOpenShortcuts: Bool {
+        guard let url = URL(string: "shortcuts://") else { return false }
+        return UIApplication.shared.canOpenURL(url)
+    }
+
+    /// Opens the link and reports whether iOS actually opened the Shortcuts app.
+    /// (iOS can refuse, e.g. "LSApplicationWorkspaceErrorDomain Code=115", without any other sign.)
+    static func open(_ url: URL) async -> Bool {
+        await UIApplication.shared.open(url, options: [:])
     }
 
     /// Encodes everything except ASCII unreserved characters, so the Google Maps link

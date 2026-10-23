@@ -6,6 +6,11 @@ import AVFoundation   // AVSpeechSynthesisVoiceGender
 import Foundation
 
 nonisolated enum AppConfig {
+    
+    enum TestMode {
+        /// Simulates successful lamp Bluetooth and CarPlay connections at start-up.
+        static let enabled = true
+    }
 
     enum Driver {
         static let name = "Tim"
@@ -84,11 +89,6 @@ nonisolated enum AppConfig {
         static let engineVolume: Float = 1.0
     }
 
-    enum TestMode {
-        /// Simulates successful lamp Bluetooth and CarPlay connections at start-up.
-        static let enabled = false
-    }
-
     enum Listening {
         /// Languages recognised at the same time. Each inner list is one language,
         /// its locales tried in order until one is available on this iPhone.
@@ -122,19 +122,43 @@ nonisolated enum AppConfig {
         static let requestTimeout: TimeInterval = 4
     }
 
+    /// Weekday-morning commute (CommuteCheck): when the Welcome starts near the saved place marked
+    /// Home, on a weekday in these hours, the destination question is skipped and navigation to the
+    /// place marked Work starts through the Directions shortcut below.
+    enum Commute {
+        /// Local hours when it applies: 7:00 to 9:59.
+        static let hours = 7..<10
+        /// Days it applies (Calendar weekday: 1 = Sunday, 2 = Monday … 7 = Saturday): Monday to Friday.
+        static let weekdays: Set<Int> = [2, 3, 4, 5, 6]
+        /// Counts as "at Home" within this many metres of Home's address.
+        static let homeRadius: Double = 300
+        /// GPS fixes older than this (seconds) or less accurate than this (metres) are not trusted.
+        static let maxLocationAge: TimeInterval = 120
+        static let maxLocationAccuracy: Double = 200
+        /// Waits at most this long for a usable GPS fix (the check runs during the greeting).
+        static let locationTimeout: TimeInterval = 6
+        /// Looking up Home's coordinates from its address (only needed once per address; cached).
+        static let geocodeTimeout: TimeInterval = 5
+    }
+
     enum Music {
-        /// The two shortcuts below are used only when no music was playing when the car connected.
+        /// The shortcuts below start QQ Music and open Google Maps. They run only when no music was
+        /// playing when the car connected; if iOS refuses to open Shortcuts, the app opens
+        /// Google Maps directly (then without music).
         ///
-        /// Searching a place / just opening Google Maps:
-        ///   1. Open URLs (Shortcut Input = Google Maps link)  2. QQ音乐 - 继续播放
-        /// When it finishes, fails or is cancelled, Shortcuts opens the Google Maps link again.
-        static let shortcutName = "Lamp Drive"
-        /// Saved place with an exact address:
-        ///   1. Google Maps - Directions (destination = Shortcut Input, the address text)
-        ///   2. QQ音乐 - 继续播放
-        /// When it finishes, Google Maps is brought back to the front; if it fails or is
-        /// cancelled, the navigation link is opened instead.
-        static let directionsShortcutName = "Lamp Drive Directions"
+        /// Navigation (weekday commute, saved place with an exact address): the route starts by
+        /// itself, so it doesn't matter that QQ Music comes to the front afterwards.
+        /// Shortcut Input = Google Maps navigation link.
+        ///   1. Open (Shortcut Input)  -> Google Maps, starts the route
+        ///   2. QQ音乐 - 最近播放
+        static let navigateShortcutName = "最近播放的歌"
+        /// Everything else (a place to search, or no destination): you pick the result in
+        /// Google Maps, so Google Maps must end up in front. Shortcut Input = the search text
+        /// (no input when there's no destination).
+        ///   1. QQ音乐 - 继续播放
+        ///   2. If Shortcut Input has any value: Google Maps - Search (query = Shortcut Input)
+        ///      Otherwise: Open App - Google Maps
+        static let searchShortcutName = "Lamp Drive"
         /// How long to wait for the music to start before giving up on "The music is now continued".
         static let startTimeout: TimeInterval = 10
     }
@@ -144,6 +168,7 @@ nonisolated enum AppConfig {
         static let askDestination = "Where is our destination today?"
         static let foundPlaces = "Find these places, you can finalize the destination manually."
         static func navigating(to name: String) -> String { "Navigating to \(name)." }
+        static let navigatingToWork = "Navigating to work."
         static let musicContinued = "The music is now continued."
         static let powerOn = "Power Mode Activated"
         static let powerOff = "Power Mode Deactivated"

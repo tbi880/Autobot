@@ -1,5 +1,6 @@
 // SavedPlacesView.swift
-// List of saved places: add, edit (tap), delete (swipe).
+// List of saved places: add, edit (tap), delete (swipe left), set as Home / Work (swipe right,
+// or in the editor).
 
 import SwiftUI
 import UniformTypeIdentifiers
@@ -22,12 +23,30 @@ struct SavedPlacesView: View {
                     ForEach(store.places) { place in
                         Button { editing = place } label: { PlaceRow(place: place) }
                             .foregroundStyle(.primary)
+                            .swipeActions(edge: .leading, allowsFullSwipe: false) {
+                                ForEach(SavedPlace.Role.allCases) { role in
+                                    roleButton(role, for: place)
+                                }
+                            }
+                            .swipeActions(edge: .trailing) {
+                                Button(role: .destructive) { store.delete(place) } label: {
+                                    Label("Delete", systemImage: "trash")
+                                }
+                            }
+                            .contextMenu {
+                                ForEach(SavedPlace.Role.allCases) { role in
+                                    roleButton(role, for: place)
+                                }
+                            }
                     }
                     .onDelete { store.delete(at: $0) }
                 } footer: {
                     Text("Say the name when asked \"Where is our destination today?\". "
                          + "Exact street addresses start navigation right away; "
-                         + "others are searched so you can pick.")
+                         + "others are searched so you can pick.\n\n"
+                         + "Swipe right to mark one place as Home and one as Work. "
+                         + "On weekdays from 7 to 10 am, when the car connects near Home, "
+                         + "navigation to Work starts without asking.")
                 }
             }
             .overlay {
@@ -86,6 +105,18 @@ struct SavedPlacesView: View {
 
 private extension SavedPlacesView {
 
+    /// "Set as Home" / "Not Home" (and the same for Work).
+    func roleButton(_ role: SavedPlace.Role, for place: SavedPlace) -> some View {
+        let isSet = place.role == role
+        return Button {
+            store.setRole(isSet ? nil : role, for: place)
+        } label: {
+            Label(isSet ? "Not \(role.title)" : "Set as \(role.title)",
+                  systemImage: isSet ? "xmark" : role.systemImage)
+        }
+        .tint(role == .home ? .blue : .indigo)
+    }
+
     var isAskingImportMode: Binding<Bool> {
         Binding(get: { pendingBackup != nil }, set: { if !$0 { pendingBackup = nil } })
     }
@@ -113,7 +144,17 @@ private struct PlaceRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(place.name).font(.headline)
+            HStack(spacing: 6) {
+                Text(place.name).font(.headline)
+                if let role = place.role {
+                    Label(role.title, systemImage: role.systemImage)
+                        .font(.caption.bold())
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(Color.accentColor.opacity(0.15)))
+                        .foregroundStyle(Color.accentColor)
+                }
+            }
             Text(place.address).font(.subheadline).foregroundStyle(.secondary)
             Label(place.isExactAddress ? "Starts navigation" : "Searches (address not exact)",
                   systemImage: place.isExactAddress ? "location.fill" : "magnifyingglass")
@@ -139,6 +180,21 @@ private struct PlaceEditor: View {
                 Section("Name you'll say") {
                     TextField("e.g. home", text: $place.name)
                         .textInputAutocapitalization(.never)
+                }
+                Section {
+                    Picker("Use as", selection: $place.role) {
+                        Text("None").tag(SavedPlace.Role?.none)
+                        ForEach(SavedPlace.Role.allCases) { role in
+                            Text(role.title).tag(SavedPlace.Role?.some(role))
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                } header: {
+                    Text("Use as")
+                } footer: {
+                    Text("Only one place can be Home and one Work; choosing it here moves it from "
+                         + "the other place. Weekdays 7-10 am near Home: navigation to Work "
+                         + "starts without asking.")
                 }
                 Section {
                     TextField("e.g. 6 Neilon Place, Northcross, Auckland",

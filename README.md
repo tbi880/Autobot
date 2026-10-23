@@ -35,13 +35,24 @@ Runs once per drive when the lamp is connected and CarPlay audio is detected:
 
 1. pauses the music, says *"Welcome back, Tim."*
 2. 06:00–11:59: a one-sentence weather briefing (Open-Meteo, no API key)
+   - **Weekday commute**: Monday–Friday 07:00–09:59, within 300 m of the saved place marked
+     **Home**, with a place marked **Work**: no question. Navigation to Work starts and the music
+     is handled as in step 6, then *"Navigating to work."* and *"The music is now continued."*
+     (once it's playing). Steps 3–5 are skipped.
 3. asks *"Where is our destination today?"* and listens (English and Mandarin at once,
    on-device; stops 1.5 s after you finish, gives up after 10 s of silence)
 4. understands the reply with Apple Intelligence when available, keyword rules otherwise
 5. opens Google Maps:
    - a **saved place** with an exact street address → starts navigation
    - anything else → searches so you can pick
-6. resumes the music (or starts QQ Music through a shortcut if nothing was playing)
+6. music:
+   - was playing → it resumes after Google Maps opens
+   - nothing was playing → runs a shortcut that starts QQ Music and opens Google Maps:
+     - navigation (weekday commute, saved place with an exact address) → **最近播放的歌** with
+       the navigation link (the route starts by itself, then QQ Music comes up)
+     - search or no destination → **Lamp Drive** with the search text (QQ Music first, then
+       Google Maps search, so you can pick the result)
+     - if iOS refuses to open Shortcuts, Google Maps is opened directly (no music)
 
 If the phone is locked or the app is in the background, it only says the greeting.
 
@@ -50,6 +61,10 @@ Name + address pairs ("home" → "6 Example Street, Suburb, City"). Say the name
 supported language) to navigate there directly. If speech recognition gets one or two
 characters wrong, the closest matching saved name or address is used. Export / import as a
 versioned JSON backup.
+
+Swipe right on a place (or use *Use as* in the editor) to mark it as **Home** or **Work**; only
+one place can have each. Home's address is looked up on Apple Maps once and cached, for the
+weekday commute check. Hours, days and radius are in `AppConfig.Commute`.
 
 ## Requirements
 
@@ -64,10 +79,16 @@ versioned JSON backup.
    CarPlay don't work in the simulator). A free developer account works; the app must be
    re-signed every 7 days.
 2. Allow Bluetooth, Location ("While Using" is enough), Microphone and Speech Recognition.
-3. For "resume music when nothing was playing", create a shortcut in the Shortcuts app named
-   **Lamp Drive** that receives text/URL input, with two actions in this order:
-   *Open URLs* (Shortcut Input) → *QQ音乐 – 继续播放*. Google Maps opens first, so a failing QQ
-   Music step can't leave you in Shortcuts; on error the app's x-callback opens Maps again.
+3. For "start music when nothing was playing", create two shortcuts in the Shortcuts app
+   (names in `AppConfig.Music`):
+   - **最近播放的歌** (navigation; input = Google Maps navigation link):
+     *Open* (Shortcut Input) → *QQ音乐 – 最近播放*
+   - **Lamp Drive** (search / no destination; input = search text or nothing):
+     *QQ音乐 – 继续播放* → *If* Shortcut Input *has any value*: *Google Maps – Search*
+     (query = Shortcut Input), *Otherwise*: *Open App – Google Maps* → *End If*
+
+   The app runs them with plain `shortcuts://run-shortcut` links (no x-callback: since
+   iOS 26.5, iOS refuses to open x-callback Shortcuts links from other apps).
 4. Optional: in Settings → Accessibility → Spoken Content → Voices, download an enhanced or
    premium English (US) female voice (e.g. Zoe or Ava) for clearer voices.
 
@@ -109,7 +130,7 @@ Autobot/
 ├── Driving/     SpeedMonitor (GPS), PowerModeController (buffer zone), CarPlayMonitor
 ├── Voice/       AudioSessionManager, Speaker, MetallicVoiceEffect, VoiceCoordinator (queue)
 ├── Assistant/   WelcomeAssistant (flow), SpeechListener, DestinationParser,
-│                WeatherService, MapsLauncher, ShortcutsLauncher
+│                WeatherService, CommuteCheck, MapsLauncher, ShortcutsLauncher
 ├── Places/      SavedPlace, SavedPlacesStore
 ├── Backup/      AppBackup (JSON format), BackupManager
 ├── UI/          ContentView (dashboard), SavedPlacesView
@@ -132,7 +153,8 @@ languages, retry counts — is in `Support/AppConfig.swift`.
   "exportedAt": "2026-10-18T09:30:00Z",
   "app": { "name": "Autobot", "version": "1.0", "build": "1" },
   "data": {
-    "savedPlaces": [{ "id": "…", "name": "home", "address": "6 Example Street, Suburb, City" }]
+    "savedPlaces": [{ "id": "…", "name": "home", "address": "6 Example Street, Suburb, City",
+                      "role": "home" }]
   }
 }
 ```
