@@ -33,6 +33,7 @@ enum LampProtocol {
     /// ColorModelCmd(setup=true) -> 2E 8D 05 02 [rhythm<<4 | mode1] mode2 modeParam modeSpeed cs
     /// mode2: 0 = monocolor (steady), 1 = auto, 2 = breathe, 3 = strobe, 4/5 = rhythm
     /// modeParam for breathe: 0 multicolor, 1 red, 2 yellow, 3 green, 4 cyan, 5 blue, 6 purple
+    /// modeParam for strobe ("Burst Flash"): the same list plus 7 white (ColorModeItem.modeParamStrobe)
     static func setMode(byte1: UInt8, mode2: UInt8, param: UInt8, speed: UInt8) -> Data {
         pack(0x8D, [0x02, byte1, mode2, param, speed])
     }

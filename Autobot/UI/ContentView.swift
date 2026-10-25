@@ -87,6 +87,15 @@ private struct DashboardView: View {
             AssistantView(assistant: app.assistant, onTest: app.testWelcome,
                           onTestCommute: app.testCommute)
             PowerModeTestView(powerMode: app.powerMode, onTest: app.testPowerMode)
+            if AppConfig.Reverse.enabled {
+                ReverseTestView(reverse: app.reverse, onTest: app.testReverse)
+            }
+            if AppConfig.TurnSignals.enabled {
+                TurnSignalTestView(flash: app.turnSignals, obd: app.obd, onTest: app.testTurnSignal)
+            }
+            if AppConfig.Climate.enabled {        // hidden until there's an MS-CAN adapter
+                ClimateTestView(climate: app.climate, obd: app.obd, onTest: app.testClimate)
+            }
             SavedPlacesButton(store: app.places) { showingPlaces = true }
             PacketLogView(lamp: app.lamp)
         }
@@ -234,15 +243,20 @@ private struct SceneIndicator: View {
     }
 
     private var color: Color {
-        scene == .purpleSteady ? Color(red: 0.5, green: 0, blue: 1) : Color.red
+        switch scene {
+        case .purpleSteady: return Color(red: 0.5, green: 0, blue: 1)
+        case .blueBurstFlash: return .blue
+        case .yellowBurstFlash, .yellowBreathing: return .yellow
+        case .redBreathing, .redBurstFlash: return .red
+        }
     }
 
     private func opacity(at date: Date) -> Double {
         let t = date.timeIntervalSinceReferenceDate
         switch scene {
         case .purpleSteady: return 1
-        case .redBreathing: return 0.25 + 0.75 * (0.5 + 0.5 * sin(t * 2 * .pi / 2.5))   // ~2.5 s breath
-        case .redBurstFlash: return Int(t * 8) % 2 == 0 ? 1 : 0.1                       // fast flash
+        case .redBreathing, .yellowBreathing: return 0.25 + 0.75 * (0.5 + 0.5 * sin(t * 2 * .pi / 2.5))   // ~2.5 s breath
+        case .redBurstFlash, .blueBurstFlash, .yellowBurstFlash: return Int(t * 8) % 2 == 0 ? 1 : 0.1   // fast flash
         }
     }
 }
@@ -332,6 +346,115 @@ private struct PowerModeTestView: View {
         }
         .font(.caption)
         .buttonStyle(.bordered)
+    }
+}
+
+/// Reverse (ReverseLight): yellow gradient breathing while the lever is in R. The button stands in for
+/// the lever: tap = in R, tap again = back to the car's lever.
+private struct ReverseTestView: View {
+    @ObservedObject var reverse: ReverseLight
+    let onTest: () -> Void
+
+    var body: some View {
+        HStack {
+            Text("Reverse test").font(.headline)
+            if reverse.isOn {
+                Text(reverse.simulated ? "R (simulated)" : "R from the car")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+            Spacer()
+            Button("R") { onTest() }
+                .tint(reverse.simulated ? .yellow : .gray)
+        }
+        .font(.caption)
+        .buttonStyle(.bordered)
+    }
+}
+
+/// Turn signals and hazard lights (TurnSignalFlash): yellow burst flash while they flash. From the car
+/// (the indicator lamp frame on HS-CAN); the buttons stand in for the lever and the hazard switch: tap
+/// to start, tap again to stop.
+private struct TurnSignalTestView: View {
+    @ObservedObject var flash: TurnSignalFlash
+    @ObservedObject var obd: OBDAdapter
+    let onTest: (TurnSignals.State) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text("Turn signals").font(.headline)
+                Spacer()
+                Button("Left") { onTest(.left) }
+                    .tint(buttonTint(.left))
+                Button("Hazard") { onTest(.hazard) }
+                    .tint(buttonTint(.hazard))
+                Button("Right") { onTest(.right) }
+                    .tint(buttonTint(.right))
+            }
+            .font(.caption)
+            .buttonStyle(.bordered)
+            Text(statusText)
+                .font(.caption2)
+                .foregroundColor(flash.state.isOn ? .orange : .secondary)
+        }
+    }
+
+    private func buttonTint(_ side: TurnSignals.State) -> Color {
+        flash.simulated == side ? .yellow : .gray
+    }
+
+    /// What the indicators do now, and where that comes from.
+    private var statusText: String {
+        let now = flash.state.isOn ? "\(flash.state.label) flashing → yellow flash" : "Off"
+        if flash.simulated != nil { return now + " (simulated)" }
+        let frame = AppConfig.TurnSignals.frameID
+        switch obd.reportsTurnSignals {
+        case true?: return now + "  ·  from the car, \(frame): \(obd.turnSignalFrame ?? "--")"
+        case false?: return now + "  ·  frame \(frame) not heard on the bus: test buttons only (see the log)"
+        case nil: return now + "  ·  listened for once live data runs"
+        }
+    }
+}
+
+/// A/C temperature flash (ClimateTempFlash): a click of the dial colder → blue burst flash, warmer →
+/// red, until 3 s after the last click. These buttons stand in for the dial while the car's set
+/// temperature can't be read (the climate control unit is on MS-CAN, see README).
+private struct ClimateTestView: View {
+    @ObservedObject var climate: ClimateTempFlash
+    @ObservedObject var obd: OBDAdapter
+    let onTest: (ClimateTempFlash.Direction) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text("A/C temp test").font(.headline)
+                if let setPoint = climate.setPoint {
+                    Text(String(format: "%.1f °C", setPoint) + (climate.simulated ? " (simulated)" : ""))
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+                Button("A/C −") { onTest(.colder) }
+                    .tint(.blue)
+                Button("A/C +") { onTest(.warmer) }
+                    .tint(.red)
+            }
+            .font(.caption)
+            .buttonStyle(.bordered)
+            Text(unitText)
+                .font(.caption2)
+                .foregroundColor(.secondary)
+        }
+    }
+
+    /// Whether the car's set temperature could be read through this adapter.
+    private var unitText: String {
+        switch obd.reportsClimateUnit {
+        case true?: return "Climate control unit answers: its set temperature can be looked for"
+        case false?: return "Climate control unit not reachable (MS-CAN): test buttons only"
+        case nil: return "Climate control unit: checked when the adapter connects"
+        }
     }
 }
 

@@ -9,6 +9,12 @@
 //   OBDAdapter (BCM door status 726 22C150; DoorFinder fills in doors it learned) ──doorStates──▶ DoorMonitor
 //   DoorMonitor ──▶ DoorSafetyAlert ──scene (doorAlert)──▶ LightingArbiter
 //                                   └─"Door open detected"──▶ VoiceCoordinator
+//   A/C set temperature (dashboard test buttons for now: the climate control unit is on MS-CAN, out
+//   of the KW905's reach) ──▶ ClimateTempFlash ──scene (climateTemp: blue / red flash)──▶ LightingArbiter
+//   OBDAdapter (TCM gear 7E1 221E12: 3C = lever in R) ──sample──▶ ReverseLight
+//     ──scene (reverse: yellow breathing, Power Mode's level)──▶ LightingArbiter
+//   OBDAdapter (indicator lamp frame 09A, listened for on HS-CAN) ──turnSignal──▶ TurnSignalFlash
+//     ──scene (turnSignal: yellow flash, above Power Mode)──▶ LightingArbiter
 //   LampController.isReady ┐
 //   CarPlayMonitor.isConnected ┼──▶ WelcomeAssistant (once per drive, via VoiceCoordinator)
 //   BootSequence finished ─────┘
@@ -38,6 +44,9 @@ final class AppModel: ObservableObject {
     let mFinder: MFinder
     let doorFinder: DoorFinder
     let boot: BootSequence
+    let climate: ClimateTempFlash
+    let turnSignals: TurnSignalFlash
+    let reverse: ReverseLight
     private let voice: VoiceCoordinator
     private let doorAlert: DoorSafetyAlert
 
@@ -65,6 +74,9 @@ final class AppModel: ObservableObject {
         self.lighting = lighting
         self.doors = doors
         self.doorAlert = DoorSafetyAlert(doors: doors, lighting: lighting, voice: voice)
+        let climate = ClimateTempFlash(lighting: lighting)
+        climate.onLog = { [weak lamp] message in lamp?.addLog(message) }
+        self.climate = climate
         let obd = OBDAdapter()
         obd.onLog = { [weak lamp] message in lamp?.addLog(message) }
         let engine = EngineMonitor(obd: obd)
@@ -72,6 +84,12 @@ final class AppModel: ObservableObject {
         manual.onLog = { [weak lamp] message in lamp?.addLog(message) }
         self.obd = obd
         self.engine = engine
+        let turnSignals = TurnSignalFlash(obd: obd, lighting: lighting)
+        turnSignals.onLog = { [weak lamp] message in lamp?.addLog(message) }
+        self.turnSignals = turnSignals
+        let reverse = ReverseLight(obd: obd, lighting: lighting)
+        reverse.onLog = { [weak lamp] message in lamp?.addLog(message) }
+        self.reverse = reverse
         self.manual = manual
         let mFinder = MFinder(obd: obd)
         mFinder.onLog = { [weak lamp] message in lamp?.addLog(message) }
@@ -141,6 +159,22 @@ final class AppModel: ObservableObject {
     /// Debug: behave as if the Power Mode trigger switched to `state` (buffer zone, announcement, lighting).
     func testPowerMode(_ state: LampState) {
         powerMode.simulate(state)
+    }
+
+    /// Debug: as if the A/C temperature dial was turned one click colder or warmer.
+    func testClimate(_ direction: ClimateTempFlash.Direction) {
+        climate.simulateTurn(direction)
+    }
+
+    /// Debug: as if the indicators on that side (or the hazard lights) started flashing; the same
+    /// button again stops them.
+    func testTurnSignal(_ state: TurnSignals.State) {
+        turnSignals.simulate(state)
+    }
+
+    /// Debug: as if the lever went into R; the same button again hands back to the car's lever.
+    func testReverse() {
+        reverse.simulate()
     }
 
     // MARK: Wiring

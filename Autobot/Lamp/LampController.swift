@@ -74,6 +74,9 @@ final class LampController: NSObject, ObservableObject, CBCentralManagerDelegate
         case .purpleSteady: purpleSteady()
         case .redBreathing: redBreathing()
         case .redBurstFlash: redBurstFlash()
+        case .blueBurstFlash: blueBurstFlash()
+        case .yellowBurstFlash: yellowBurstFlash()
+        case .yellowBreathing: yellowBreathing()
         }
     }
 
@@ -84,10 +87,25 @@ final class LampController: NSObject, ObservableObject, CBCentralManagerDelegate
     /// SetupViewModel.sendModeCmd -> ColorModelCmd.copyAndUpdateModeSetup(mode2 = 2, modeParam = 1)
     /// modeParam 0 would be the colorful gradient, 6 the purple one.
     func redBreathing() {
-        let prepare: [() -> Data] = AppConfig.Lamp.setRedBeforeBreathing
-            ? [{ LampProtocol.setColor(0xFF, 0x00, 0x00) }]
+        breathing(gradient: 1, red: 0xFF, green: 0x00, blue: 0x00)
+    }
+
+    /// Yellow gradient breathing, while reversing (ReverseLight): Breathe -> "Yellow Gradient" (黄色渐变)
+    /// in the original app, ColorModelCmd.copyAndUpdateModeSetup(mode2 = 2, modeParam = 2), i.e.
+    /// 2E 8D 05 02 [rhythm<<4 | mode1] 02 02 [speed] cs. The breathing list
+    /// (ColorModeItem.modeParamBreatheGradient): 0 colourful, 1 red, 2 yellow, 3 green, 4 cyan, 5 blue,
+    /// 6 purple.
+    func yellowBreathing() {
+        breathing(gradient: 2, red: 0xFF, green: 0xFF, blue: 0x00)
+    }
+
+    /// Firmware breathing with one of the gradients above, the custom colour set to the same colour
+    /// first (AppConfig.Lamp.setColourBeforeBreathing).
+    private func breathing(gradient: UInt8, red: UInt8, green: UInt8, blue: UInt8) {
+        let prepare: [() -> Data] = AppConfig.Lamp.setColourBeforeBreathing
+            ? [{ LampProtocol.setColor(red, green, blue) }]
             : []
-        setModeVerified(mode2: 2, param: 1, prepare: prepare)
+        setModeVerified(mode2: 2, param: gradient, prepare: prepare)
     }
 
     /// Red Burst Flash (single-colour strobe), done by the lamp firmware.
@@ -95,6 +113,22 @@ final class LampController: NSObject, ObservableObject, CBCentralManagerDelegate
     /// (0 would be the multicolour flash). Brightness is left unchanged so restoring is exact.
     func redBurstFlash() {
         setModeVerified(mode2: 3, param: 1, prepare: [{ LampProtocol.setColor(0xFF, 0x00, 0x00) }])
+    }
+
+    /// Blue Burst Flash: the same firmware strobe with parameter 5 ("Blue Burst Flash" / 蓝色爆闪 in
+    /// the original app's list ColorModeItem.modeParamStrobe: 0 colourful, 1 red, 2 yellow, 3 green,
+    /// 4 cyan, 5 blue, 6 purple, 7 white). The custom colour is set to blue first, like red above.
+    func blueBurstFlash() {
+        setModeVerified(mode2: 3, param: 5, prepare: [{ LampProtocol.setColor(0x00, 0x00, 0xFF) }])
+    }
+
+    /// Yellow Burst Flash, while the turn signals or the hazard lights flash (TurnSignalFlash): the
+    /// same firmware strobe with parameter 2 ("Yellow Burst Flash" / 黄色爆闪 in the original app's
+    /// ColorModeItem.modeParamStrobe), i.e. 2E 8D 05 02 [rhythm<<4 | mode1] 03 02 [speed] cs.
+    /// The custom colour is set to yellow first (2E 8D 08 01 08 FF FF 00 FF FF 00 65), like red and
+    /// blue above.
+    func yellowBurstFlash() {
+        setModeVerified(mode2: 3, param: 2, prepare: [{ LampProtocol.setColor(0xFF, 0xFF, 0x00) }])
     }
 
     /// Purple steady: monocolor mode, purple, Zone 1 = 50, Zone 2 = 100
@@ -279,9 +313,10 @@ final class LampController: NSObject, ObservableObject, CBCentralManagerDelegate
             modeByte1 = b[4] & 0x7F
             modeSpeed = b[7]
             let names: [UInt8: String] = [0: "steady", 1: "auto", 2: "breathe", 3: "strobe"]
-            let gradients = ["colorful", "red", "yellow", "green", "cyan", "blue", "purple"]
+            // Breathing (2) and burst flash (3) share one colour list (breathing stops at purple).
+            let colours = ["colorful", "red", "yellow", "green", "cyan", "blue", "purple", "white"]
             let mode = names[b[5]] ?? "mode \(b[5])"
-            let param = (b[5] == 2 && Int(b[6]) < gradients.count) ? gradients[Int(b[6])] : "\(b[6])"
+            let param = ((b[5] == 2 || b[5] == 3) && Int(b[6]) < colours.count) ? colours[Int(b[6])] : "\(b[6])"
             addLog("   lamp mode: \(mode), param: \(param), speed: \(b[7])")
             checkModeReport(mode2: b[5], param: b[6])
         }

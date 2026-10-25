@@ -15,6 +15,9 @@
 // "410C" A B "0D" C back: rpm = (256 * A + B) / 4, speed = C km/h.
 // Standard OBD2 has no gear selector position (P/R/N/D/M); ManualShiftDetector works out manual
 // shifting from these values instead.
+//
+// The turn signals aren't a value to ask for but a frame the car broadcasts: the adapter listens to the
+// bus for a moment instead ("ATMA", see Listening to the bus below and TurnSignals.swift).
 
 import CoreBluetooth
 import Foundation
@@ -125,6 +128,60 @@ enum ELM327 {
     /// dropped like the mode-01 one if the adapter answers "?".
     static func request22(_ did: String, replyCount: Bool) -> String {
         "22" + did + (replyCount ? "1" : "")
+    }
+
+    // MARK: Is an ECU there? (UDS service 3E)
+
+    /// UDS "tester present": a harmless "are you there?" that changes nothing. A reachable ECU
+    /// answers "7E00", or refuses with "7F3E…"; either way it's there.
+    static let testerPresent = "3E00"
+
+    /// Whether a "3E00" reply came from an ECU (not "NO DATA", "CAN ERROR", …).
+    static func isTesterPresentAnswer(_ reply: String) -> Bool {
+        lines(reply).contains { $0.hasPrefix("7E00") || $0.hasPrefix("7F3E") }
+    }
+
+    // MARK: Listening to the bus (turn signals)
+
+    /// "Monitor all": shows every CAN frame that gets through the receive filter (ATCRA), one per line,
+    /// until any character is sent; the adapter throws that character away, finishes its line and
+    /// answers with the prompt.
+    static let monitorAll = "ATMA"
+    /// Stops monitoring: a space, which the adapter would also just ignore at the prompt (a lone CR
+    /// would repeat the last command, ATMA).
+    static let stopMonitoring = " "
+    /// CAN auto-formatting off while listening, so a broadcast frame's 8 data bytes show as they are
+    /// (with it on, the first byte is taken for an ISO-TP length byte: the frame gets cut short or
+    /// marked "<DATA ERROR"). On again for the requests; on is also the default after ATZ.
+    static let formattingOff = "ATCAF0"
+    static let formattingOn = "ATCAF1"
+    /// CAN IDs in front of every line while listening, when the receive filter can't be trusted.
+    static let headersOn = "ATH1"
+    static let headersOff = "ATH0"
+
+    /// Only frames with this 11-bit ID get through: "ATCRA09A".
+    static func receiveFilter(_ id: String) -> String { "ATCRA" + id }
+
+    /// A frame as shown while monitoring with spaces off: its data bytes ("0000200000000000"), after
+    /// the 11-bit ID when headers are on ("09A0000200000000000"). nil for anything else ("BUFFER FULL",
+    /// "STOPPED", "<DATA ERROR", a line cut short…).
+    static func monitoredFrame(_ line: String, headers: Bool) -> (id: String?, data: [UInt8])? {
+        let text = line.uppercased().filter { !$0.isWhitespace && $0 != prompt && $0 != "\0" }
+        guard !text.isEmpty, text.allSatisfy({ $0.isHexDigit }) else { return nil }
+        var digits = Array(text)
+        var id: String?
+        if headers {
+            guard digits.count > 3 else { return nil }
+            id = String(digits[0..<3])
+            digits.removeFirst(3)
+        }
+        guard (2...16).contains(digits.count), digits.count % 2 == 0 else { return nil }
+        var data: [UInt8] = []
+        for i in stride(from: 0, to: digits.count, by: 2) {
+            guard let byte = UInt8(String(digits[i...(i + 1)]), radix: 16) else { return nil }
+            data.append(byte)
+        }
+        return (id, data)
     }
 
     // MARK: Replies
