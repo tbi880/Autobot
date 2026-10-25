@@ -1,14 +1,15 @@
 // DoorMonitor.swift
 // Which doors / the boot are open.
-// For now it is driven by the test buttons; later the OBD2 (ECU) connection will call
-// setOpen(_:_:) with real data, and nothing else needs to change.
+// Driven by the car while OBDAdapter reads the doors (the BCM's door status 726 22C150, or doors
+// DoorFinder learned; AppModel calls setOpen(_:_:)), otherwise by the test buttons.
 
 import Combine
 import Foundation
 
 final class DoorMonitor: ObservableObject {
 
-    enum Opening: String, CaseIterable, Identifiable {
+    /// Nonisolated, so the built-in door table in AppConfig (nonisolated) can be keyed by it.
+    nonisolated enum Opening: String, CaseIterable, Identifiable {
         case frontLeft = "Driver"
         case frontRight = "Passenger"
         case rearLeft = "Rear L"

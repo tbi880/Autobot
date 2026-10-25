@@ -22,8 +22,8 @@ door state, and greets the driver with a voice assistant when the phone connects
     (GPS, 90 km/h)
 - **Door safety alert** (highest priority): any door or the boot open → *Red Burst Flash* and
   "Door open detected"; when everything is closed the previous lighting comes back.
-  Door state comes from the car once the [door finder](#doors-which-one-is-open) has found the
-  switches (test buttons until then).
+  Door state comes from the car: the body control module's door status (`726 22C150`), or a
+  door the [door finder](#doors-which-one-is-open) learned (test buttons while neither is read).
 - **Priority arbiter**: every lighting feature requests a scene with a priority, the highest
   one wins, and withdrawing a request restores the next one.
 - **Reliable commands**: one packet at a time, mode changes are read back and resent if the
@@ -194,13 +194,42 @@ separately (none ship in the APK), so the IDs come from measuring the car, not f
 
 ### Doors: which one is open
 
-The door switches are read by the body control module (BCM, `726`, answers from `72E`). Its replies
-are outside the `7E8`–`7EF` range an ELM327 listens to by default, so Autobot points the adapter at
-them (`ATCRA72E`) and back to automatic (`ATAR`) afterwards. Which DID and bit belong to which door
-isn't documented for this car, so the **door finder** (dashboard → *Door finder*; `DoorFinder`,
-`SignalDiff`) finds them once, the same way as the M flag:
+> **Currently off** (`AppConfig.Doors.enabled = false`; the door rows are hidden from the dashboard
+> and nothing door-related is read). On the 2015 CX-5 the BCM refuses `726 22C150` (`7F2231`), and
+> neither `C100`–`C1FF` nor `DA00`–`DAFF` holds a door: the door switches live on the MS-CAN body bus
+> (OBD pins 3/11), which the KW905 (HS-CAN only, pins 6/14) can't reach. The code below stays for an
+> adapter that can also talk MS-CAN (then the `0x43E` door frame could be monitored).
 
-1. *Scan* the body modules (parked, ignition on, ~2 min, once; `AppConfig.Doors.scanPlan`)
+The doors are read from the body control module (BCM, `726`, answers from `72E`). Its replies are
+outside the `7E8`–`7EF` range an ELM327 listens to by default, so Autobot points the adapter at them
+(`ATCRA72E`) and back to automatic (`ATAR`) afterwards.
+
+**Built in: the BCM's door-ajar status, `726 22C150`** (`AppConfig.Doors.builtIn`). This is the
+Ford/Mazda BCM layout from the [OBDb](https://github.com/OBDb) community database (listed for the
+CX-5, Mazda6, Mazda2, Focus, Explorer; confirmed there on the 2007 Mazda6, 2009/2012 Mazda2 and
+2012–18 Focus, not yet on a CX-5). The 2015 CX-5's BCM answers the Ford battery DIDs of the same
+family (`4027`–`402B`), so there's a good chance it has this one as well; one read in the car settles
+it. Bit set = open:
+
+| Byte | Bit | Opening |
+|---|---|---|
+| 1 | `0x10` | Boot (liftgate) |
+| 1 | `0x08` | Rear R |
+| 1 | `0x04` | Rear L |
+| 2 | `0x80` | Driver (the BCM knows which side that is — front right on a right-hand-drive car) |
+| 2 | `0x40` | Passenger |
+
+At every start Autobot reads it once and logs either `OBD: door status reported (726 22C150 = …)`
+or `… not answered (…)`. Then it's read about once a second (`AppConfig.Doors.pollEveryRounds`),
+`DoorMonitor` follows and the door alert runs on real data. Every change is logged with the raw
+value (`Doors: Driver open · 726 22C150 = 00 00 80`), and the *Doors* screen (dashboard → *Doors*)
+shows each door, the raw bytes and where each door comes from — open the doors one by one to check.
+
+**Door finder** (same screen; `DoorFinder`, `SignalDiff`), only for a door that isn't shown right or
+when the car doesn't answer `C150`. It finds a door's bit by comparison, the same way as the M flag:
+
+1. *Scan* the body control module (parked, ignition on, ~2 min, once; `AppConfig.Doors.scanPlan`,
+   the BCM's body-status block `C100`–`C1FF` around `C150`)
 2. Everything shut → *All closed*
 3. For each opening: open **only** that one → its button → close it (Driver, Passenger, Rear L,
    Rear R, Boot)
@@ -209,17 +238,14 @@ isn't documented for this car, so the **door finder** (dashboard → *Door finde
 For each opening, its snapshots are compared with **all the others** (it's closed in those, even
 where another door is open). What's left is that door's own switch: a bit every door sets (door-ajar
 lamp, dome light) is set in other doors' snapshots too and drops out, and so do drifting values. A
-door is saved once that's certain (the best candidate clearly ahead; at least two snapshots with it
-closed, one of them with another door open).
+door is saved once that's certain and then replaces the built-in signal for that door; *Forget
+learned doors* goes back to the built-in ones. *Export raw scan* writes every snapshot to a JSON file
+to share, so a bit can be worked out by hand.
 
-The 12V-battery values the body module also serves (`4027`–`402B`: age, charge, temperature, voltage,
-current) drift constantly and drowned the door bits on the first attempts, so they're kept out of the
-scan and ignored (`AppConfig.Doors.ignoredDIDs`). If a door still resists, *Export raw scan* writes
-every snapshot to a JSON file to share, so the exact bit can be set by hand.
-
-Then Autobot reads the doors about once a second (`AppConfig.Doors.pollEveryRounds`), `DoorMonitor`
-follows, and the door alert runs on real data. "Driver"/"Passenger" mean whichever doors you open for
-those steps (right-hand drive is fine).
+What the first attempts showed (exported scan, 17 snapshots): the BCM's `DA00`–`DAFF` block (58 DIDs)
+holds **no** door at all — only `DA13` (counts down by itself) and `DA1E` (battery voltage, which sags
+when the courtesy lamps come on) ever change. The 12V-battery DIDs (`4027`–`402B`) drift constantly
+and drowned the door bits before that. All of them are ignored (`AppConfig.Doors.ignoredDIDs`).
 
 ## Manual shifting detection
 
@@ -261,7 +287,7 @@ Autobot/
 ├── Lamp/        LampProtocol (packets), LampController (BLE), LampState (scenes)
 ├── Lighting/    LightingArbiter (priority between lighting features)
 ├── Vehicle/     OBDAdapter (OBD2 Bluetooth), ELM327 (adapter protocol), MazdaTCM (gearbox values),
-│                SignalDiff (finding on/off bits by comparison), DoorFinder (learns the door switches),
+│                SignalDiff (finding on/off bits by comparison), DoorFinder (learns a door's switch),
 │                DoorMonitor (door state), DoorSafetyAlert
 ├── Driving/     ManualShiftDetector (manual shifting → Power Mode), MFinder (learns the M flag),
 │                EngineMonitor (RPM only),
@@ -304,6 +330,6 @@ versions ignore sections they don't know.
 
 - Real lever over OBD2: P/R/N + gear from the TCM (`7E1 221E12`), M vs D from `7E1 221E03` bit
   `0x10` — **done**. R is read for future use (reverse lighting).
-- Real door / boot state from the body module, via the door finder — **built**; bonnet could be
-  added the same way.
+- Real door / boot state — **parked**: not reachable on this car's HS-CAN; needs an MS-CAN capable
+  adapter (door frame `0x43E`). Code and door finder kept, switched off (`AppConfig.Doors.enabled`).
 - More lighting features through `LightingArbiter`

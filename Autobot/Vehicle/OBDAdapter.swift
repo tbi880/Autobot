@@ -8,8 +8,9 @@
 //   -> ATZ + set-up -> "0100" until the engine ECU answers (ignition on)
 //   -> which PIDs does it have (0100, 0120, …, logged) -> does any ECU report the gear (PID A4)?
 //   -> which transmission values does the car answer (selector 1E23, TCM gear 1E12, 1E1F)?
+//   -> does the body control module answer its door status (726 22C150)?
 //   -> "010C0D" (RPM + speed), the pedal and the transmission in a loop -> sample
-//      (+ the learned door switches every few rounds -> doorStates)
+//      (+ the doors every few rounds -> doorStates)
 //
 // One command at a time: the next one goes out after the ">" prompt (or a timeout). Work that needs
 // the adapter for longer (MFinder's / DoorFinder's scans and snapshots) runs between two rounds via
@@ -66,15 +67,25 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     /// Live raw transmission values while AppConfig.OBD.selectorDiagnostics is on.
     @Published private(set) var selectorDiag: [SelectorDiag] = []
 
-    /// Which doors are open, from the learned door switches (empty until DoorFinder found them,
-    /// and again when live data stops). Feeds DoorMonitor.
+    /// Which doors are open (empty while unknown: no door signal, or live data stopped). Feeds
+    /// DoorMonitor.
     @Published private(set) var doorStates: [DoorMonitor.Opening: Bool] = [:]
+    /// Whether the body control module answers the built-in door status (AppConfig.Doors.builtIn,
+    /// 726 22C150); nil until checked.
+    @Published private(set) var reportsDoors: Bool?
+    /// The door signals read every few rounds: the built-in ones the car answers, with the doors
+    /// DoorFinder learned in their place.
+    @Published private(set) var doorSignals: [DoorMonitor.Opening: BitSignal] = [:]
+    /// The latest raw door values, "726 22C150" -> "00 00 80", for the doors screen.
+    @Published private(set) var doorRaw: [String: String] = [:]
 
     /// The M flag, read every round with the TCM gear: built in (AppConfig.Transmission.mFlag),
     /// or the one MFinder learned.
     var mFlag: BitSignal? = AppConfig.Transmission.mFlag
-    /// The door switches DoorFinder found, read every few rounds.
-    var doorSignals: [DoorMonitor.Opening: BitSignal] = [:]
+    /// The doors DoorFinder learned; each one replaces the built-in signal for that door.
+    var learnedDoorSignals: [DoorMonitor.Opening: BitSignal] = [:] {
+        didSet { updateDoorSignals() }
+    }
 
     /// Latest engine speed (r/min); nil while unknown.
     var rpm: Double? { sample?.rpm }
@@ -98,6 +109,7 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     private var selectorHeader: String?     // …and which one
     private var tcmGearAvailable = false    // the TCM answers "221E12" (P/R/N + gear)
     private var engagedGearAvailable = false // the PCM answers "221E1F" with a gear number
+    private var builtInDoorSignals: [DoorMonitor.Opening: BitSignal] = [:]   // the ones the car answered
     private var currentHeader: String?      // request header the adapter is set to (nil = unknown)
     private var currentReceive: String?     // receive address set with ATCRA (nil = automatic)
     private var receiveFilterUnsupported = false
@@ -216,12 +228,13 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
                 await discoverSupportedPIDs()
                 await checkGearReporting()
                 await checkTransmissionReporting()
+                await checkDoorReporting()
                 await readLiveData()                   // returns when the ECU stops answering
             }
             failPendingJobs()
             isReady = false
             setSample(nil)
-            if !doorStates.isEmpty { doorStates = [:] }      // unknown now
+            clearDoors()                                      // unknown now
             try? await Task.sleep(for: AppConfig.OBD.retryDelay)
         }
     }
@@ -368,6 +381,45 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         }
     }
 
+    /// Does the body control module answer the built-in door status (AppConfig.Doors.builtIn,
+    /// 726 22C150)? Each DID is read once to the end of the reply, so its real length is known (a
+    /// reply longer than one CAN frame is then always read to the end). Doors whose DID doesn't
+    /// answer are left to DoorFinder.
+    private func checkDoorReporting() async {
+        var working: [DoorMonitor.Opening: BitSignal] = [:]
+        var answered: [String] = []
+        if AppConfig.Doors.enabled, AppConfig.Doors.readBuiltIn {
+            let byDID = Dictionary(grouping: AppConfig.Doors.builtIn) { "\($0.value.header) 22\($0.value.did)" }
+            for key in byDID.keys.sorted() {
+                guard let group = byDID[key], let first = group.first?.value else { continue }
+                var reply: String?
+                if await useHeader(first.header) {
+                    reply = await send22(first.did, complete: true, timeout: AppConfig.OBD.probeTimeout)
+                }
+                let needed = (group.map { $0.value.byteIndex }.max() ?? 0) + 1
+                guard let data = reply.flatMap({ ELM327.payload22(first.did, in: $0) }), data.count >= needed else {
+                    logLine("OBD: door status (\(key)) not answered (\(ELM327.readable(reply))); "
+                            + "doors only from the door finder")
+                    continue
+                }
+                for (opening, signal) in group {
+                    var known = signal
+                    known.length = data.count
+                    working[opening] = known
+                }
+                doorRaw[key] = Self.hex(data)
+                answered.append("\(key) = \(Self.hex(data))")
+            }
+            await useHeader(baseHeader)
+        }
+        builtInDoorSignals = working
+        reportsDoors = AppConfig.Doors.enabled ? !working.isEmpty : nil
+        if !answered.isEmpty {
+            logLine("OBD: door status reported (" + answered.joined(separator: ", ") + "); reading the doors from it")
+        }
+        updateDoorSignals()
+    }
+
     /// RPM + speed, the pedal and the transmission, round after round, until the engine ECU stops
     /// answering. Work queued by runBetweenRounds runs between two rounds.
     private func readLiveData() async {
@@ -458,11 +510,12 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         return reply.flatMap { ELM327.payload22(signal.did, in: $0) }
     }
 
-    /// The learned door switches: each DID read once (doors often share one), grouped by ECU so the
-    /// header changes as little as possible, then every door's bit. A door whose value doesn't come
-    /// back keeps its last state.
+    /// The door signals: each DID read once (the built-in doors all share 726 22C150), grouped by
+    /// ECU so the header changes as little as possible, then every door's bit. A door whose value
+    /// doesn't come back keeps its last state. Changes go to the log with the raw value, so a door
+    /// on the wrong bit is easy to spot.
     private func readDoors() async {
-        let byDID = Dictionary(grouping: doorSignals) { "\($0.value.header) \($0.value.did)" }
+        let byDID = Dictionary(grouping: doorSignals) { "\($0.value.header) 22\($0.value.did)" }
         var replies: [String: [UInt8]] = [:]
         for key in byDID.keys.sorted() {
             guard let signals = byDID[key], let signal = signals.first?.value,
@@ -473,13 +526,56 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
                 replies[key] = data
             }
         }
+        var raw = doorRaw
+        for (key, data) in replies { raw[key] = Self.hex(data) }
+        if raw != doorRaw { doorRaw = raw }
+
         var states = doorStates
         for (opening, signal) in doorSignals {
-            if let isOpen = signal.isOn(replies["\(signal.header) \(signal.did)"]) {
+            if let isOpen = signal.isOn(replies["\(signal.header) 22\(signal.did)"]) {
                 states[opening] = isOpen
             }
         }
-        if states != doorStates { doorStates = states }
+        guard states != doorStates else { return }
+        logLine("Doors: " + Self.doorChange(from: doorStates, to: states) + " · "
+                + replies.keys.sorted().map { "\($0) = \(raw[$0] ?? "")" }.joined(separator: ", "))
+        doorStates = states
+    }
+
+    /// For the log: "Driver open", "Driver closed, Boot open"; the first reading lists what's open.
+    private static func doorChange(from old: [DoorMonitor.Opening: Bool],
+                                   to new: [DoorMonitor.Opening: Bool]) -> String {
+        if old.isEmpty {
+            let open = DoorMonitor.Opening.allCases.filter { new[$0] == true }.map(\.rawValue)
+            if !open.isEmpty { return open.joined(separator: ", ") + " open" }
+            return new.count == DoorMonitor.Opening.allCases.count ? "all closed" : "closed"
+        }
+        return DoorMonitor.Opening.allCases.compactMap { opening -> String? in
+            guard let isOpen = new[opening], isOpen != old[opening] else { return nil }
+            return opening.rawValue + (isOpen ? " open" : " closed")
+        }.joined(separator: ", ")
+    }
+
+    /// The built-in door signals the car answered, with the learned doors in their place.
+    private func updateDoorSignals() {
+        let signals = AppConfig.Doors.enabled
+            ? builtInDoorSignals.merging(learnedDoorSignals) { _, learned in learned }
+            : [:]                                                    // door detection off: read nothing
+        guard signals != doorSignals else { return }
+        doorSignals = signals
+        let known = doorStates.filter { signals[$0.key] != nil }     // a door no longer read is unknown
+        if known != doorStates { doorStates = known }
+    }
+
+    /// Live data stopped or the adapter went away: the doors are unknown now.
+    private func clearDoors() {
+        if !doorStates.isEmpty { doorStates = [:] }
+        if !doorRaw.isEmpty { doorRaw = [:] }
+    }
+
+    /// "00 00 80"
+    private static func hex(_ bytes: [UInt8]) -> String {
+        bytes.map { String(format: "%02X", $0) }.joined(separator: " ")
     }
 
     /// Optional raw diagnostic: every candidate transmission DID on both ECUs, as raw bytes.
@@ -627,7 +723,7 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         currentReceive = nil
         isReady = false
         setSample(nil)
-        if !doorStates.isEmpty { doorStates = [:] }
+        clearDoors()
     }
 
     // MARK: CBCentralManagerDelegate

@@ -6,7 +6,7 @@
 //                                                                         └─"Power Mode Activated/Deactivated"──▶ VoiceCoordinator
 //     (AppConfig.PowerMode.trigger: ManualShiftDetector, EngineMonitor (RPM only) or SpeedMonitor (GPS))
 //   SpeedMonitor (GPS) ──▶ speed on the dashboard, location for the weather briefing / commute check
-//   DoorFinder (finds the door switches once) ──▶ OBDAdapter ──doorStates──▶ DoorMonitor
+//   OBDAdapter (BCM door status 726 22C150; DoorFinder fills in doors it learned) ──doorStates──▶ DoorMonitor
 //   DoorMonitor ──▶ DoorSafetyAlert ──scene (doorAlert)──▶ LightingArbiter
 //                                   └─"Door open detected"──▶ VoiceCoordinator
 //   LampController.isReady ┐
@@ -157,9 +157,10 @@ final class AppModel: ObservableObject {
         runWelcome()
     }
 
-    /// Real door states from the car (the switches DoorFinder found): DoorMonitor follows them, so
-    /// the door alert works on real data. When they become unknown (live data stopped) everything
-    /// counts as closed again. Without learned switches the test buttons stay in charge.
+    /// Real door states from the car (the BCM's door status, or doors DoorFinder learned):
+    /// DoorMonitor follows them, so the door alert works on real data. When they become unknown
+    /// (live data stopped) everything counts as closed again. Without any door signal the test
+    /// buttons stay in charge.
     private func doorStatesChanged(_ states: [DoorMonitor.Opening: Bool]) {
         guard !states.isEmpty else {
             guard !obd.doorSignals.isEmpty else { return }

@@ -166,30 +166,64 @@ nonisolated enum AppConfig {
                                      valueOff: 0x00, valueOn: 0x10, length: 1)
     }
 
-    /// Real door state (DoorFinder, DoorMonitor): which door is open, read from the car.
+    /// Real door state (DoorMonitor): which door is open, read from the car.
     enum Doors {
-        /// DIDs scanned for the door switches: the body control module's switch-input block (726,
-        /// answers from 72E — DA05 is the brake switch, so door switches sit nearby). The 12V-battery
-        /// DIDs (4027–402B: age, charge, temperature, voltage, current) are deliberately left out —
-        /// they drift all the time and drown the door bits — and so is 720, which answered nothing on
-        /// this car. Widen it if a door isn't found; the scan result is kept until this changes.
+        /// Door detection on or off. Off for now: this car's body control module doesn't serve the
+        /// door switches on HS-CAN (726 22C150 answers 7F2231, C100–C1FF and DA00–DAFF hold no door);
+        /// they're on the MS-CAN body bus (OBD pins 3/11), which the KW905 doesn't connect to. While
+        /// off, nothing door-related is read from the car and the dashboard hides the door rows; the
+        /// code stays for an MS-CAN capable adapter later.
+        static let enabled = false
+
+        /// The body control module's door-ajar status: 726 DID C150 (replies from 72E), bit set =
+        /// open. It's the Ford/Mazda BCM layout in the OBDb community database (listed for the CX-5,
+        /// Mazda6, Mazda2, Focus, Explorer…; confirmed there on the 2007 Mazda6, 2009/2012 Mazda2 and
+        /// 2012–18 Focus, not yet on a CX-5). This car's BCM answers the Ford battery DIDs of the same
+        /// family (4027–402B), so there's a good chance it has this one too. OBDAdapter checks it
+        /// once per session (see the log) and uses it for every door DoorFinder hasn't learned
+        /// differently.
+        ///   byte 1: 0x10 boot (liftgate), 0x08 rear right, 0x04 rear left
+        ///   byte 2: 0x80 driver's door, 0x40 front passenger's door
+        /// The BCM reports the driver's door as such, so it goes to the opening labelled "Driver"
+        /// (the front right one on this right-hand-drive car, whatever the case is called).
+        static let builtIn: [DoorMonitor.Opening: BitSignal] = [
+            .frontLeft: bcmDoorBit(byte: 2, mask: 0x80),      // "Driver"
+            .frontRight: bcmDoorBit(byte: 2, mask: 0x40),     // "Passenger"
+            .rearLeft: bcmDoorBit(byte: 1, mask: 0x04),
+            .rearRight: bcmDoorBit(byte: 1, mask: 0x08),
+            .boot: bcmDoorBit(byte: 1, mask: 0x10),
+        ]
+        /// Read the built-in door status at all (off: only the doors DoorFinder learned).
+        static let readBuiltIn = true      // only while `enabled`
+
+        /// DIDs DoorFinder scans when a door has to be learned (the car doesn't answer the built-in
+        /// status, or a door shows wrong): the BCM's body-status block around C150. DA00–DAFF was
+        /// tried first and holds no door at all: of its 58 DIDs only DA13 (counts down by itself) and
+        /// DA1E (battery voltage, sags when the courtesy lamps come on) ever change. The scan result
+        /// is kept until this changes.
         static let scanPlan: [(header: String, ranges: [ClosedRange<Int>])] = [
-            ("726", [0xDA00...0xDAFF]),
+            ("726", [0xC100...0xC1FF]),
         ]
         /// The ECU that owns the door switches; its candidates are preferred.
         static let preferredHeader = "726"
-        /// Never a door switch, even if it slips into the scan: the 12V-battery values (drift) and the
-        /// brake switch (changes with the pedal, not a door).
+        /// Never a door switch, even if it slips into the scan: the 12V-battery values (4027–402B,
+        /// drift and drowned the door bits on the first tries), the brake switch (DA05), the counter
+        /// DA13 and the battery voltage DA1E.
         static let ignoredDIDs: Set<String> = [
-            "726 4027", "726 4028", "726 4029", "726 402A", "726 402B", "726 DA05",
+            "726 4027", "726 4028", "726 4029", "726 402A", "726 402B", "726 DA05", "726 DA13", "726 DA1E",
         ]
         /// Wait per DID while scanning (seconds).
         static let scanTimeout: TimeInterval = 0.6
         /// Every supported DID is read this many times per snapshot (in separate passes), so a value
         /// that drifts within a position shows up as unsteady and drops out.
         static let readsPerSnapshot = 3
-        /// Read the learned door values every this many rounds of live data (about 2 rounds a second).
+        /// Read the doors every this many rounds of live data (about 2 rounds a second).
         static let pollEveryRounds = 2
+
+        private static func bcmDoorBit(byte: Int, mask: UInt8) -> BitSignal {
+            BitSignal(header: "726", did: "C150", byteIndex: byte, mask: mask,
+                      valueOff: 0x00, valueOn: mask, length: 3)
+        }
     }
 
     /// The M finder (MFinder): finds the value that says "lever in M" on this car, once, by comparing

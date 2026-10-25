@@ -1,9 +1,11 @@
 // DoorFinder.swift
-// Finds each door's switch in the car's body modules by comparison, once, so DoorMonitor (and the
-// door alert) gets the real state of every door and the boot:
+// Learns a door's switch by comparison, for doors the built-in door status doesn't cover. Normally
+// every door comes straight from the body control module's door status (AppConfig.Doors.builtIn,
+// 726 22C150, checked by OBDAdapter at each start); this is the fallback when the car doesn't
+// answer that, or a door shows wrong:
 //
-//   1. Scan: which DIDs do the body control module (726) and the instrument cluster (720) answer?
-//      (AppConfig.Doors.scanPlan, about 2 minutes, done once and kept on the phone)
+//   1. Scan: which DIDs does the body control module (726) answer in AppConfig.Doors.scanPlan?
+//      (about 2 minutes, done once and kept on the phone)
 //   2. Snapshot "All closed": everything shut
 //   3. For each opening in turn: open only that one, Snapshot "<it> open", close it again
 //   4. One more "All closed" at the end
@@ -12,8 +14,8 @@
 // those, including the ones where another door is open). SignalDiff keeps the bits that are steady
 // in both groups and differ between them: that door's switch. A bit every door sets (door-ajar lamp,
 // interior light) is set in some "off" snapshots too, so it drops out. A door is saved once there
-// are two snapshots with it closed, at least one of them with another door open; then
-// OBDAdapter reads it every few rounds and DoorMonitor follows.
+// are two snapshots with it closed, at least one of them with another door open; it then replaces
+// the built-in signal for that door (OBDAdapter.learnedDoorSignals) and DoorMonitor follows.
 //
 // Scans and snapshots run between two rounds of live data (OBDAdapter.runBetweenRounds).
 
@@ -52,7 +54,7 @@ final class DoorFinder: ObservableObject {
     @Published private(set) var counts: [Scene: Int] = [:]
     /// The best candidate per opening from the snapshots so far.
     @Published private(set) var best: [Opening: SignalDiff.Candidate] = [:]
-    /// The door switches in use (saved on the phone).
+    /// The doors learned here (saved on the phone); each replaces the built-in signal for that door.
     @Published private(set) var learned: [Opening: BitSignal] = [:]
     /// What to do next / what happened, for the screen.
     @Published private(set) var message = ""
@@ -74,7 +76,7 @@ final class DoorFinder: ObservableObject {
         self.obd = obd
         supported = Self.loadSupported()
         learned = Self.loadLearned()
-        obd.doorSignals = learned
+        obd.learnedDoorSignals = learned
         message = nextStep
     }
 
@@ -92,12 +94,12 @@ final class DoorFinder: ObservableObject {
         message = nextStep
     }
 
-    /// Stop reading the doors; DoorMonitor goes back to the test buttons.
+    /// Forget the learned doors: the built-in door status is used again where the car answers it.
     func forget() {
         UserDefaults.standard.removeObject(forKey: Self.learnedKey)
         learned = [:]
-        obd.doorSignals = [:]
-        onLog?("Door finder: door switches forgotten")
+        obd.learnedDoorSignals = [:]
+        onLog?("Door finder: learned doors forgotten (built-in door status again)")
         resetSnapshots()
     }
 
@@ -125,7 +127,7 @@ final class DoorFinder: ObservableObject {
         let plan = Tuning.scanPlan
         cancelRequested = false
         phase = .scanning(done: 0, total: 1)
-        message = "Scanning the body modules… live data pauses for about 2 minutes"
+        message = "Scanning the body control module… live data pauses for about 2 minutes"
         let found: [String]? = await obd.runBetweenRounds { [self] adapter in
             await adapter.scanDIDs(plan, timeout: Tuning.scanTimeout,
                                    progress: { done, total in phase = .scanning(done: done, total: total) },
@@ -146,8 +148,8 @@ final class DoorFinder: ObservableObject {
         onLog?("Door finder: \(found.count) DIDs answer: " + found.joined(separator: ", "))
         resetSnapshots()
         if found.isEmpty {
-            message = "No DIDs answered in the body modules. The adapter may not hear 726/720 replies "
-                + "(see the log for ATCRA), or AppConfig.Doors.scanPlan needs other ranges."
+            message = "No DIDs answered in AppConfig.Doors.scanPlan. The adapter may not hear the 726 "
+                + "replies (see the log for ATCRA), or the plan needs other ranges."
         }
     }
 
@@ -218,7 +220,7 @@ final class DoorFinder: ObservableObject {
         best = found
         if changed {
             save()
-            obd.doorSignals = learned
+            obd.learnedDoorSignals = learned
         }
         message = nextStep
     }
@@ -247,13 +249,14 @@ final class DoorFinder: ObservableObject {
     private var nextStep: String {
         if supported.isEmpty {
             return learned.isEmpty
-                ? "Step 1: parked, ignition on, all doors closed — tap Scan (once, about 2 min)"
-                : "\(learned.count) of \(Opening.allCases.count) openings in use"
+                ? "Only needed if a door isn't shown right. Step 1: parked, ignition on, all doors "
+                    + "closed — tap Scan (once, about 2 min)"
+                : "\(learned.count) of \(Opening.allCases.count) openings learned"
         }
         if snapshots.isEmpty {
             return learned.isEmpty
                 ? "Close everything — tap \"All closed\""
-                : "\(learned.count) of \(Opening.allCases.count) openings in use. To learn again: "
+                : "\(learned.count) of \(Opening.allCases.count) openings learned. To learn again: "
                     + "close everything — tap \"All closed\""
         }
         if (counts[.allClosed] ?? 0) == 0 { return "Close everything — tap \"All closed\"" }
