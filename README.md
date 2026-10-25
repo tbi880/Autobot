@@ -1,8 +1,8 @@
 # Autobot
 
 A personal iOS companion app for the car. It drives a Bluetooth LED ambient-light controller
-directly (no vendor app needed), reacts to speed and door state, and greets the driver with a
-voice assistant when the phone connects to CarPlay.
+directly (no vendor app needed), reacts to manual shifting (worked out from OBD2 live data) and
+door state, and greets the driver with a voice assistant when the phone connects to CarPlay.
 
 > Personal hobby project. Not affiliated with the lamp manufacturer, Google, Tencent (QQ Music)
 > or Hasbro. Use the voice features hands-free and keep your eyes on the road.
@@ -10,13 +10,16 @@ voice assistant when the phone connects to CarPlay.
 ## Features
 
 ### Ambient lighting
-- **Speed-based Power Mode** (GPS)
-  - below 90 km/h: steady purple (zone 1 at 50 %, zone 2 at 100 %)
-  - at or above 90 km/h: firmware *Red Gradient* breathing
-  - debounced, so hovering around the threshold doesn't flicker
+- **Power Mode when shifting by hand** (M; OBD2 Bluetooth adapter, see
+  [Manual shifting detection](#manual-shifting-detection))
+  - driving in D: steady purple (zone 1 at 50 %, zone 2 at 100 %)
+  - shifting yourself and holding the revs: firmware *Red Gradient* breathing, until the revs
+    have stayed at or below 2500 r/min for 10 s
   - switching goes through a 3-second *buffer zone*: red burst flash + the Power Mode
-    announcement, then the speed is checked again and the new lighting is applied, or the
-    old one restored if the speed went back
+    announcement, then the trigger is checked again and the new lighting is applied, or the
+    old one restored if it went back
+  - other triggers in `AppConfig.PowerMode.trigger`: `.engineRPM` (2500 r/min) and `.speed`
+    (GPS, 90 km/h)
 - **Door safety alert** (highest priority): any door or the boot open → *Red Burst Flash* and
   "Door open detected"; when everything is closed the previous lighting comes back.
   Door state currently comes from test buttons; OBD2 / ECU input is planned.
@@ -71,6 +74,12 @@ weekday commute check. Hours, days and radius are in `AppConfig.Commute`.
 - iPhone with iOS 26.4+, Xcode 26+
 - The lamp: BLE controller advertising as `Pocket Link …` (Zhuhai Jieli chipset), the one used
   by the *LAMP&FRGN* Android app
+- The OBD2 adapter: ELM327-compatible BLE adapter advertising as `KONNWEI` (service `FFF0`),
+  plugged into the car's OBD port. Close its own app (MAXOBD) while driving, otherwise both apps
+  talk to the adapter at once
+- The car: set up for a Mazda CX-5 2.2 diesel (2015) with the 6-speed automatic. For another
+  car, change the gear ratios, the top-gear r/min per km/h and the D-mode limits in
+  `AppConfig.Manual`
 - Optional: Google Maps, QQ Music, CarPlay head unit, an iPhone with Apple Intelligence
 
 ## Getting started
@@ -119,6 +128,65 @@ Modes used: `0` steady, `2` breathing (parameter `1` = red gradient), `3` burst 
 (parameter `1` = red). A single-byte reply `FF` is an ACK; `F0` checksum error, `F3` not
 supported, `FC` busy.
 
+## OBD2 adapter
+
+A KONNWEI Bluetooth LE OBD2 adapter, ELM327-compatible. Its own app, MAXOBD
+(`com.jiawei.maxobd` 1.1.03), identifies the car as ISO 15765-4 CAN with 11-bit IDs and the engine
+ECU answering from `7E8`.
+
+| | |
+|---|---|
+| Service | `FFF0` |
+| Write | `FFF2` (write without response): ASCII command + `\r` |
+| Notify | `FFF1`: ASCII reply in chunks, ending with the `>` prompt |
+
+After connecting: `ATZ`, `ATE0`, `ATL0`, `ATS0`, `ATH0`, `ATAT1`, `ATSP6`, `ATSH7E0`, then `0100`
+until the engine ECU answers (ignition on), then `0100`, `0120`, … to list the PIDs it has
+(written to the log). After that, about three times a second:
+
+| Request | Reply | Value |
+|---|---|---|
+| `010C0D1` | `41 0C A B 0D C` | RPM = (256·A + B) / 4, speed = C km/h |
+| `015A1` (or `01491`, `01041`) | `41 5A A` | pedal (or engine load) = A · 100 / 255 % |
+| `01A41`, only if the car has it | `41 A4 A B C D` | gear = upper half of B |
+
+The trailing `1` tells the adapter one reply is enough; it is dropped if the adapter answers `?`.
+If the ECU answers only one PID per request, RPM and speed are asked separately.
+Protocol, request header and timings are in `AppConfig.OBD`.
+
+## Manual shifting detection
+
+No OBD2 value says "M". MAXOBD was reverse-engineered (its DEX code, `libobd.so` and its Mazda
+module `libmazda.so`) to look for one:
+
+- Standard OBD2 (SAE J1979) has no selector position (P/R/N/D/M). The nearest thing is PID `A4`,
+  *transmission actual gear*, which MAXOBD's generic engine (`libobd.so`) shows as `Gear %d`:
+  a gear number, the same in D and in M. Its live-data tables hold the standard mode 01 PIDs
+  01–CD and nothing else.
+- The Mazda module reads Mazda-specific data from definition files it downloads separately
+  (`MZD_*.BIN`, `DSTREAM_EN.BIN`). None ship with the app, so there is no manual-mode signal to
+  reuse.
+
+So `ManualShiftDetector` works it out from RPM, speed and the pedal, looking for what the
+automatic never does on its own in D (it shifts up early: about 2000 r/min at 110 km/h in 6th):
+
+1. **Revs held above what D allows for the pedal**, for 1 s: more than 2600 r/min with the foot
+   off, 3000 at 40 % pedal, 3800 at 70 %, 4600 at 90 %, 4800 at full throttle (straight lines in
+   between). Past 4800 r/min a moment is enough, since D shifts up before that even when floored.
+2. **A downshift with the foot off** at 25 km/h or more that lands at 1800 r/min or more (engine
+   braking). Coasting in D, the gearbox only shifts down at low revs.
+
+The gear is RPM ÷ speed matched against the gearbox ratios (3.552 / 2.022 / 1.452 / 1.000 /
+0.708 / 0.599), with 6th set from 2000 r/min at 110 km/h on the speedometer and fine-tuned while
+cruising; PID `A4` is used instead if the car has it. Manual ends once the revs have stayed at or
+below 2500 r/min for 10 s. Pedal: PID `5A`, otherwise `49`, otherwise the engine load `04`.
+
+Blind spots: on long descents the automatic can shift down by itself to brake with the engine,
+which looks like rule 2, and with the pedal floored only revs past 4800 r/min count, because D
+revs high then too.
+The D-mode limits are estimates; tune them in `AppConfig.Manual` after a drive. The dashboard shows
+RPM, gear, speed, pedal and why manual was detected, and the log lists the PIDs the car has.
+
 ## Project structure
 
 ```
@@ -126,8 +194,10 @@ Autobot/
 ├── App/         AppModel (wiring), AutobotApp
 ├── Lamp/        LampProtocol (packets), LampController (BLE), LampState (scenes)
 ├── Lighting/    LightingArbiter (priority between lighting features)
-├── Vehicle/     DoorMonitor (door state), DoorSafetyAlert
-├── Driving/     SpeedMonitor (GPS), PowerModeController (buffer zone), CarPlayMonitor
+├── Vehicle/     OBDAdapter (OBD2 Bluetooth), ELM327 (adapter protocol), DoorMonitor (door state),
+│                DoorSafetyAlert
+├── Driving/     ManualShiftDetector (manual shifting → Power Mode), EngineMonitor (RPM only),
+│                SpeedMonitor (GPS), PowerModeController (buffer zone), CarPlayMonitor
 ├── Voice/       AudioSessionManager, Speaker, MetallicVoiceEffect, VoiceCoordinator (queue)
 ├── Assistant/   WelcomeAssistant (flow), SpeechListener, DestinationParser,
 │                WeatherService, CommuteCheck, MapsLauncher, ShortcutsLauncher
@@ -137,8 +207,9 @@ Autobot/
 └── Support/     AppConfig (all phrases and tuning values), Concurrency helpers
 ```
 
-Everything you might want to tweak — speed threshold, phrases, voice character, timeouts,
-languages, retry counts — is in `Support/AppConfig.swift`.
+Everything you might want to tweak — the manual-shift detection limits, gear ratios, the Power
+Mode trigger, OBD2 settings, phrases, voice character, timeouts, languages, retry counts — is in
+`Support/AppConfig.swift`.
 
 ### Adding a lighting feature
 1. Add a scene to `LampState` and its packets in `LampController` (if new).
@@ -163,5 +234,6 @@ versions ignore sections they don't know.
 
 ## Roadmap
 
-- OBD2 Bluetooth adapter → real door / boot state from the ECU (feeds `DoorMonitor`)
+- Real door / boot state (feeds `DoorMonitor`): not part of standard OBD2, needs Mazda-specific
+  data on top of the OBD2 connection
 - More lighting features through `LightingArbiter`

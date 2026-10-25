@@ -258,9 +258,9 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Autobot-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Autobot;
-				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "用于连接并控制灯";
-				INFOPLIST_KEY_NSLocationAlwaysAndWhenInUseUsageDescription = "锁屏时也根据车速自动切换氛围灯";
-				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "根据车速自动切换氛围灯";
+				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "用于连接并控制氛围灯，以及从 OBD 诊断器读取转速、车速和油门";
+				INFOPLIST_KEY_NSLocationAlwaysAndWhenInUseUsageDescription = "锁屏时也持续获取车速和位置";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "显示车速，并用于天气播报和通勤导航";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "上车时听你说出目的地";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "识别目的地时，语音可能发送给 Apple 服务器处理，也可能由设备本地处理";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -297,9 +297,9 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Autobot-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Autobot;
-				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "用于连接并控制灯";
-				INFOPLIST_KEY_NSLocationAlwaysAndWhenInUseUsageDescription = "锁屏时也根据车速自动切换氛围灯";
-				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "根据车速自动切换氛围灯";
+				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "用于连接并控制氛围灯，以及从 OBD 诊断器读取转速、车速和油门";
+				INFOPLIST_KEY_NSLocationAlwaysAndWhenInUseUsageDescription = "锁屏时也持续获取车速和位置";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "显示车速，并用于天气播报和通勤导航";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "上车时听你说出目的地";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "识别目的地时，语音可能发送给 Apple 服务器处理，也可能由设备本地处理";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;

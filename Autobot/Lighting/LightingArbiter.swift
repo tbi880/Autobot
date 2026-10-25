@@ -4,7 +4,7 @@
 // Every feature (a "source") asks for a scene or withdraws its request; the request with
 // the highest priority wins and is sent to the lamp. When a high-priority request is
 // withdrawn, the next one takes over automatically, so e.g. closing all doors restores
-// whatever the speed logic wants at that moment.
+// whatever Power Mode wants at that moment.
 //
 // To add a new lighting feature: add a case to `Source` with its priority, then call
 // request(_:from:) / clear(_:) from that feature.
@@ -16,7 +16,7 @@ final class LightingArbiter: ObservableObject {
 
     /// Higher priority wins. Leave gaps so new features can slot in between.
     enum Source: Int, Comparable, CaseIterable {
-        case speed = 10              // purple steady / red breathing (Power Mode)
+        case powerMode = 10          // purple steady / red breathing (manual shifting, RPM or speed)
         case powerTransition = 500   // 3-second red flash while Power Mode switches
         case doorAlert = 1000        // door or boot open: overrides everything
 
@@ -24,7 +24,7 @@ final class LightingArbiter: ObservableObject {
 
         var label: String {
             switch self {
-            case .speed: return "Speed"
+            case .powerMode: return "Power Mode"
             case .powerTransition: return "Power Mode switch"
             case .doorAlert: return "Door alert"
             }

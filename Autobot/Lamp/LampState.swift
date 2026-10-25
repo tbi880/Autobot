@@ -6,8 +6,8 @@ import Foundation
 // MARK: - Lamp states
 
 enum LampState: Equatable {
-    case purpleSteady    // speed below the Power Mode threshold
-    case redBreathing    // speed at or above the threshold (Power Mode)
+    case purpleSteady    // Power Mode off
+    case redBreathing    // Power Mode on (manual shifting, RPM or speed: AppConfig.PowerMode.trigger)
     case redBurstFlash   // a door or the boot is open (safety alert)
 
     var label: String {

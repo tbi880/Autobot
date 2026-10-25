@@ -2,18 +2,32 @@
 // Switches Power Mode (purple steady <-> red gradient breathing) through a short
 // "buffer zone" instead of jumping straight to the new lighting:
 //
-//   1. Speed crosses the threshold -> red burst flash for 3 s + "Power Mode Activated/Deactivated"
-//   2. After 3 s the speed is checked again:
+//   1. The trigger crosses the threshold -> red burst flash for 3 s + "Power Mode Activated/Deactivated"
+//   2. After 3 s the trigger is checked again:
 //      - still on the new side  -> switch to the new lighting (no second announcement)
 //      - back on the old side    -> restore the previous lighting (no announcement)
-// Speed changes during the 3 s are not acted on; only the state at the end counts.
+// Changes during the 3 s are not acted on; only the state at the end counts.
 // Crossing again later starts a new buffer zone, with its own announcement.
 //
-// The flash is a LightingArbiter request from `.powerTransition` (above speed, below the door
-// alert), so an open door still overrides it, and withdrawing it restores the right scene.
+// The trigger (AppConfig.PowerMode.trigger) is manual shifting worked out from the OBD2 live data
+// (ManualShiftDetector), the engine RPM alone (EngineMonitor, 2500 r/min) or the GPS speed
+// (SpeedMonitor, 90 km/h).
+//
+// The flash is a LightingArbiter request from `.powerTransition` (above Power Mode, below the
+// door alert), so an open door still overrides it, and withdrawing it restores the right scene.
 
 import Combine
 import Foundation
+
+/// Decides which side of the Power Mode threshold the car is on: `.redBreathing` (Power Mode)
+/// or `.purpleSteady`, already debounced. Provided by ManualShiftDetector, EngineMonitor (RPM) or
+/// SpeedMonitor (GPS).
+@MainActor
+protocol PowerModeTrigger: AnyObject {
+    var state: LampState { get }
+    /// Called only when `state` actually changes.
+    var onStateChange: ((LampState) -> Void)? { get set }
+}
 
 final class PowerModeController: ObservableObject {
 
@@ -21,39 +35,39 @@ final class PowerModeController: ObservableObject {
     @Published private(set) var committed: LampState
     /// Set during the 3-second buffer zone: the state being switched to.
     @Published private(set) var switchingTo: LampState?
-    /// Test override (Power ON / OFF buttons): treated as the speed state until the real
-    /// speed state changes or another test button is pressed.
+    /// Test override (Power ON / OFF buttons): treated as the trigger state until the real
+    /// trigger state changes or another test button is pressed.
     @Published private(set) var simulated: LampState?
 
-    private let speed: SpeedMonitor
+    private let trigger: any PowerModeTrigger
     private let lighting: LightingArbiter
     private let voice: VoiceCoordinator
     private var bufferTask: Task<Void, Never>?
 
-    init(speed: SpeedMonitor, lighting: LightingArbiter, voice: VoiceCoordinator) {
-        self.speed = speed
+    init(trigger: any PowerModeTrigger, lighting: LightingArbiter, voice: VoiceCoordinator) {
+        self.trigger = trigger
         self.lighting = lighting
         self.voice = voice
-        self.committed = speed.state
+        self.committed = trigger.state
     }
 
     func start() {
-        lighting.request(committed, from: .speed)
-        speed.onStateChange = { [weak self] state in
+        lighting.request(committed, from: .powerMode)
+        trigger.onStateChange = { [weak self] state in
             self?.simulated = nil              // real driving takes over from a test
             self?.stateChanged(to: state)
         }
     }
 
-    /// Debug: pretend the speed is on the given side of the threshold. Goes through the
-    /// buffer zone (flash + announcement) exactly like real driving.
+    /// Debug: pretend the trigger (manual shifting, RPM or speed) is on the given side. Goes
+    /// through the buffer zone (flash + announcement) exactly like real driving.
     func simulate(_ state: LampState) {
         simulated = state
         stateChanged(to: state)
     }
 
-    /// The speed state that counts: the test override if set, otherwise the real one.
-    private var currentState: LampState { simulated ?? speed.state }
+    /// The trigger state that counts: the test override if set, otherwise the real one.
+    private var currentState: LampState { simulated ?? trigger.state }
 
     // MARK: Buffer zone
 
@@ -68,7 +82,7 @@ final class PowerModeController: ObservableObject {
         voice.announcePowerChange(to: target)
 
         bufferTask = Task { [weak self] in
-            try? await Task.sleep(for: AppConfig.Speed.switchBufferDuration)
+            try? await Task.sleep(for: AppConfig.PowerMode.switchBufferDuration)
             self?.endBuffer()
         }
     }
@@ -80,8 +94,8 @@ final class PowerModeController: ObservableObject {
         let now = currentState
         if now != committed {
             committed = now
-            lighting.request(now, from: .speed)   // set before the flash is withdrawn: no flicker
+            lighting.request(now, from: .powerMode)   // set before the flash is withdrawn: no flicker
         }
-        lighting.clear(.powerTransition)          // back to the (new or unchanged) speed scene
+        lighting.clear(.powerTransition)              // back to the (new or unchanged) Power Mode scene
     }
 }

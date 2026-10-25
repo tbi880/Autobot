@@ -9,24 +9,124 @@ nonisolated enum AppConfig {
     
     enum TestMode {
         /// Simulates successful lamp Bluetooth and CarPlay connections at start-up.
-        static let enabled = true
+        static let enabled = false
     }
 
     enum Driver {
         static let name = "Tim"
     }
 
+    /// Power Mode: red gradient breathing when driving hard, purple steady otherwise.
+    enum PowerMode {
+        enum Trigger {
+            /// Manual shifting (M) worked out from RPM, speed and pedal (AppConfig.Manual).
+            /// Standard OBD2 doesn't report the gear selector position itself (see README).
+            case manualShift
+            /// Engine RPM at or above a threshold (AppConfig.Engine).
+            case engineRPM
+            /// GPS speed (AppConfig.Speed), the original trigger.
+            case speed
+        }
+        static let trigger: Trigger = .manualShift
+        /// "Buffer zone" when Power Mode switches: red burst flash + announcement for this long,
+        /// then the trigger is checked again before the new lighting is applied.
+        static let switchBufferDuration: Duration = .seconds(3)
+    }
+
+    /// Engine RPM trigger (EngineMonitor), used when PowerMode.trigger is .engineRPM.
+    enum Engine {
+        /// At or above this engine speed (r/min) the lamp switches to red gradient breathing.
+        static let powerModeThresholdRpm: Double = 2500
+        /// The RPM must stay at or above the threshold this long (seconds) before Power Mode
+        /// switches on, so a momentary blip doesn't count.
+        static let confirmOn: TimeInterval = 0.5
+        /// …and below it this long before Power Mode switches off. Longer, so the dip below the
+        /// threshold after each upshift doesn't end Power Mode in the middle of an acceleration.
+        /// Set it to about 1 to make it switch back as quickly as the old speed trigger did.
+        static let confirmOff: TimeInterval = 5
+    }
+
+    /// Manual-shifting detection (ManualShiftDetector), used when PowerMode.trigger is .manualShift.
+    /// Set up for a Mazda CX-5 2.2 diesel (2015) with the 6-speed automatic (SKYACTIV-Drive).
+    enum Manual {
+        /// Gearbox ratios, 1st to 6th. Only their proportions matter.
+        static let gearRatios: [Double] = [3.552, 2.022, 1.452, 1.000, 0.708, 0.599]
+        /// Top gear in engine r/min per km/h: 2000 r/min at 110 km/h on the speedometer, which reads
+        /// a few % high, so about 105 km/h as OBD2 reports it. Fine-tuned while cruising.
+        static let topGearRpmPerKmh: Double = 2000.0 / 105.0
+        /// RPM ÷ speed may be this far (fraction) from a gear's value and still count as that gear.
+        static let gearTolerance = 0.07
+        /// Below this speed (km/h) the gear isn't worked out (torque converter slip, coarse speed).
+        static let minSpeedForGear: Double = 12
+        /// A gear counts once it has been seen in this many readings in a row.
+        static let gearConfirmReadings = 2
+        /// A new gear seen within this many seconds of the old one is a shift.
+        static let shiftWindow: TimeInterval = 3
+        /// Fine-tune the top-gear value while cruising in top gear at this speed (km/h) or more.
+        static let learnTopGear = true
+        static let learnMinSpeed: Double = 70
+        static let learnRate = 0.02
+
+        /// Rule 1: the highest RPM D settles at for a pedal position (0–100 %); D shifts up before.
+        /// Straight lines in between. More revs than this for `revHoldTime` = the gear is held.
+        static let dModeCeiling: [(demand: Double, rpm: Double)] = [
+            (0, 2600), (40, 3000), (70, 3800), (90, 4600), (100, 4800),
+        ]
+        static let revHoldTime: TimeInterval = 1
+        /// D shifts up before this even with the pedal floored, so above it a moment is enough.
+        static let overRevRPM: Double = 4800
+        static let overRevHoldTime: TimeInterval = 0.3
+        /// No detection below this speed (km/h), e.g. revving in P or N.
+        static let minSpeed: Double = 10
+
+        /// Rule 2: a downshift with the foot off (pedal at or below this %), at this speed (km/h) or
+        /// more, landing at this RPM or more, is engine braking by hand.
+        static let footOffDemand: Double = 5
+        static let engineBrakeMinSpeed: Double = 25
+        static let engineBrakeRPM: Double = 1800
+        /// Without pedal data: losing this many km/h within `trendWindow` seconds counts as foot off.
+        static let slowingDown: Double = 1
+        static let trendWindow: TimeInterval = 2
+
+        /// Manual ends once the RPM has stayed at or below this for `calmTime` seconds.
+        static let calmRPM: Double = 2500
+        static let calmTime: TimeInterval = 10
+    }
+
+    /// GPS speed trigger (SpeedMonitor), used when PowerMode.trigger is .speed.
     enum Speed {
         /// At or above this speed the lamp switches to red gradient breathing.
         static let powerModeThresholdKmh: Double = 90
         /// Consecutive GPS readings (about 1 per second) needed before switching state,
         /// so the lamp doesn't flicker while hovering around the threshold.
         static let confirmReadings = 2
-        /// "Buffer zone" when Power Mode switches: red burst flash + announcement for this long,
-        /// then the speed is checked again before the new lighting is applied.
-        static let switchBufferDuration: Duration = .seconds(3)
         /// Ignore GPS speed readings less accurate than this (m/s).
         static let maxSpeedAccuracy: Double = 5
+    }
+
+    /// OBD2 Bluetooth adapter (OBDAdapter, ELM327 protocol).
+    enum OBD {
+        /// Connects to the first adapter advertising service FFF0 whose name starts with this.
+        static let deviceName = "KONNWEI"
+        /// ELM327 protocol ("ATSP…"): 6 = ISO 15765-4 CAN, 11-bit IDs, 500 kbit/s, as MAXOBD
+        /// detected on this car. "0" lets the adapter search (slower first connection).
+        static let protocolNumber = "6"
+        /// Requests go straight to the engine ECU (7E0, it answers from 7E8) instead of to every
+        /// ECU. nil = the standard broadcast address (7DF).
+        static let requestHeader: String? = "7E0"
+        /// Pause between two rounds of live data. A round is 2–3 requests of roughly 50–150 ms
+        /// each, so this gives about 3 rounds a second.
+        static let pollInterval: Duration = .milliseconds(100)
+        /// How long to wait for the ">" prompt after a command (seconds)…
+        static let replyTimeout: TimeInterval = 1.5
+        /// …after ATZ (the adapter restarts)…
+        static let resetTimeout: TimeInterval = 3
+        /// …and for "0100", "0120"… and "01A0" (the ECU may take a moment to wake up).
+        static let probeTimeout: TimeInterval = 5
+        /// Wait between attempts while the engine ECU doesn't answer (ignition off) or the set-up failed.
+        static let retryDelay: Duration = .seconds(3)
+        /// Rounds in a row without an RPM answer before the set-up starts again.
+        static let maxMissedReadings = 5
     }
 
     enum Lamp {

@@ -1,14 +1,15 @@
 // SpeedMonitor.swift
-// Reads GPS speed and decides the lamp state:
+// Reads GPS speed (shown on the dashboard) and keeps the latest location for the weather
+// briefing and the commute check. It decides Power Mode only when AppConfig.PowerMode.trigger
+// is .speed (the default is manual-shift detection, ManualShiftDetector):
 //   speed <  threshold -> purple steady
 //   speed >= threshold -> red gradient breathing
-// Also keeps the latest location for the weather briefing.
 
 import Combine
 import CoreLocation
 import SwiftUI
 
-final class SpeedMonitor: NSObject, ObservableObject, CLLocationManagerDelegate {
+final class SpeedMonitor: NSObject, ObservableObject, CLLocationManagerDelegate, PowerModeTrigger {
 
     @Published private(set) var speedKmh: Double?          // nil until GPS has a valid speed
     @Published private(set) var lastLocation: CLLocation?

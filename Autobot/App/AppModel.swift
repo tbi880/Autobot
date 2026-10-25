@@ -1,17 +1,19 @@
 // AppModel.swift
 // Creates every component and wires them together:
 //
-//   SpeedMonitor ──▶ PowerModeController ──scenes (speed, powerTransition)──▶ LightingArbiter ──▶ LampController
-//                                        └─"Power Mode Activated/Deactivated"──▶ VoiceCoordinator
+//   OBDAdapter ──live data──▶ ManualShiftDetector ──▶ PowerModeController ──scenes (powerMode, powerTransition)──▶ LightingArbiter ──▶ LampController
+//                                                                         └─"Power Mode Activated/Deactivated"──▶ VoiceCoordinator
+//     (AppConfig.PowerMode.trigger: ManualShiftDetector, EngineMonitor (RPM only) or SpeedMonitor (GPS))
+//   SpeedMonitor (GPS) ──▶ speed on the dashboard, location for the weather briefing / commute check
 //   DoorMonitor ──▶ DoorSafetyAlert ──scene (doorAlert)──▶ LightingArbiter
 //                                   └─"Door open detected"──▶ VoiceCoordinator
 //   LampController.isReady ┐
 //   CarPlayMonitor.isConnected ┼──▶ WelcomeAssistant (once per drive, via VoiceCoordinator)
 //   BootSequence finished ─────┘
 //
-// Nothing starts until the ENGINE START button is pressed (ignite): then the lamp Bluetooth
-// search and CarPlay detection start together, and the start screen (BootSequence) follows
-// them. The first Welcome waits until the start screen has finished.
+// Nothing starts until the ENGINE START button is pressed (ignite): then the lamp and OBD2
+// Bluetooth searches and CarPlay detection start together, and the start screen (BootSequence)
+// follows the lamp and CarPlay. The first Welcome waits until the start screen has finished.
 
 import AVFoundation
 import Combine
@@ -28,6 +30,9 @@ final class AppModel: ObservableObject {
     let lighting: LightingArbiter
     let doors: DoorMonitor
     let powerMode: PowerModeController
+    let obd: OBDAdapter
+    let engine: EngineMonitor
+    let manual: ManualShiftDetector
     let boot: BootSequence
     private let voice: VoiceCoordinator
     private let doorAlert: DoorSafetyAlert
@@ -56,7 +61,21 @@ final class AppModel: ObservableObject {
         self.lighting = lighting
         self.doors = doors
         self.doorAlert = DoorSafetyAlert(doors: doors, lighting: lighting, voice: voice)
-        self.powerMode = PowerModeController(speed: speed, lighting: lighting, voice: voice)
+        let obd = OBDAdapter()
+        obd.onLog = { [weak lamp] message in lamp?.addLog(message) }
+        let engine = EngineMonitor(obd: obd)
+        let manual = ManualShiftDetector(obd: obd)
+        manual.onLog = { [weak lamp] message in lamp?.addLog(message) }
+        self.obd = obd
+        self.engine = engine
+        self.manual = manual
+        let trigger: any PowerModeTrigger
+        switch AppConfig.PowerMode.trigger {
+        case .manualShift: trigger = manual
+        case .engineRPM: trigger = engine
+        case .speed: trigger = speed
+        }
+        self.powerMode = PowerModeController(trigger: trigger, lighting: lighting, voice: voice)
         let places = SavedPlacesStore()
         self.places = places
         self.backup = BackupManager(places: places)
@@ -84,6 +103,7 @@ final class AppModel: ObservableObject {
         lighting.onSceneChange = { [weak self] scene in self?.lamp.setDesired(scene) }
         powerMode.start()
         speed.start()
+        obd.start()
         carPlay.start()
 
         Publishers.CombineLatest(lamp.$isReady, carPlay.$isConnected)
@@ -104,7 +124,7 @@ final class AppModel: ObservableObject {
         voice.runConversation { await assistant.testCommute() }
     }
 
-    /// Debug: behave as if the speed crossed into `state` (buffer zone, announcement, lighting).
+    /// Debug: behave as if the Power Mode trigger switched to `state` (buffer zone, announcement, lighting).
     func testPowerMode(_ state: LampState) {
         powerMode.simulate(state)
     }
