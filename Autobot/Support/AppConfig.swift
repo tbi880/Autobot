@@ -19,8 +19,9 @@ nonisolated enum AppConfig {
     /// Power Mode: red gradient breathing when driving hard, purple steady otherwise.
     enum PowerMode {
         enum Trigger {
-            /// Manual shifting (M) worked out from RPM, speed and pedal (AppConfig.Manual).
-            /// Standard OBD2 doesn't report the gear selector position itself (see README).
+            /// Manual shifting (M). Uses the car's real gear-selector lever when it reports it
+            /// (PCM DID 1E23, see AppConfig.OBD.readSelector and README); otherwise worked out from
+            /// RPM, speed and pedal (AppConfig.Manual). Standard OBD2 has no selector position.
             case manualShift
             /// Engine RPM at or above a threshold (AppConfig.Engine).
             case engineRPM
@@ -60,6 +61,9 @@ nonisolated enum AppConfig {
         static let minSpeedForGear: Double = 12
         /// A gear counts once it has been seen in this many readings in a row.
         static let gearConfirmReadings = 2
+        /// The real selector lever (DID 1E23) must read the same this many times in a row before
+        /// Power Mode follows it, so one garbled byte can't flip the lamp.
+        static let selectorConfirmReadings = 2
         /// A new gear seen within this many seconds of the old one is a shift.
         static let shiftWindow: TimeInterval = 3
         /// Fine-tune the top-gear value while cruising in top gear at this speed (km/h) or more.
@@ -127,6 +131,88 @@ nonisolated enum AppConfig {
         static let retryDelay: Duration = .seconds(3)
         /// Rounds in a row without an RPM answer before the set-up starts again.
         static let maxMissedReadings = 5
+        /// Read the transmission over UDS service 22 and drive Power Mode from the real lever:
+        /// M = Power Mode, D/N/R/P = off. On this car (2015 CX-5 2.2D) the TCM's gear value
+        /// (7E1 221E12) gives P/R/N and the gear, and D vs M comes from the M flag the M finder learns
+        /// (MFinder, AppConfig.MFinder). Cars with the Ford-style selector DID (221E23) use that
+        /// instead. Until the M flag is known, M is worked out from RPM/speed/pedal (with the real
+        /// gear). Set false to force the heuristic.
+        static let readSelector = true
+        /// ECUs to try for the selector DID, in order: the engine/PCM (7E0, which answers 221E23 on
+        /// most SkyActiv cars) first, then the transmission module (7E1, in case this car only
+        /// exposes the selector there). The first that answers is used for the live reads.
+        static let selectorHeaders: [String] = ["7E0", "7E1"]
+        /// Diagnostics: show the raw bytes of every candidate transmission value on both ECUs on the
+        /// dashboard, live, so the real M/D signal can be found by watching which one changes when the
+        /// lever moves between M and D. While on, Power Mode stays on the RPM/speed/pedal heuristic.
+        /// Turn OFF once the right (header, DID, byte) is known.
+        static let selectorDiagnostics = false
+        /// The candidate transmission DIDs probed in diagnostics, grouped by ECU (PCM 7E0, TCM 7E1):
+        /// selector lever (1E23), engaged gear (1E1F), gear (1E12), transmission gear (11B3).
+        static let diagnosticDIDs: [(header: String, did: String)] = [
+            ("7E0", "1E23"), ("7E0", "1E1F"), ("7E0", "1E12"), ("7E0", "11B3"),
+            ("7E1", "1E23"), ("7E1", "1E1F"), ("7E1", "1E12"), ("7E1", "11B3"),
+        ]
+        /// Short timeout per diagnostic read, so a DID the ECU ignores doesn't stall the sweep.
+        static let diagnosticTimeout: TimeInterval = 0.7
+    }
+
+    /// The gearbox (MazdaTCM): what tells M from D on this car.
+    enum Transmission {
+        /// The M flag of this car (2015 CX-5 2.2D), found with the M finder: TCM 7E1, DID 1E03,
+        /// byte 0, bit 0x10 — 00 with the lever in D, 10 in M. Used for Power Mode (M = on) unless
+        /// the M finder learns a different one (then that is used until "Forget").
+        static let mFlag = BitSignal(header: "7E1", did: "1E03", byteIndex: 0, mask: 0x10,
+                                     valueOff: 0x00, valueOn: 0x10, length: 1)
+    }
+
+    /// Real door state (DoorFinder, DoorMonitor): which door is open, read from the car.
+    enum Doors {
+        /// DIDs scanned for the door switches: the body control module's switch-input block (726,
+        /// answers from 72E — DA05 is the brake switch, so door switches sit nearby). The 12V-battery
+        /// DIDs (4027–402B: age, charge, temperature, voltage, current) are deliberately left out —
+        /// they drift all the time and drown the door bits — and so is 720, which answered nothing on
+        /// this car. Widen it if a door isn't found; the scan result is kept until this changes.
+        static let scanPlan: [(header: String, ranges: [ClosedRange<Int>])] = [
+            ("726", [0xDA00...0xDAFF]),
+        ]
+        /// The ECU that owns the door switches; its candidates are preferred.
+        static let preferredHeader = "726"
+        /// Never a door switch, even if it slips into the scan: the 12V-battery values (drift) and the
+        /// brake switch (changes with the pedal, not a door).
+        static let ignoredDIDs: Set<String> = [
+            "726 4027", "726 4028", "726 4029", "726 402A", "726 402B", "726 DA05",
+        ]
+        /// Wait per DID while scanning (seconds).
+        static let scanTimeout: TimeInterval = 0.6
+        /// Every supported DID is read this many times per snapshot (in separate passes), so a value
+        /// that drifts within a position shows up as unsteady and drops out.
+        static let readsPerSnapshot = 3
+        /// Read the learned door values every this many rounds of live data (about 2 rounds a second).
+        static let pollEveryRounds = 2
+    }
+
+    /// The M finder (MFinder): finds the value that says "lever in M" on this car, once, by comparing
+    /// snapshots taken with the lever in D and in M1. Only matters for that one-off search.
+    enum MFinder {
+        /// DIDs scanned, per ECU: the TCM (7E1) first, then the PCM (7E0). Ford/Mazda transmission
+        /// values live in these blocks (1E12 gear, 1E1C oil temperature, 11B3, 163A, 17B3, DD01…).
+        /// Widen it if a scan finds no difference; the scan result is kept until this changes.
+        static let scanPlan: [(header: String, ranges: [ClosedRange<Int>])] = [
+            ("7E1", [0x1100...0x11FF, 0x1600...0x17FF, 0x1E00...0x1EFF, 0xDD00...0xDD0F]),
+            ("7E0", [0x1E00...0x1EFF]),
+        ]
+        /// Wait per DID while scanning (seconds). Unsupported DIDs are refused at once.
+        static let scanTimeout: TimeInterval = 0.6
+        /// Every supported DID is read this many times per snapshot (in separate passes), so values
+        /// that change by themselves can be spotted and left out.
+        static let readsPerSnapshot = 2
+        /// Snapshots of each lever position before the best candidate is saved and used.
+        static let snapshotsToConfirm = 2
+        /// Values that only carry the gear or P/R/N (D1 and M1 read the same): never the M flag.
+        static let ignoredDIDs: Set<String> = [
+            "7E1 1E12", "7E0 1E12", "7E0 1E1F", "7E1 1E1F", "7E0 11B3", "7E1 11B3",
+        ]
     }
 
     enum Lamp {

@@ -22,7 +22,8 @@ door state, and greets the driver with a voice assistant when the phone connects
     (GPS, 90 km/h)
 - **Door safety alert** (highest priority): any door or the boot open → *Red Burst Flash* and
   "Door open detected"; when everything is closed the previous lighting comes back.
-  Door state currently comes from test buttons; OBD2 / ECU input is planned.
+  Door state comes from the car once the [door finder](#doors-which-one-is-open) has found the
+  switches (test buttons until then).
 - **Priority arbiter**: every lighting feature requests a scene with a priority, the highest
   one wins, and withdrawing a request restores the next one.
 - **Reliable commands**: one packet at a time, mode changes are read back and resent if the
@@ -154,21 +155,86 @@ The trailing `1` tells the adapter one reply is enough; it is dropped if the ada
 If the ECU answers only one PID per request, RPM and speed are asked separately.
 Protocol, request header and timings are in `AppConfig.OBD`.
 
+### Transmission: P / R / N, the gear, and M vs D
+
+After the PID list, Autobot asks the transmission module (TCM, `7E1`, answers from `7E9`) over UDS
+*service 22* (read data by identifier), which the KW905 passes straight through. Measured on this
+car with the lever in each position:
+
+| Lever | `7E1 221E12` (TCM "gear") | `7E0 221E1F` (PCM) |
+|---|---|---|
+| P | `46` | `80` |
+| R | `3C` | `81` |
+| N | `32` | `80` |
+| D (stopped, 1st) | `01` | `81` |
+| M1 | `01` | `81` |
+| M2 | `02` | `81` |
+
+So `221E12` gives **P, R, N and the real gear** (no more RPM ÷ speed estimate), but **D1 and M1 read
+the same** — neither value carries the M flag. The M finder (below) found it in **`7E1 221E03`,
+byte 0, bit `0x10`**: `00` in D, `10` in M. That is built in (`AppConfig.Transmission.mFlag`), so
+Power Mode follows M ↔ D straight away. The Ford-style selector DID `221E23` (one byte for
+P/R/N/D/M, answered by many Ford/Mazda PCMs) isn't answered by this car at all; Autobot still tries
+it first (`AppConfig.OBD.selectorHeaders`) for cars that have it.
+
+**The M finder** (dashboard → *M finder*; `MFinder`, `SignalDiff`) is how it was found, and can
+learn a different one for another car (it then replaces the built-in flag until *Forget*):
+
+1. *Scan* (car stopped, engine running, ~1–2 min, once): which DIDs do the TCM and PCM answer?
+   (`AppConfig.MFinder.scanPlan`; kept on the phone)
+2. Lever in **D**, foot on the brake → *Snapshot D*; lever in **M**, staying in **M1** → *Snapshot M*
+3. Repeat D and M once more. The bits that are steady within each position but differ between them
+   are the candidates; values that only drift (temperatures) or count drop out. After two snapshots
+   of each, the best candidate (on the TCM, whole byte steady, a single bit…) is saved and Power
+   Mode follows the lever right away. *Forget* starts over.
+
+Live data pauses while a finder scans or snapshots (it runs between two rounds, never interleaved).
+MAXOBD's own Mazda module reads these values through `MZD_*.BIN` definition files it downloads
+separately (none ship in the APK), so the IDs come from measuring the car, not from the app.
+
+### Doors: which one is open
+
+The door switches are read by the body control module (BCM, `726`, answers from `72E`). Its replies
+are outside the `7E8`–`7EF` range an ELM327 listens to by default, so Autobot points the adapter at
+them (`ATCRA72E`) and back to automatic (`ATAR`) afterwards. Which DID and bit belong to which door
+isn't documented for this car, so the **door finder** (dashboard → *Door finder*; `DoorFinder`,
+`SignalDiff`) finds them once, the same way as the M flag:
+
+1. *Scan* the body modules (parked, ignition on, ~2 min, once; `AppConfig.Doors.scanPlan`)
+2. Everything shut → *All closed*
+3. For each opening: open **only** that one → its button → close it (Driver, Passenger, Rear L,
+   Rear R, Boot)
+4. *All closed* once more
+
+For each opening, its snapshots are compared with **all the others** (it's closed in those, even
+where another door is open). What's left is that door's own switch: a bit every door sets (door-ajar
+lamp, dome light) is set in other doors' snapshots too and drops out, and so do drifting values. A
+door is saved once that's certain (the best candidate clearly ahead; at least two snapshots with it
+closed, one of them with another door open).
+
+The 12V-battery values the body module also serves (`4027`–`402B`: age, charge, temperature, voltage,
+current) drift constantly and drowned the door bits on the first attempts, so they're kept out of the
+scan and ignored (`AppConfig.Doors.ignoredDIDs`). If a door still resists, *Export raw scan* writes
+every snapshot to a JSON file to share, so the exact bit can be set by hand.
+
+Then Autobot reads the doors about once a second (`AppConfig.Doors.pollEveryRounds`), `DoorMonitor`
+follows, and the door alert runs on real data. "Driver"/"Passenger" mean whichever doors you open for
+those steps (right-hand drive is fine).
+
 ## Manual shifting detection
 
-No OBD2 value says "M". MAXOBD was reverse-engineered (its DEX code, `libobd.so` and its Mazda
-module `libmazda.so`) to look for one:
+`ManualShiftDetector` drives Power Mode from the **M** gate. It uses the real selector when the car
+reports it and works it out from the numbers when it doesn't:
 
-- Standard OBD2 (SAE J1979) has no selector position (P/R/N/D/M). The nearest thing is PID `A4`,
-  *transmission actual gear*, which MAXOBD's generic engine (`libobd.so`) shows as `Gear %d`:
-  a gear number, the same in D and in M. Its live-data tables hold the standard mode 01 PIDs
-  01–CD and nothing else.
-- The Mazda module reads Mazda-specific data from definition files it downloads separately
-  (`MZD_*.BIN`, `DSTREAM_EN.BIN`). None ship with the app, so there is no manual-mode signal to
-  reuse.
+**Real lever (preferred).** P/R/N come from the TCM (`221E12`), and D vs M from the M flag
+(`7E1 221E03` bit `0x10`, built in; see
+[Transmission](#transmission-p--r--n-the-gear-and-m-vs-d)), or from `221E23` on cars that answer it. Power Mode then follows the lever directly: `M` → red breathing, anything else → purple steady,
+debounced by a couple of readings. `R` is surfaced too, for future use (e.g. reverse lighting).
 
-So `ManualShiftDetector` works it out from RPM, speed and the pedal, looking for what the
-automatic never does on its own in D (it shifts up early: about 2000 r/min at 110 km/h in 6th):
+**Worked out from RPM/speed/pedal (fallback, when the TCM doesn't answer).** Standard OBD2
+(SAE J1979) has no selector position, and the TCM's gear value reads the same in D and M, so
+`ManualShiftDetector` looks for what the automatic never does on its own in D (it shifts up early:
+about 2000 r/min at 110 km/h in 6th):
 
 1. **Revs held above what D allows for the pedal**, for 1 s: more than 2600 r/min with the foot
    off, 3000 at 40 % pedal, 3800 at 70 %, 4600 at 90 %, 4800 at full throttle (straight lines in
@@ -194,9 +260,11 @@ Autobot/
 ├── App/         AppModel (wiring), AutobotApp
 ├── Lamp/        LampProtocol (packets), LampController (BLE), LampState (scenes)
 ├── Lighting/    LightingArbiter (priority between lighting features)
-├── Vehicle/     OBDAdapter (OBD2 Bluetooth), ELM327 (adapter protocol), DoorMonitor (door state),
-│                DoorSafetyAlert
-├── Driving/     ManualShiftDetector (manual shifting → Power Mode), EngineMonitor (RPM only),
+├── Vehicle/     OBDAdapter (OBD2 Bluetooth), ELM327 (adapter protocol), MazdaTCM (gearbox values),
+│                SignalDiff (finding on/off bits by comparison), DoorFinder (learns the door switches),
+│                DoorMonitor (door state), DoorSafetyAlert
+├── Driving/     ManualShiftDetector (manual shifting → Power Mode), MFinder (learns the M flag),
+│                EngineMonitor (RPM only),
 │                SpeedMonitor (GPS), PowerModeController (buffer zone), CarPlayMonitor
 ├── Voice/       AudioSessionManager, Speaker, MetallicVoiceEffect, VoiceCoordinator (queue)
 ├── Assistant/   WelcomeAssistant (flow), SpeechListener, DestinationParser,
@@ -234,6 +302,8 @@ versions ignore sections they don't know.
 
 ## Roadmap
 
-- Real door / boot state (feeds `DoorMonitor`): not part of standard OBD2, needs Mazda-specific
-  data on top of the OBD2 connection
+- Real lever over OBD2: P/R/N + gear from the TCM (`7E1 221E12`), M vs D from `7E1 221E03` bit
+  `0x10` — **done**. R is read for future use (reverse lighting).
+- Real door / boot state from the body module, via the door finder — **built**; bonnet could be
+  added the same way.
 - More lighting features through `LightingArbiter`

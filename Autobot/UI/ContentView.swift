@@ -75,8 +75,13 @@ private struct DashboardView: View {
         VStack(spacing: 16) {
             ConnectionStatusView(lamp: app.lamp, carPlay: app.carPlay)
             DrivingView(obd: app.obd, speed: app.speed, manual: app.manual)
+            MFinderButton(finder: app.mFinder, obd: app.obd, manual: app.manual)
+            if AppConfig.OBD.selectorDiagnostics {
+                SelectorDiagnosticsView(obd: app.obd)
+            }
             LampStateView(lighting: app.lighting, lamp: app.lamp, powerMode: app.powerMode)
-            DoorTestView(doors: app.doors)
+            DoorTestView(doors: app.doors, finder: app.doorFinder)
+            DoorFinderButton(finder: app.doorFinder, obd: app.obd)
             AssistantView(assistant: app.assistant, onTest: app.testWelcome,
                           onTestCommute: app.testCommute)
             PowerModeTestView(powerMode: app.powerMode, onTest: app.testPowerMode)
@@ -119,8 +124,10 @@ private struct DrivingView: View {
     private var gpsSpeedText: String { speed.speedKmh.map { String(format: "%.0f", $0) } ?? "--" }
     private var obdSpeedText: String { obd.sample?.speed.map { String(format: "%.0f", $0) } ?? "--" }
     private var gearText: String {
+        if let lever = manual.selector, lever != .drive, lever != .manual { return lever.label }   // P, R, N
         guard let gear = manual.gear else { return "gear --" }
-        return "gear \(gear)" + (manual.gearFromCar ? "" : " (est.)")
+        let prefix = manual.selector == .manual ? "M" : (manual.selector == .drive ? "D" : "gear ")
+        return prefix + "\(gear)" + (manual.gearFromCar ? "" : " (est.)")
     }
     private var demandText: String {
         let label = obd.demandSource?.hasPrefix("engine load") == true ? "load" : "pedal"
@@ -142,14 +149,20 @@ private struct DrivingView: View {
                         .font(.subheadline.bold())
                         .foregroundColor(.red)
                 } else {
-                    Text("Driving in D")
+                    Text(manual.usingRealSelector ? "Selector in \(manual.selector?.label ?? "D")" : "Driving in D")
                         .font(.subheadline)
                         .foregroundColor(.secondary)
                 }
-                Text("Top gear " + String(format: "%.1f", manual.topGearRatio)
-                     + " r/min per km/h  ·  GPS \(gpsSpeedText) km/h")
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
+                if manual.usingRealSelector {
+                    Text("Lever \(manual.selector?.label ?? "--") from the car  ·  GPS \(gpsSpeedText) km/h")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                } else {
+                    Text("Selector estimated · top gear " + String(format: "%.1f", manual.topGearRatio)
+                         + " r/min per km/h  ·  GPS \(gpsSpeedText) km/h")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
             case .engineRPM:
                 Text(rpmText)
                     .font(.system(size: 64, weight: .bold, design: .rounded))
@@ -233,12 +246,15 @@ private struct SceneIndicator: View {
 }
 
 /// Test buttons until the OBD2 connection provides real door data.
+/// The doors and the boot: live from the car once DoorFinder has found the switches, otherwise test
+/// buttons (they still work as a test while live, until the next reading).
 private struct DoorTestView: View {
     @ObservedObject var doors: DoorMonitor
+    @ObservedObject var finder: DoorFinder
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Door test").font(.headline)
+            Text(finder.learned.isEmpty ? "Door test" : "Doors (live from the car)").font(.headline)
             HStack(spacing: 6) {
                 ForEach(DoorMonitor.Opening.allCases) { opening in
                     let isOpen = doors.open.contains(opening)
@@ -332,6 +348,284 @@ private struct SavedPlacesButton: View {
             .font(.headline)
         }
         .buttonStyle(.plain)
+    }
+}
+
+/// Dashboard row: whether the M flag has been learned; opens the M finder.
+private struct MFinderButton: View {
+    @ObservedObject var finder: MFinder
+    @ObservedObject var obd: OBDAdapter
+    @ObservedObject var manual: ManualShiftDetector
+    @State private var showing = false
+
+    var body: some View {
+        Button { showing = true } label: {
+            HStack {
+                Label("M finder", systemImage: "gearshape.2")
+                Spacer()
+                Text(finder.learned != nil ? "M flag learned" : "M flag built in")
+                    .font(.subheadline)
+                    .foregroundColor(.green)
+                Image(systemName: "chevron.right").foregroundStyle(.secondary)
+            }
+            .font(.headline)
+        }
+        .buttonStyle(.plain)
+        .sheet(isPresented: $showing) {
+            MFinderView(finder: finder, obd: obd, manual: manual)
+        }
+    }
+}
+
+/// Finds the "lever in M" flag on this car (MFinder): scan once, then snapshots in D and in M1.
+private struct MFinderView: View {
+    @ObservedObject var finder: MFinder
+    @ObservedObject var obd: OBDAdapter
+    @ObservedObject var manual: ManualShiftDetector
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("Status") {
+                    Text(finder.message)
+                    if let progress {
+                        ProgressView(value: progress.value) { Text(progress.label).font(.caption) }
+                        Button("Cancel", role: .cancel) { finder.cancel() }
+                    }
+                }
+                Section("Live from the car") {
+                    LabeledContent("TCM gear code", value: tcmText)
+                    LabeledContent("Lever", value: manual.selector?.label ?? "D or M (flag not known)")
+                    LabeledContent("Gear", value: manual.gear.map { "\($0)" } ?? "--")
+                }
+                Section {
+                    Button("Scan the car (once, 1–2 min)") { finder.scan() }
+                        .disabled(finder.isBusy)
+                    LabeledContent("DIDs answering", value: "\(finder.supported.count)")
+                    Button("Snapshot D  ·  \(finder.dSnapshots) taken") { finder.snapshotD() }
+                        .disabled(finder.isBusy || finder.supported.isEmpty)
+                    Button("Snapshot M1  ·  \(finder.mSnapshots) taken") { finder.snapshotM() }
+                        .disabled(finder.isBusy || finder.supported.isEmpty)
+                    Button("Reset snapshots", role: .destructive) { finder.resetSnapshots() }
+                        .disabled(finder.isBusy)
+                } header: {
+                    Text("Find the M flag")
+                } footer: {
+                    Text("Car stopped, engine running, foot on the brake. Scan once. Then alternate: "
+                         + "lever in D → Snapshot D, lever in M (stay in M1, don't shift) → Snapshot M. "
+                         + "After two of each the best candidate is used automatically.")
+                }
+                if !finder.candidates.isEmpty {
+                    Section("Candidates, best first") {
+                        ForEach(finder.candidates.prefix(8)) { candidate in
+                            Text(candidate.signal.label(off: "D", on: "M") + "  ·  score \(candidate.score)")
+                                .font(.system(.caption, design: .monospaced))
+                        }
+                    }
+                }
+                Section("In use for Power Mode") {
+                    Text(finder.inUse.label(off: "D", on: "M") + (finder.learned == nil ? "  ·  built in" : "  ·  learned"))
+                        .font(.system(.caption, design: .monospaced))
+                    if finder.learned != nil {
+                        Button("Forget (back to the built-in flag)", role: .destructive) { finder.forget() }
+                            .disabled(finder.isBusy)
+                    }
+                }
+            }
+            .navigationTitle("M finder")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+    }
+
+    private var progress: (value: Double, label: String)? {
+        switch finder.phase {
+        case .idle:
+            return nil
+        case .scanning(let done, let total):
+            return (total > 0 ? Double(done) / Double(total) : 0, "Scanning \(done) / \(total)")
+        case .snapshot(let position, let done, let total):
+            return (total > 0 ? Double(done) / Double(total) : 0, "Snapshot \(position): \(done) / \(total)")
+        }
+    }
+
+    private var tcmText: String {
+        guard let code = obd.tcmGearCode else {
+            return obd.reportsTCMGear == false ? "not answered" : "--"
+        }
+        let meaning: String
+        switch MazdaTCM.range(gearCode: code) {
+        case .park?: meaning = "P"
+        case .reverse?: meaning = "R"
+        case .neutral?: meaning = "N"
+        case .forward(let gear)?: meaning = gear.map { "D/M, gear \($0)" } ?? "between gears"
+        case nil: meaning = "unknown"
+        }
+        return String(format: "%02X", code) + "  →  " + meaning
+    }
+}
+
+/// Dashboard row: how many door switches are known; opens the door finder.
+private struct DoorFinderButton: View {
+    @ObservedObject var finder: DoorFinder
+    @ObservedObject var obd: OBDAdapter
+    @State private var showing = false
+
+    var body: some View {
+        Button { showing = true } label: {
+            HStack {
+                Label("Door finder", systemImage: "car.side")
+                Spacer()
+                Text("\(finder.learned.count) of \(DoorMonitor.Opening.allCases.count) found")
+                    .font(.subheadline)
+                    .foregroundColor(finder.learned.isEmpty ? .secondary : .green)
+                Image(systemName: "chevron.right").foregroundStyle(.secondary)
+            }
+            .font(.headline)
+        }
+        .buttonStyle(.plain)
+        .sheet(isPresented: $showing) {
+            DoorFinderView(finder: finder, obd: obd)
+        }
+    }
+}
+
+/// Finds each door's switch (DoorFinder): scan once, "All closed", then one opening at a time.
+private struct DoorFinderView: View {
+    @ObservedObject var finder: DoorFinder
+    @ObservedObject var obd: OBDAdapter
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("Status") {
+                    Text(finder.message)
+                    if let progress {
+                        ProgressView(value: progress.value) { Text(progress.label).font(.caption) }
+                        Button("Cancel", role: .cancel) { finder.cancel() }
+                    }
+                }
+                Section("Live from the car") {
+                    ForEach(DoorMonitor.Opening.allCases) { opening in
+                        LabeledContent(opening.rawValue, value: liveText(opening))
+                    }
+                }
+                Section {
+                    Button("Scan the body modules (once, ~2 min)") { finder.scan() }
+                        .disabled(finder.isBusy)
+                    LabeledContent("DIDs answering", value: "\(finder.supported.count)")
+                    snapshotButton(.allClosed)
+                    ForEach(DoorMonitor.Opening.allCases) { opening in
+                        snapshotButton(.open(opening))
+                    }
+                    Button("Reset snapshots", role: .destructive) { finder.resetSnapshots() }
+                        .disabled(finder.isBusy)
+                } header: {
+                    Text("Find the door switches")
+                } footer: {
+                    Text("Parked, ignition on. Scan once. Then: everything shut → All closed. For each "
+                         + "opening: open only that one → its button → close it. Finish with All closed "
+                         + "again. Doors are saved and read live as soon as they're certain.")
+                }
+                Section("Found") {
+                    ForEach(DoorMonitor.Opening.allCases) { opening in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(opening.rawValue).font(.subheadline.bold())
+                            Text(foundText(opening))
+                                .font(.system(.caption, design: .monospaced))
+                                .foregroundColor(finder.learned[opening] == nil ? .secondary : .primary)
+                        }
+                    }
+                    if !finder.learned.isEmpty {
+                        Button("Forget all doors", role: .destructive) { finder.forget() }
+                            .disabled(finder.isBusy)
+                    }
+                }
+                Section {
+                    if let url = exportURL {
+                        ShareLink("Export raw scan (send to me)", item: url)
+                    } else {
+                        Text("Export raw scan — take some snapshots first")
+                            .foregroundColor(.secondary)
+                    }
+                } footer: {
+                    Text("If a door can't be found automatically, export the raw scan after one full "
+                         + "pass (All closed, each door once, All closed) and share the file, so the "
+                         + "exact door bits can be set by hand.")
+                }
+            }
+            .navigationTitle("Door finder")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+    }
+
+    private var exportURL: URL? {
+        _ = finder.counts        // recompute when a new snapshot arrives
+        return finder.exportFile()
+    }
+
+    private func snapshotButton(_ scene: DoorFinder.Scene) -> some View {
+        Button("\(scene.label)  ·  \(finder.counts[scene] ?? 0) taken") { finder.snapshot(scene) }
+            .disabled(finder.isBusy || finder.supported.isEmpty)
+    }
+
+    private func liveText(_ opening: DoorMonitor.Opening) -> String {
+        guard finder.learned[opening] != nil else { return "not found yet" }
+        guard let isOpen = obd.doorStates[opening] else { return "--" }
+        return isOpen ? "OPEN" : "closed"
+    }
+
+    private func foundText(_ opening: DoorMonitor.Opening) -> String {
+        if let signal = finder.learned[opening] { return signal.label(off: "closed", on: "open") }
+        if let candidate = finder.best[opening] {
+            return "maybe " + candidate.signal.label(off: "closed", on: "open") + " (needs more snapshots)"
+        }
+        return "—"
+    }
+
+    private var progress: (value: Double, label: String)? {
+        switch finder.phase {
+        case .idle:
+            return nil
+        case .scanning(let done, let total):
+            return (total > 0 ? Double(done) / Double(total) : 0, "Scanning \(done) / \(total)")
+        case .snapshot(let label, let done, let total):
+            return (total > 0 ? Double(done) / Double(total) : 0, "\(label): \(done) / \(total)")
+        }
+    }
+}
+
+/// On-car finder for the real M/D signal: raw bytes of each candidate transmission value on both
+/// ECUs, live. Move the lever M <-> D and watch which row changes. Off via AppConfig.OBD.selectorDiagnostics.
+private struct SelectorDiagnosticsView: View {
+    @ObservedObject var obd: OBDAdapter
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Selector diagnostics — move lever M↔D, watch for a change")
+                .font(.caption.bold())
+            ForEach(obd.selectorDiag) { row in
+                Text("\(row.id)  →  \(row.raw)")
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundColor(row.changed ? .red : (row.raw == "—" ? .secondary : .primary))
+            }
+            if obd.selectorDiag.isEmpty {
+                Text("waiting for the engine ECU…").font(.caption2).foregroundColor(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(8)
+        .background(Color.secondary.opacity(0.1))
+        .cornerRadius(10)
     }
 }
 

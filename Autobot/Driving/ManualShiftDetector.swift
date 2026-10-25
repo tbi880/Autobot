@@ -29,8 +29,14 @@ final class ManualShiftDetector: ObservableObject, PowerModeTrigger {
     @Published private(set) var state: LampState = .purpleSteady
     /// Current gear 1…6; nil while unknown (stopped, shifting, torque converter slipping).
     @Published private(set) var gear: Int?
-    /// True when `gear` comes from the car (PID A4), false when worked out from RPM ÷ speed.
+    /// True when `gear` comes from the car (PID A4 / DID 1E1F), false when worked out from RPM ÷ speed.
     @Published private(set) var gearFromCar = false
+    /// The real gear-selector lever (P/R/N/D/M) from the car, when it reports it (DID 1E23); nil
+    /// otherwise. R is exposed here too, for future use (reverse lighting, etc.).
+    @Published private(set) var selector: ELM327.Selector?
+    /// True while Power Mode follows the car's real M/D selector; false while it's worked out from
+    /// RPM/speed/pedal (the car doesn't report the selector).
+    @Published private(set) var usingRealSelector = false
     /// What made it decide on manual shifting, for the dashboard and the log.
     @Published private(set) var reason: String?
     /// Engine r/min per km/h in top gear, fine-tuned while cruising.
@@ -46,6 +52,8 @@ final class ManualShiftDetector: ObservableObject, PowerModeTrigger {
     private var candidateCount = 0                // …and in how many readings in a row
     private var lastGear: (gear: Int, time: Date)?
     private var revsHighSince: Date?
+    private var selectorCandidate: ELM327.Selector?
+    private var selectorCount = 0
     private var lastManualSign: Date?
     private var recent: [OBDSample] = []          // the last few seconds, for the speed trend
     private var lastSaved = Date.distantPast
@@ -66,6 +74,8 @@ final class ManualShiftDetector: ObservableObject, PowerModeTrigger {
             candidateCount = 0
             gear = nil
             revsHighSince = nil
+            selectorCandidate = nil
+            selectorCount = 0
             recent.removeAll()
             return
         }
@@ -73,9 +83,36 @@ final class ManualShiftDetector: ObservableObject, PowerModeTrigger {
         recent.removeAll { sample.time.timeIntervalSince($0.time) > Tuning.trendWindow }
 
         updateGear(sample)
-        checkRevs(sample)
-        learnTopGear(sample)
-        checkCalm(sample)
+
+        if let reported = sample.selector {
+            usingRealSelector = true
+            applySelector(reported, sample)        // the car tells us M/D directly
+        } else {
+            usingRealSelector = false
+            selectorCandidate = nil
+            selectorCount = 0
+            checkRevs(sample)                      // no selector: work M out from the numbers
+            learnTopGear(sample)
+            checkCalm(sample)
+        }
+    }
+
+    // MARK: Real selector (DID 1E23)
+
+    /// Drive Power Mode straight from the car's gear-selector lever: M -> red breathing, anything
+    /// else -> purple steady. A value counts once it has held for `selectorConfirmReadings` readings,
+    /// so a single garbled byte doesn't flip the lamp; an unmapped byte leaves the state as it is.
+    private func applySelector(_ reported: ELM327.Selector, _ s: OBDSample) {
+        if reported == selectorCandidate {
+            selectorCount += 1
+        } else {
+            selectorCandidate = reported
+            selectorCount = 1
+        }
+        guard selectorCount >= Tuning.selectorConfirmReadings else { return }
+        selector = reported
+        if case .unknown = reported { return }     // unrecognised code: don't change Power Mode
+        setManual(reported.isManual, reason: "selector in \(reported.label) (from the car)", s)
     }
 
     // MARK: Gear
@@ -162,21 +199,26 @@ final class ManualShiftDetector: ObservableObject, PowerModeTrigger {
 
     private func manualSign(_ s: OBDSample, reason: String) {
         lastManualSign = s.time
-        guard state != .redBreathing else { return }
-        self.reason = reason
-        state = .redBreathing
-        onLog?("Manual: " + reason)
-        onStateChange?(.redBreathing)
+        setManual(true, reason: reason, s)
     }
 
-    /// Back to D-style driving once the revs have stayed low for `calmTime`.
+    /// Switch Power Mode on (red breathing) or off (purple steady), announcing and logging only on a
+    /// real change. Shared by the heuristic and the real-selector path.
+    private func setManual(_ on: Bool, reason: String, _ s: OBDSample) {
+        let target: LampState = on ? .redBreathing : .purpleSteady
+        guard state != target else { return }
+        self.reason = reason
+        state = target
+        onLog?("Manual: " + reason)
+        onStateChange?(target)
+    }
+
+    /// Back to D-style driving once the revs have stayed low for `calmTime` (heuristic path only).
     private func checkCalm(_ s: OBDSample) {
         guard state == .redBreathing else { return }
         if s.rpm > Tuning.calmRPM { lastManualSign = s.time }      // still revving: stay manual
         guard let last = lastManualSign, s.time.timeIntervalSince(last) >= Tuning.calmTime else { return }
-        state = .purpleSteady
-        onLog?("Manual: revs at or below \(Int(Tuning.calmRPM)) r/min for \(Int(Tuning.calmTime)) s, back to D-style driving")
-        onStateChange?(.purpleSteady)
+        setManual(false, reason: "revs at or below \(Int(Tuning.calmRPM)) r/min for \(Int(Tuning.calmTime)) s, back to D-style driving", s)
     }
 
     // MARK: Helpers

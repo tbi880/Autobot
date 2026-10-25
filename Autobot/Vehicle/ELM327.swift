@@ -76,6 +76,57 @@ enum ELM327 {
         "01" + pids.map { String(format: "%02X", $0) }.joined() + (replyCount ? "1" : "")
     }
 
+    // MARK: Gear selector (UDS service 22)
+
+    /// UDS "service 22" (read data by identifier). The PCM answers "22 <DID>" with "62 <DID> <data…>".
+    /// These DIDs are Mazda/Ford SkyActiv PCM identifiers, confirmed from community captures
+    /// (OBDb) and matching what MAXOBD's Mazda module reads; see README.
+
+    /// Gear-selector lever position (P/R/N/D/M), one byte. The only value that tells M from D.
+    static let selectorDID = "1E23"
+    /// Engaged gear 1…6 (actual gear, same in D and M), one byte. A real gear number when the
+    /// car has no standard PID A4.
+    static let engagedGearDID = "1E1F"
+
+    /// The gear-selector lever. Read from the PCM with "221E23"; one byte, these raw values seen on
+    /// Mazda/Ford SkyActiv PCMs: 0A manual (M), 2E drive (D), 32 neutral, 3C reverse, 46 park.
+    /// Unmapped bytes stay `.unknown` so a firmware that uses other codes doesn't read as a gear.
+    enum Selector: Equatable {
+        case park, reverse, neutral, drive, manual
+        case unknown(UInt8)
+
+        init(byte: UInt8) {
+            switch byte {
+            case 0x0A: self = .manual
+            case 0x2E: self = .drive
+            case 0x32: self = .neutral
+            case 0x3C: self = .reverse
+            case 0x46: self = .park
+            default:   self = .unknown(byte)
+            }
+        }
+
+        /// True only in the manual gate (M), where Power Mode belongs.
+        var isManual: Bool { self == .manual }
+
+        var label: String {
+            switch self {
+            case .park: return "P"
+            case .reverse: return "R"
+            case .neutral: return "N"
+            case .drive: return "D"
+            case .manual: return "M"
+            case .unknown(let b): return String(format: "0x%02X", b)
+            }
+        }
+    }
+
+    /// A UDS service-22 request: "221E23". `replyCount` adds a trailing "1" (one reply is enough),
+    /// dropped like the mode-01 one if the adapter answers "?".
+    static func request22(_ did: String, replyCount: Bool) -> String {
+        "22" + did + (replyCount ? "1" : "")
+    }
+
     // MARK: Replies
 
     /// The values in a mode 01 reply, by PID: "410C0BB80D32" -> [0x0C: [0x0B, 0xB8], 0x0D: [0x32]].
@@ -126,6 +177,55 @@ enum ELM327 {
     static func gear(_ data: [UInt8]) -> Int? {
         let gear = Int(data[1] >> 4)
         return (1...10).contains(gear) ? gear : nil
+    }
+
+    /// The data bytes after "62<DID>" in a service-22 reply, or nil if the DID isn't echoed
+    /// (e.g. "NO DATA", a negative response "7F22…", or a different DID). Longer replies come as
+    /// several CAN frames (ISO-TP): a length line such as "00A", then "0:…", "1:…". Those are joined
+    /// first and cut to the stated length, so the padding in the last frame isn't read as data.
+    static func payload22(_ did: String, in reply: String) -> [UInt8]? {
+        let marker = "62" + did.uppercased()
+        let all = lines(reply)
+        var statedLength: Int?
+        var frames = ""
+        for line in all {
+            if line.count == 3, let length = Int(line, radix: 16) {
+                statedLength = length
+                continue
+            }
+            let chars = Array(line)
+            if chars.count > 2, chars[1] == ":", chars[0].isHexDigit {
+                frames += String(chars[2...])
+            }
+        }
+        for text in (frames.isEmpty ? [] : [frames]) + all {
+            guard let range = text.range(of: marker) else { continue }
+            let hex = Array(text[range.upperBound...])
+            var bytes: [UInt8] = []
+            var i = 0
+            while i + 1 < hex.count, let byte = UInt8(String(hex[i...(i + 1)]), radix: 16) {
+                bytes.append(byte)
+                i += 2
+            }
+            if !frames.isEmpty, text == frames, let statedLength, statedLength >= 3 {
+                bytes = Array(bytes.prefix(statedLength - 3))      // minus "62" and the 2-byte DID
+            }
+            return bytes
+        }
+        return nil
+    }
+
+    /// The gear-selector lever from a "221E23" reply; nil if the PCM didn't answer the DID.
+    static func selector(in reply: String) -> Selector? {
+        guard let first = payload22(selectorDID, in: reply)?.first else { return nil }
+        return Selector(byte: first)
+    }
+
+    /// The engaged gear (1…8) from a "221E1F" reply; nil if not a plausible gear.
+    static func engagedGear(in reply: String) -> Int? {
+        guard let first = payload22(engagedGearDID, in: reply)?.first else { return nil }
+        let gear = Int(first)
+        return (1...8).contains(gear) ? gear : nil
     }
 
     /// Whether a "0100" reply is a real answer from an ECU (not "NO DATA", "UNABLE TO CONNECT"…).

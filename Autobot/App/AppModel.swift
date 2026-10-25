@@ -1,10 +1,12 @@
 // AppModel.swift
 // Creates every component and wires them together:
 //
+//   MFinder (finds the M flag once) ──learned M flag──▶ OBDAdapter (TCM: P/R/N, gear, M/D)
 //   OBDAdapter ──live data──▶ ManualShiftDetector ──▶ PowerModeController ──scenes (powerMode, powerTransition)──▶ LightingArbiter ──▶ LampController
 //                                                                         └─"Power Mode Activated/Deactivated"──▶ VoiceCoordinator
 //     (AppConfig.PowerMode.trigger: ManualShiftDetector, EngineMonitor (RPM only) or SpeedMonitor (GPS))
 //   SpeedMonitor (GPS) ──▶ speed on the dashboard, location for the weather briefing / commute check
+//   DoorFinder (finds the door switches once) ──▶ OBDAdapter ──doorStates──▶ DoorMonitor
 //   DoorMonitor ──▶ DoorSafetyAlert ──scene (doorAlert)──▶ LightingArbiter
 //                                   └─"Door open detected"──▶ VoiceCoordinator
 //   LampController.isReady ┐
@@ -33,6 +35,8 @@ final class AppModel: ObservableObject {
     let obd: OBDAdapter
     let engine: EngineMonitor
     let manual: ManualShiftDetector
+    let mFinder: MFinder
+    let doorFinder: DoorFinder
     let boot: BootSequence
     private let voice: VoiceCoordinator
     private let doorAlert: DoorSafetyAlert
@@ -69,6 +73,12 @@ final class AppModel: ObservableObject {
         self.obd = obd
         self.engine = engine
         self.manual = manual
+        let mFinder = MFinder(obd: obd)
+        mFinder.onLog = { [weak lamp] message in lamp?.addLog(message) }
+        self.mFinder = mFinder
+        let doorFinder = DoorFinder(obd: obd)
+        doorFinder.onLog = { [weak lamp] message in lamp?.addLog(message) }
+        self.doorFinder = doorFinder
         let trigger: any PowerModeTrigger
         switch AppConfig.PowerMode.trigger {
         case .manualShift: trigger = manual
@@ -106,6 +116,10 @@ final class AppModel: ObservableObject {
         obd.start()
         carPlay.start()
 
+        obd.$doorStates
+            .sink { [weak self] states in self?.doorStatesChanged(states) }
+            .store(in: &subscriptions)
+
         Publishers.CombineLatest(lamp.$isReady, carPlay.$isConnected)
             .sink { [weak self] lampReady, carPlayConnected in
                 self?.connectionChanged(lampReady: lampReady, carPlayConnected: carPlayConnected)
@@ -141,6 +155,18 @@ final class AppModel: ObservableObject {
         guard lampReady, bootFinished, !greetedThisDrive else { return }
         greetedThisDrive = true
         runWelcome()
+    }
+
+    /// Real door states from the car (the switches DoorFinder found): DoorMonitor follows them, so
+    /// the door alert works on real data. When they become unknown (live data stopped) everything
+    /// counts as closed again. Without learned switches the test buttons stay in charge.
+    private func doorStatesChanged(_ states: [DoorMonitor.Opening: Bool]) {
+        guard !states.isEmpty else {
+            guard !obd.doorSignals.isEmpty else { return }
+            for opening in DoorMonitor.Opening.allCases { doors.setOpen(opening, false) }
+            return
+        }
+        for (opening, isOpen) in states { doors.setOpen(opening, isOpen) }
     }
 
     /// Start screen done (engine sound already stopped). The Welcome may start once the

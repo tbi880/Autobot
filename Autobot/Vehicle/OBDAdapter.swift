@@ -1,15 +1,19 @@
 // OBDAdapter.swift
-// Connects to the OBD2 Bluetooth adapter (KONNWEI, ELM327-compatible) and reads live data from
-// the engine ECU a few times a second: RPM, road speed, the accelerator pedal (or the engine load)
-// and, if the car has it, the gear. Commands and reply parsing: ELM327.swift. The data goes out
-// as `sample` to ManualShiftDetector and EngineMonitor.
+// Connects to the OBD2 Bluetooth adapter (KONNWEI, ELM327-compatible) and reads live data a few
+// times a second: RPM, road speed, the accelerator pedal (or the engine load) and the transmission
+// (lever position and gear). Commands and reply parsing: ELM327.swift, MazdaTCM.swift. The data
+// goes out as `sample` to ManualShiftDetector and EngineMonitor.
 //
 //   ENGINE START -> scan for the adapter (service FFF0, name "KONNWEI") -> connect -> FFF1 notify on
 //   -> ATZ + set-up -> "0100" until the engine ECU answers (ignition on)
 //   -> which PIDs does it have (0100, 0120, …, logged) -> does any ECU report the gear (PID A4)?
-//   -> "010C0D" (RPM + speed) and the pedal (+ the gear) in a loop -> sample
+//   -> which transmission values does the car answer (selector 1E23, TCM gear 1E12, 1E1F)?
+//   -> "010C0D" (RPM + speed), the pedal and the transmission in a loop -> sample
+//      (+ the learned door switches every few rounds -> doorStates)
 //
-// One command at a time: the next one goes out after the ">" prompt (or a timeout).
+// One command at a time: the next one goes out after the ">" prompt (or a timeout). Work that needs
+// the adapter for longer (MFinder's / DoorFinder's scans and snapshots) runs between two rounds via
+// runBetweenRounds, so it never mixes with the live requests.
 // If the ECU stops answering (engine off) the set-up starts again; if the adapter disconnects,
 // scanning starts again, like the lamp. Close MAXOBD while driving: both apps would share the
 // adapter and get each other's replies.
@@ -18,7 +22,7 @@ import Combine
 import CoreBluetooth
 import SwiftUI
 
-/// One round of live data from the engine ECU.
+/// One round of live data.
 struct OBDSample {
     let time: Date
     /// Engine speed, r/min.
@@ -27,8 +31,19 @@ struct OBDSample {
     let speed: Double?
     /// How hard the accelerator is pressed, 0–100 %: pedal PID 5A or 49, otherwise engine load 04.
     let demand: Double?
-    /// Gear from PID A4, when the engine ECU reports it.
+    /// Gear from PID A4, the TCM (1E12) or the engaged-gear DID (1E1F), when the car reports it.
     let gear: Int?
+    /// The gear lever (P/R/N/D/M) when the car tells it: from the selector DID (1E23) on cars that
+    /// have it, otherwise from the TCM (P/R/N always, D or M once the M flag is learned). nil when
+    /// unknown, e.g. driving before the M flag has been learned.
+    let selector: ELM327.Selector?
+}
+
+/// One line in the optional raw diagnostic (AppConfig.OBD.selectorDiagnostics).
+struct SelectorDiag: Identifiable {
+    let id: String          // "7E1 221E12"
+    let raw: String         // "03" or "—" when the ECU didn't answer
+    let changed: Bool       // true for one cycle after the value changed
 }
 
 final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeripheralDelegate {
@@ -44,6 +59,22 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     @Published private(set) var demandSource: String?
     /// Whether the car reports the current gear (standard PID A4); nil until checked.
     @Published private(set) var reportsGear: Bool?
+    /// Whether the TCM answers its gear value (7E1 221E12: P/R/N and the gear); nil until checked.
+    @Published private(set) var reportsTCMGear: Bool?
+    /// The latest raw TCM gear code (46 P, 3C R, 32 N, 01…06 gear), for the M finder screen.
+    @Published private(set) var tcmGearCode: UInt8?
+    /// Live raw transmission values while AppConfig.OBD.selectorDiagnostics is on.
+    @Published private(set) var selectorDiag: [SelectorDiag] = []
+
+    /// Which doors are open, from the learned door switches (empty until DoorFinder found them,
+    /// and again when live data stops). Feeds DoorMonitor.
+    @Published private(set) var doorStates: [DoorMonitor.Opening: Bool] = [:]
+
+    /// The M flag, read every round with the TCM gear: built in (AppConfig.Transmission.mFlag),
+    /// or the one MFinder learned.
+    var mFlag: BitSignal? = AppConfig.Transmission.mFlag
+    /// The door switches DoorFinder found, read every few rounds.
+    var doorSignals: [DoorMonitor.Opening: BitSignal] = [:]
 
     /// Latest engine speed (r/min); nil while unknown.
     var rpm: Double? { sample?.rpm }
@@ -63,8 +94,27 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     private var combineRequests = true    // "010C0D"; false if the ECU answers one PID per request
     private var demandPID: UInt8?
     private var gearFromECU = false
+    private var selectorAvailable = false   // some ECU answers "221E23" (Ford-style P/R/N/D/M)
+    private var selectorHeader: String?     // …and which one
+    private var tcmGearAvailable = false    // the TCM answers "221E12" (P/R/N + gear)
+    private var engagedGearAvailable = false // the PCM answers "221E1F" with a gear number
+    private var currentHeader: String?      // request header the adapter is set to (nil = unknown)
+    private var currentReceive: String?     // receive address set with ATCRA (nil = automatic)
+    private var receiveFilterUnsupported = false
+    private var diagLast: [String: String] = [:]
     private var pedalReleased: Double?    // PID 49: lowest value seen, i.e. the pedal released
     private var pedalFloored = 80.0       // PID 49: highest value seen, at least 80 %
+
+    /// Work waiting to run between two rounds of live data (runBetweenRounds).
+    private struct Job {
+        let run: () async -> Void
+        let cancel: () -> Void
+    }
+    private var jobs: [Job] = []
+    private var jobRunning = false
+
+    /// The engine ECU's request header, or the broadcast address when none is set.
+    private var baseHeader: String { AppConfig.OBD.requestHeader ?? "7DF" }
 
     /// Turns on Bluetooth and starts looking for the adapter. Called when ENGINE START is pressed.
     func start() {
@@ -77,6 +127,86 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         central = CBCentralManager(delegate: self, queue: .main)
     }
 
+    // MARK: Exclusive work (MFinder)
+
+    /// Runs `work` between two rounds of live data, with the adapter to itself: nothing else is sent
+    /// meanwhile, and live data goes on afterwards. nil if live data isn't running, or stops before
+    /// the work could run.
+    func runBetweenRounds<T>(_ work: @escaping (OBDAdapter) async -> T) async -> T? {
+        guard isReady else { return nil }
+        return await withCheckedContinuation { (continuation: CheckedContinuation<T?, Never>) in
+            jobs.append(Job(
+                run: { [unowned self] in
+                    let result = await work(self)
+                    continuation.resume(returning: result)
+                },
+                cancel: { continuation.resume(returning: nil) }))
+        }
+    }
+
+    /// One service-22 read for work running in runBetweenRounds: switches the request header as
+    /// needed; nil if the ECU didn't answer that DID. `complete` waits for the whole reply (several
+    /// frames) instead of returning after the first one.
+    func readDID(_ did: String, from header: String, complete: Bool, timeout: TimeInterval) async -> [UInt8]? {
+        guard jobRunning, await useHeader(header) else { return nil }
+        let reply = await send22(did, complete: complete, timeout: timeout)
+        return reply.flatMap { ELM327.payload22(did, in: $0) }
+    }
+
+    /// For work in runBetweenRounds: the DIDs in `plan` that answer, "726 DA10" style.
+    func scanDIDs(_ plan: [(header: String, ranges: [ClosedRange<Int>])], timeout: TimeInterval,
+                  progress: (Int, Int) -> Void, cancelled: () -> Bool) async -> [String] {
+        let total = plan.reduce(0) { sum, entry in sum + entry.ranges.reduce(0) { $0 + $1.count } }
+        var found: [String] = []
+        var done = 0
+        for entry in plan {
+            for range in entry.ranges {
+                for value in range {
+                    if cancelled() { return found }
+                    let did = String(format: "%04X", value)
+                    if let bytes = await readDID(did, from: entry.header, complete: false, timeout: timeout),
+                       !bytes.isEmpty {
+                        found.append("\(entry.header) \(did)")
+                    }
+                    done += 1
+                    if done % 4 == 0 || done == total { progress(done, total) }
+                }
+            }
+        }
+        return found
+    }
+
+    /// For work in runBetweenRounds: every key ("726 DA10") read `reads` times, in separate passes
+    /// so the reads are spread out (values that change by themselves show up as unsteady).
+    func snapshotDIDs(_ keys: [String], reads: Int, progress: (Int, Int) -> Void,
+                      cancelled: () -> Bool) async -> SignalDiff.Snapshot {
+        var snapshot: SignalDiff.Snapshot = [:]
+        let total = keys.count * reads
+        var done = 0
+        for _ in 0..<reads {
+            for key in keys {
+                if cancelled() { return snapshot }
+                let parts = key.split(separator: " ")
+                if parts.count == 2,
+                   let bytes = await readDID(String(parts[1]), from: String(parts[0]), complete: true,
+                                             timeout: AppConfig.OBD.replyTimeout),
+                   !bytes.isEmpty {
+                    snapshot[key, default: []].append(bytes)
+                }
+                done += 1
+                progress(done, total)
+            }
+        }
+        return snapshot
+    }
+
+    /// Live data stopped (or the adapter went away): work still waiting gets nil.
+    private func failPendingJobs() {
+        let pending = jobs
+        jobs.removeAll()
+        pending.forEach { $0.cancel() }
+    }
+
     // MARK: Session
 
     /// Set-up and live data, over and over, until the adapter disconnects (task cancelled).
@@ -85,10 +215,13 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
             if await setUp(), await waitForEngine() {
                 await discoverSupportedPIDs()
                 await checkGearReporting()
+                await checkTransmissionReporting()
                 await readLiveData()                   // returns when the ECU stops answering
             }
+            failPendingJobs()
             isReady = false
             setSample(nil)
+            if !doorStates.isEmpty { doorStates = [:] }      // unknown now
             try? await Task.sleep(for: AppConfig.OBD.retryDelay)
         }
     }
@@ -98,6 +231,9 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         status = "OBD: setting up the adapter…"
         useReplyCount = true
         combineRequests = true
+        currentHeader = nil                            // ATZ resets the adapter's header…
+        currentReceive = nil                           // …and receive filter
+        receiveFilterUnsupported = false
         let version = await send(ELM327.reset, timeout: AppConfig.OBD.resetTimeout)
         guard version != nil else {
             logLine("OBD: no answer to \(ELM327.reset)")
@@ -106,6 +242,9 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         var results: [String] = []
         for command in ELM327.setupCommands {
             let reply = await send(command)
+            if command.hasPrefix("ATSH") {
+                currentHeader = ELM327.isOK(reply) ? String(command.dropFirst(4)) : nil
+            }
             results.append(command + (ELM327.isOK(reply) ? " OK" : " " + ELM327.readable(reply)))
         }
         logLine("OBD: \(ELM327.version(in: version)) · " + results.joined(separator: ", "))
@@ -169,30 +308,82 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     }
 
     /// Does any ECU report the gear (PID A4)? Shown on the dashboard; the gear itself is only read
-    /// when the engine ECU has it (otherwise ManualShiftDetector works it out from RPM ÷ speed).
+    /// when the engine ECU has it.
     private func checkGearReporting() async {
         if gearFromECU {
             reportsGear = true
             logLine("OBD: gear (PID A4) reported by the engine ECU")
             return
         }
-        let directHeader = AppConfig.OBD.requestHeader
-        if directHeader != nil { _ = await send(ELM327.broadcastHeader) }   // ask every ECU
+        await useHeader("7DF")                                  // ask every ECU
         let reply = await send(ELM327.gearCheck, timeout: AppConfig.OBD.probeTimeout)
-        if let directHeader { _ = await send("ATSH" + directHeader) }     // back to the engine ECU
+        await useHeader(baseHeader)                             // back to the engine ECU
         let reports = reply.flatMap { ELM327.reportsGear($0) } ?? false
         reportsGear = reports
-        logLine("OBD: gear (PID A4) " + (reports ? "reported by another ECU, not read; gear from RPM ÷ speed"
-                                                 : "not reported by the car; gear from RPM ÷ speed"))
+        logLine("OBD: gear (PID A4) " + (reports ? "reported by another ECU, not read" : "not reported by the car"))
     }
 
-    /// RPM + speed, the pedal and (if the engine ECU has it) the gear, round after round, until the
-    /// engine ECU stops answering.
+    /// Which transmission values does the car answer? In order of preference:
+    ///   1. the selector DID 1E23 (P/R/N/D/M in one byte, Ford-style; not on the 2015 CX-5 2.2D),
+    ///   2. the TCM gear 1E12 (P/R/N and the gear; D vs M from the M flag MFinder learns),
+    ///   3. the engaged gear 1E1F, for a gear number when nothing above gives one.
+    private func checkTransmissionReporting() async {
+        selectorAvailable = false
+        selectorHeader = nil
+        tcmGearAvailable = false
+        engagedGearAvailable = false
+        guard AppConfig.OBD.readSelector, !AppConfig.OBD.selectorDiagnostics else {
+            reportsTCMGear = false
+            logLine("OBD: transmission read off" + (AppConfig.OBD.selectorDiagnostics ? " (raw diagnostics on)" : ""))
+            return
+        }
+        for header in AppConfig.OBD.selectorHeaders {
+            guard await useHeader(header),
+                  let reply = await send22(ELM327.selectorDID, timeout: AppConfig.OBD.probeTimeout),
+                  let selector = ELM327.selector(in: reply) else { continue }
+            selectorAvailable = true
+            selectorHeader = header
+            logLine("OBD: selector (\(header) 221E23) reported, now \(selector.label); M/D read directly")
+            break
+        }
+        if !selectorAvailable, await useHeader(MazdaTCM.header),
+           let reply = await send22(MazdaTCM.gearDID, timeout: AppConfig.OBD.probeTimeout),
+           let code = ELM327.payload22(MazdaTCM.gearDID, in: reply)?.first {
+            tcmGearAvailable = true
+            tcmGearCode = code
+            logLine("OBD: TCM gear (7E1 221E12) reported, now " + String(format: "%02X", code)
+                    + "; P/R/N and gear from it, M/D "
+                    + (mFlag.map { "from the M flag (\($0.label(off: "D", on: "M")))" } ?? "unknown (no M flag)"))
+        }
+        reportsTCMGear = tcmGearAvailable
+        if !selectorAvailable, !tcmGearAvailable {
+            logLine("OBD: no transmission values (221E23, 7E1 221E12); M worked out from RPM/speed/pedal")
+        }
+        await useHeader(baseHeader)
+        if !gearFromECU, !tcmGearAvailable,
+           let reply = await send22(ELM327.engagedGearDID, timeout: AppConfig.OBD.probeTimeout),
+           ELM327.engagedGear(in: reply) != nil {
+            engagedGearAvailable = true
+            logLine("OBD: engaged gear (221E1F) reported; using it for the gear number")
+        }
+    }
+
+    /// RPM + speed, the pedal and the transmission, round after round, until the engine ECU stops
+    /// answering. Work queued by runBetweenRounds runs between two rounds.
     private func readLiveData() async {
         status = "OBD: reading live data"
         isReady = true
         var misses = 0
+        var round = 0
         while !Task.isCancelled {
+            if !jobs.isEmpty {
+                let job = jobs.removeFirst()
+                jobRunning = true
+                await job.run()
+                jobRunning = false
+                continue
+            }
+            await useHeader(baseHeader)
             var values: [UInt8: [UInt8]] = [:]
             for group in requestGroups() {
                 guard let first = group.first, let reply = await request(group) else { continue }
@@ -203,9 +394,20 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
                 }
                 values.merge(found) { _, new in new }
             }
+            var engagedGear: Int?
+            if engagedGearAvailable, let reply = await send22(ELM327.engagedGearDID) {
+                engagedGear = ELM327.engagedGear(in: reply)
+            }
+            if AppConfig.OBD.selectorDiagnostics { selectorDiag = await diagnose() }
+            let transmission = await readTransmission()
+            if !doorSignals.isEmpty, round % max(AppConfig.Doors.pollEveryRounds, 1) == 0 {
+                await readDoors()
+            }
+            round += 1
             if let rpmData = values[ELM327.rpmPID] {
                 misses = 0
-                setSample(makeSample(values, rpmData: rpmData))
+                setSample(makeSample(values, rpmData: rpmData, selector: transmission.selector,
+                                     gear: transmission.gear ?? engagedGear))
             } else {
                 misses += 1
                 if misses >= AppConfig.OBD.maxMissedReadings {
@@ -217,7 +419,7 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         }
     }
 
-    /// The requests for one round, each small enough for a single CAN frame.
+    /// The mode 01 requests for one round, each small enough for a single CAN frame.
     private func requestGroups() -> [[UInt8]] {
         let hasSpeed = supportedPIDs.isEmpty || supportedPIDs.contains(ELM327.speedPID)
         let core: [UInt8] = hasSpeed ? [ELM327.rpmPID, ELM327.speedPID] : [ELM327.rpmPID]
@@ -227,7 +429,79 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         return groups
     }
 
-    private func makeSample(_ values: [UInt8: [UInt8]], rpmData: [UInt8]) -> OBDSample {
+    /// The lever and gear for this round: from the selector DID (1E23) on cars that have it,
+    /// otherwise from the TCM gear code (1E12) plus the learned M flag.
+    private func readTransmission() async -> (selector: ELM327.Selector?, gear: Int?) {
+        if selectorAvailable {
+            guard await useHeader(selectorHeader ?? baseHeader) else { return (nil, nil) }
+            return (await send22(ELM327.selectorDID).flatMap { ELM327.selector(in: $0) }, nil)
+        }
+        guard tcmGearAvailable else { return (nil, nil) }
+        var code: UInt8?
+        var manual: Bool?
+        if await useHeader(MazdaTCM.header) {
+            code = await send22(MazdaTCM.gearDID).flatMap { ELM327.payload22(MazdaTCM.gearDID, in: $0)?.first }
+            if let signal = mFlag, signal.header == MazdaTCM.header {
+                manual = signal.isOn(await readSignal(signal))
+            }
+        }
+        if let signal = mFlag, signal.header != MazdaTCM.header, await useHeader(signal.header) {
+            manual = signal.isOn(await readSignal(signal))
+        }
+        tcmGearCode = code
+        return MazdaTCM.reading(gearCode: code, manual: manual)
+    }
+
+    /// A learned signal's DID; the whole reply when it's longer than one CAN frame.
+    private func readSignal(_ signal: BitSignal) async -> [UInt8]? {
+        let reply = await send22(signal.did, complete: signal.length > 4)
+        return reply.flatMap { ELM327.payload22(signal.did, in: $0) }
+    }
+
+    /// The learned door switches: each DID read once (doors often share one), grouped by ECU so the
+    /// header changes as little as possible, then every door's bit. A door whose value doesn't come
+    /// back keeps its last state.
+    private func readDoors() async {
+        let byDID = Dictionary(grouping: doorSignals) { "\($0.value.header) \($0.value.did)" }
+        var replies: [String: [UInt8]] = [:]
+        for key in byDID.keys.sorted() {
+            guard let signals = byDID[key], let signal = signals.first?.value,
+                  await useHeader(signal.header) else { continue }
+            let complete = signals.contains { $0.value.length > 4 }
+            if let reply = await send22(signal.did, complete: complete),
+               let data = ELM327.payload22(signal.did, in: reply) {
+                replies[key] = data
+            }
+        }
+        var states = doorStates
+        for (opening, signal) in doorSignals {
+            if let isOpen = signal.isOn(replies["\(signal.header) \(signal.did)"]) {
+                states[opening] = isOpen
+            }
+        }
+        if states != doorStates { doorStates = states }
+    }
+
+    /// Optional raw diagnostic: every candidate transmission DID on both ECUs, as raw bytes.
+    private func diagnose() async -> [SelectorDiag] {
+        var rows: [SelectorDiag] = []
+        for candidate in AppConfig.OBD.diagnosticDIDs {
+            var reply: String?
+            if await useHeader(candidate.header) {
+                reply = await send22(candidate.did, timeout: AppConfig.OBD.diagnosticTimeout)
+            }
+            let bytes = reply.flatMap { ELM327.payload22(candidate.did, in: $0) }
+            let raw = bytes.map { $0.map { String(format: "%02X", $0) }.joined(separator: " ") } ?? "—"
+            let key = "\(candidate.header) 22\(candidate.did)"
+            let changed = diagLast[key].map { $0 != raw && raw != "—" } ?? false
+            diagLast[key] = raw
+            rows.append(SelectorDiag(id: key, raw: raw, changed: changed))
+        }
+        return rows
+    }
+
+    private func makeSample(_ values: [UInt8: [UInt8]], rpmData: [UInt8],
+                            selector: ELM327.Selector?, gear: Int?) -> OBDSample {
         var demand: Double?
         if let pid = demandPID, let data = values[pid] {
             let percent = ELM327.percent(data)
@@ -237,7 +511,8 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
                          rpm: ELM327.rpm(rpmData),
                          speed: values[ELM327.speedPID].map { Double($0[0]) },
                          demand: demand,
-                         gear: values[ELM327.gearPID].flatMap { ELM327.gear($0) })
+                         gear: values[ELM327.gearPID].flatMap { ELM327.gear($0) } ?? gear,
+                         selector: selector)
     }
 
     /// PID 49 is the raw pedal sensor: roughly 15 % released and 80 % floored. Scaled to 0–100 %
@@ -253,6 +528,39 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
 
     // MARK: Commands
 
+    /// Points requests at one ECU ("ATSH7E1"); skipped when the adapter is already set to it. ECUs
+    /// outside 7E0–7E7 reply outside the 7E8–7EF range the adapter listens to by default (726 -> 72E),
+    /// so the adapter is told where to listen ("ATCRA72E"), and back to automatic ("ATAR") after.
+    @discardableResult
+    private func useHeader(_ header: String) async -> Bool {
+        if currentHeader == header { return true }
+        let reply = await send("ATSH" + header)
+        guard ELM327.isOK(reply) else {
+            currentHeader = nil
+            return false
+        }
+        currentHeader = header
+        let wanted = Self.receiveAddress(for: header)
+        if wanted != currentReceive, !receiveFilterUnsupported {
+            let filterReply = await send(wanted.map { "ATCRA" + $0 } ?? "ATAR")
+            if ELM327.isOK(filterReply) {
+                currentReceive = wanted
+            } else if let filterReply, ELM327.isUnknownCommand(filterReply) {
+                receiveFilterUnsupported = true
+                logLine("OBD: adapter doesn't take ATCRA/ATAR; replies from \(header) may be filtered out")
+            }
+        }
+        return true
+    }
+
+    /// Where replies to `header` come from, when the adapter has to be told: nil for the broadcast
+    /// address and 7E0–7E7 (their 7E8–7EF replies are heard by default), header + 8 otherwise.
+    private static func receiveAddress(for header: String) -> String? {
+        guard let value = Int(header, radix: 16) else { return nil }
+        if value == 0x7DF || (0x7E0...0x7E7).contains(value) { return nil }
+        return String(format: "%03X", value + 8)
+    }
+
     /// A mode 01 request; asked again without the reply count if the adapter doesn't take it.
     private func request(_ pids: [UInt8], timeout: TimeInterval = AppConfig.OBD.replyTimeout) async -> String? {
         let reply = await send(ELM327.request(pids, replyCount: useReplyCount), timeout: timeout)
@@ -260,6 +568,18 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         useReplyCount = false
         logLine("OBD: adapter doesn't take a reply count, asking without it")
         return await send(ELM327.request(pids, replyCount: false), timeout: timeout)
+    }
+
+    /// A UDS service-22 request ("221E12"). The reply count is left off when `complete` (a reply of
+    /// several frames is then read to the end) and dropped for good if the adapter answers "?".
+    private func send22(_ did: String, complete: Bool = false,
+                        timeout: TimeInterval = AppConfig.OBD.replyTimeout) async -> String? {
+        let withCount = useReplyCount && !complete
+        let reply = await send(ELM327.request22(did, replyCount: withCount), timeout: timeout)
+        guard let reply, withCount, ELM327.isUnknownCommand(reply) else { return reply }
+        useReplyCount = false
+        logLine("OBD: adapter doesn't take a reply count, asking without it")
+        return await send(ELM327.request22(did, replyCount: false), timeout: timeout)
     }
 
     /// Sends one command and waits for the ">" prompt. nil on timeout or when not connected.
@@ -300,10 +620,14 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         session?.cancel()
         session = nil
         finishReply(nil)
+        failPendingJobs()
         writeChar = nil
         received = ""
+        currentHeader = nil
+        currentReceive = nil
         isReady = false
         setSample(nil)
+        if !doorStates.isEmpty { doorStates = [:] }
     }
 
     // MARK: CBCentralManagerDelegate
