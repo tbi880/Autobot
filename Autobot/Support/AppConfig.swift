@@ -328,6 +328,62 @@ nonisolated enum AppConfig {
         static let confirmReadings = 1
     }
 
+    /// Rain mode (RainMode): cyan gradient breathing while it rains as far as the windshield wipers say,
+    /// not while they only run for the washer. Above the normal purple steady, below Power Mode. The wiper
+    /// lever comes from the lights frame (AppConfig.TurnSignals.frameID, Wipers.swift), which is listened
+    /// for while either feature is on: LO and HI count at once. In AUTO the rain sensor decides when to
+    /// wipe, so there it's the wiper motor that counts, read from the front body control module (the
+    /// bits WiperFinder learns) while the lever is in AUTO.
+    enum Rain {
+        /// The feature on or off. Off: the wipers don't change the lighting and the dashboard row is
+        /// hidden.
+        static let enabled = true
+        /// The wiper bits until the wiper finder has learned this car's: openpilot's CX-5 2017+ layout of
+        /// frame 09A, byte 4: 0x02 LO, 0x04 HI (AUTO / INT and the washer aren't in it).
+        static let builtIn = WiperSignal(
+            low: [WiperSignal.Term(byte: 4, mask: 0x02, value: 0x02)],
+            high: [WiperSignal.Term(byte: 4, mask: 0x04, value: 0x04)],
+            off: [WiperSignal.Term(byte: 4, mask: 0x06, value: 0x00)])
+        /// A lever reading counts once it has held for this many readings in a row (one a round), so a
+        /// quick MIST flick, or passing a position on the way to another, doesn't count.
+        static let confirmReadings = 2
+        /// Lever in AUTO: rain mode stays on this long after the last wipe the motor bits showed. Long
+        /// enough to bridge the pauses of intermittent wiping, and a wipe a reading misses (the motor is
+        /// read about once a second, a single wipe takes about as long); when the rain stops, rain mode
+        /// ends this long after the last wipe. Coming from LO or HI into AUTO counts as a wipe, so the
+        /// lamp doesn't drop back to purple in between.
+        static let autoHold: TimeInterval = 60
+        /// Lever in AUTO: wipes within this long after the lever got there don't count. Moving the lever
+        /// from OFF to AUTO wipes once (owner's manual), rain or not.
+        static let autoSettle: TimeInterval = 4
+        /// Lever in AUTO: wipes within this long after the washer was last seen in use don't count. The
+        /// washer wipes too (and twice more after letting go), and the rain sensor may take the fluid on
+        /// the glass for rain for a moment.
+        static let washerHold: TimeInterval = 10
+        /// How long one wiper finder snapshot listens to the frame.
+        static let snapshotListen: TimeInterval = 2
+
+        /// Where WiperFinder looks for the wiper motor bits: the front body control module (726, replies
+        /// from 72E), which drives the wiper LO and HI relays and reads the motor's auto-stop switch.
+        /// C100–C1FF (the body status block on other Mazdas) and DA00–DAFF (58 DIDs answer on this car,
+        /// live inputs among them: DA05 is the brake switch). Widen it if nothing is found (4000–40FF,
+        /// DD00–DD0F…); the scan result is kept until this changes.
+        static let motorScanPlan: [(header: String, ranges: [ClosedRange<Int>])] = [
+            ("726", [0xC100...0xC1FF, 0xDA00...0xDAFF]),
+        ]
+        /// The ECU that drives the wipers; its candidates are preferred.
+        static let motorHeader = "726"
+        /// Wait per DID while scanning (seconds).
+        static let motorScanTimeout: TimeInterval = 0.6
+        /// Every DID is read this many times per snapshot (in separate passes), so values that change by
+        /// themselves, and the auto-stop switch (it flips once a wipe), show up as unsteady and drop out.
+        static let motorReadsPerSnapshot = 2
+        /// Never the wiper motor, even if they slip into the scan: the values that drift or count by
+        /// themselves (Doors.ignoredDIDs: 12V battery, brake switch, a counter, the battery voltage —
+        /// which sags while the motor runs, so it would look like a wiper bit).
+        static let motorIgnoredDIDs: Set<String> = AppConfig.Doors.ignoredDIDs
+    }
+
     enum Lamp {
         /// How many times to resend a mode command if the lamp reports a different mode afterwards.
         static let modeRetries = 2

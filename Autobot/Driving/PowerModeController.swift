@@ -15,6 +15,9 @@
 //
 // The flash is a LightingArbiter request from `.powerTransition` (above Power Mode, below the
 // door alert), so an open door still overrides it, and withdrawing it restores the right scene.
+// Power Mode itself only asks for red breathing (`.powerMode`) while it's on; when it's off it
+// withdraws, so what's underneath shows: rain mode's cyan breathing (`.rain`) or the normal purple
+// steady (`.base`).
 
 import Combine
 import Foundation
@@ -52,7 +55,7 @@ final class PowerModeController: ObservableObject {
     }
 
     func start() {
-        lighting.request(committed, from: .powerMode)
+        applyPowerMode(committed)
         trigger.onStateChange = { [weak self] state in
             self?.simulated = nil              // real driving takes over from a test
             self?.stateChanged(to: state)
@@ -94,8 +97,18 @@ final class PowerModeController: ObservableObject {
         let now = currentState
         if now != committed {
             committed = now
-            lighting.request(now, from: .powerMode)   // set before the flash is withdrawn: no flicker
+            applyPowerMode(now)                       // set before the flash is withdrawn: no flicker
         }
         lighting.clear(.powerTransition)              // back to the (new or unchanged) Power Mode scene
+    }
+
+    /// Power Mode on: red breathing from `.powerMode`. Off: no request, so the scene underneath shows
+    /// (rain mode's cyan breathing, or the normal purple steady).
+    private func applyPowerMode(_ state: LampState) {
+        if state == .redBreathing {
+            lighting.request(.redBreathing, from: .powerMode)
+        } else {
+            lighting.clear(.powerMode)
+        }
     }
 }

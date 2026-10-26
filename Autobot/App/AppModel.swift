@@ -13,6 +13,11 @@
 //   of the KW905's reach) ──▶ ClimateTempFlash ──scene (climateTemp: blue / red flash)──▶ LightingArbiter
 //   OBDAdapter (TCM gear 7E1 221E12: 3C = lever in R) ──sample──▶ ReverseLight
 //     ──scene (reverse: yellow breathing, Power Mode's level)──▶ LightingArbiter
+//   OBDAdapter (lights frame 09A: wiper lever, bits learned by WiperFinder) ──lightsFrame──▶ RainMode
+//     (lever in AUTO: RainMode ──wiperMotorSignals──▶ OBDAdapter reads the FBCM's wiper motor bit,
+//      also learned by WiperFinder ──wiperMotorRunning──▶ RainMode)
+//     ──scene (rain: cyan breathing, above the normal purple, below Power Mode)──▶ LightingArbiter
+//   (purple steady itself is the `.base` request, under everything else)
 //   OBDAdapter (indicator lamp frame 09A, listened for on HS-CAN) ──turnSignal──▶ TurnSignalFlash
 //     ──scene (turnSignal: yellow flash, above Power Mode)──▶ LightingArbiter
 //   LampController.isReady ┐
@@ -47,6 +52,8 @@ final class AppModel: ObservableObject {
     let climate: ClimateTempFlash
     let turnSignals: TurnSignalFlash
     let reverse: ReverseLight
+    let rain: RainMode
+    let wiperFinder: WiperFinder
     private let voice: VoiceCoordinator
     private let doorAlert: DoorSafetyAlert
 
@@ -90,6 +97,12 @@ final class AppModel: ObservableObject {
         let reverse = ReverseLight(obd: obd, lighting: lighting)
         reverse.onLog = { [weak lamp] message in lamp?.addLog(message) }
         self.reverse = reverse
+        let rain = RainMode(obd: obd, lighting: lighting)
+        rain.onLog = { [weak lamp] message in lamp?.addLog(message) }
+        self.rain = rain
+        let wiperFinder = WiperFinder(obd: obd, rain: rain)
+        wiperFinder.onLog = { [weak lamp] message in lamp?.addLog(message) }
+        self.wiperFinder = wiperFinder
         self.manual = manual
         let mFinder = MFinder(obd: obd)
         mFinder.onLog = { [weak lamp] message in lamp?.addLog(message) }
@@ -129,6 +142,7 @@ final class AppModel: ObservableObject {
         assistant.prepare()
 
         lighting.onSceneChange = { [weak self] scene in self?.lamp.setDesired(scene) }
+        lighting.request(.purpleSteady, from: .base)   // the normal lighting, under everything else
         powerMode.start()
         speed.start()
         obd.start()
@@ -175,6 +189,11 @@ final class AppModel: ObservableObject {
     /// Debug: as if the lever went into R; the same button again hands back to the car's lever.
     func testReverse() {
         reverse.simulate()
+    }
+
+    /// Debug: as if the wipers were switched on; the same button again hands back to the car.
+    func testRain() {
+        rain.simulate()
     }
 
     // MARK: Wiring

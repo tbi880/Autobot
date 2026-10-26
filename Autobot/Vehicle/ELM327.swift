@@ -22,6 +22,13 @@
 import CoreBluetooth
 import Foundation
 
+/// One CAN frame heard while listening to the bus (ELM327 monitoring): when it arrived, and its data
+/// bytes.
+nonisolated struct CANFrame: Equatable {
+    let time: Date
+    let data: [UInt8]
+}
+
 enum ELM327 {
     static let service    = CBUUID(string: "FFF0")
     static let notifyChar = CBUUID(string: "FFF1")

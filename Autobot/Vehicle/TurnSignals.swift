@@ -47,12 +47,6 @@ nonisolated enum TurnSignals {
         }
     }
 
-    /// One frame heard on the bus: when it arrived, and its data bytes.
-    nonisolated struct Frame: Equatable {
-        let time: Date
-        let data: [UInt8]
-    }
-
     /// "00 00 20 00 00 00 00 00"
     static func hex(_ bytes: [UInt8]) -> String {
         bytes.map { String(format: "%02X", $0) }.joined(separator: " ")
@@ -100,7 +94,7 @@ nonisolated struct TurnSignalDetector {
 
     /// Asked while listening, after every frame and every 50 ms: listen on (true), or is this look
     /// decided (false)? `started`: when the look began.
-    func keepListening(_ frames: [TurnSignals.Frame], started: Date, now: Date) -> Bool {
+    func keepListening(_ frames: [CANFrame], started: Date, now: Date) -> Bool {
         if now.timeIntervalSince(started) >= tuning.maxListen { return false }
         let lamp = lampValues(frames)
         guard let first = lamp.first else {
@@ -115,7 +109,7 @@ nonisolated struct TurnSignalDetector {
 
     /// The look is over (`ended`: when it was decided): updates the state from what was heard.
     @discardableResult
-    mutating func finish(_ frames: [TurnSignals.Frame], ended: Date) -> TurnSignals.State {
+    mutating func finish(_ frames: [CANFrame], ended: Date) -> TurnSignals.State {
         let lamp = lampValues(frames)
         guard let first = lamp.first, let last = lamp.last else {
             expire(at: ended)                                   // nothing heard: no news
@@ -167,7 +161,7 @@ nonisolated struct TurnSignalDetector {
     }
 
     /// The lamp byte of every frame long enough to have it, in order.
-    private func lampValues(_ frames: [TurnSignals.Frame]) -> [(time: Date, value: UInt8)] {
+    private func lampValues(_ frames: [CANFrame]) -> [(time: Date, value: UInt8)] {
         let index = tuning.byteIndex
         return frames.compactMap { frame -> (time: Date, value: UInt8)? in
             frame.data.count > index ? (time: frame.time, value: frame.data[index]) : nil

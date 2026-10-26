@@ -101,7 +101,7 @@ final class VoiceCoordinator {
         switch state {
         case .redBreathing: return (AppConfig.Phrases.powerOn, .assistant)   // .sciFi for the effect voice
         case .purpleSteady: return (AppConfig.Phrases.powerOff, .assistant)
-        case .redBurstFlash, .blueBurstFlash, .yellowBurstFlash, .yellowBreathing:
+        case .redBurstFlash, .blueBurstFlash, .yellowBurstFlash, .yellowBreathing, .cyanBreathing:
             return nil                                                       // not Power Mode states
         }
     }

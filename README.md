@@ -13,7 +13,8 @@ assistant when the phone connects to CarPlay.
 ### Ambient lighting
 - **Power Mode when shifting by hand** (M; OBD2 Bluetooth adapter, see
   [Manual shifting detection](#manual-shifting-detection))
-  - driving in D: steady purple (zone 1 at 50 %, zone 2 at 100 %)
+  - driving in D: steady purple (zone 1 at 50 %, zone 2 at 100 %), or cyan breathing while it
+    rains (rain mode, below)
   - shifting yourself and holding the revs: firmware *Red Gradient* breathing, until the revs
     have stayed at or below 2500 r/min for 10 s
   - switching goes through a 3-second *buffer zone*: red burst flash + the Power Mode
@@ -26,6 +27,12 @@ assistant when the phone connects to CarPlay.
   switch flash and the door alert still go above it. Out of R it's Power Mode again (purple steady,
   red breathing in M). The lever is the TCM's `7E1 221E12` (`3C` in R), already read every round;
   the dashboard's *R* button stands in for it.
+- **Rain mode → cyan breathing**: while it rains as far as the windshield wipers say — lever in LO or
+  HI, or in AUTO once the rain sensor really makes them wipe — the lamp does the firmware's *Cyan
+  Gradient* breathing, but not when they only run for the washer. Above the normal purple steady, below
+  Power Mode (in M it's red breathing as usual). The lever comes from the car's CAN bus, the wiping in
+  AUTO from the front body control module (see [Wipers](#wipers-rain-mode)); the dashboard's *Rain*
+  button stands in for both, and its *Wiper finder* learns this car's bits.
 - **Turn signals and hazard lights → Yellow Burst Flash** (OBD2 adapter, see
   [Turn signals](#turn-signals)): while the indicators or the hazard lights flash, the lamp does the
   firmware's *Yellow Burst Flash*, above Power Mode — in M too, and during a Power Mode switch. When
@@ -46,7 +53,8 @@ assistant when the phone connects to CarPlay.
   door the [door finder](#doors-which-one-is-open) learned (test buttons while neither is read).
 - **Priority arbiter**: every lighting feature requests a scene with a priority, the highest
   one wins, and withdrawing a request restores the next one. From the top: door alert, turn
-  signals, A/C flash, Power Mode switch flash, then reverse / Power Mode (R and M never meet).
+  signals, A/C flash, Power Mode switch flash, then reverse / Power Mode (R and M never meet), rain
+  mode, and the normal purple steady underneath everything.
 - **Reliable commands**: one packet at a time, mode changes are read back and resent if the
   lamp disagrees, "busy" / checksum-error replies are retried.
 
@@ -123,8 +131,8 @@ weekday commute check. Hours, days and radius are in `AppConfig.Commute`.
 4. Optional: in Settings → Accessibility → Spoken Content → Voices, download an enhanced or
    premium English (US) female voice (e.g. Zoe or Ava) for clearer voices.
 
-The dashboard has test buttons for the welcome flow, both Power Mode voices, every door, reverse
-and the turn signals.
+The dashboard has test buttons for the welcome flow, both Power Mode voices, every door, reverse,
+the turn signals and rain mode.
 
 ## Lamp protocol
 
@@ -147,7 +155,7 @@ Frame: `2E | type | len | data… | checksum`, where
 | Mode | `8D` | `02, rhythm<<4 \| mode1, mode, parameter, speed` |
 | Query | `90` | `7C, 00 brightness / 01 colour / 02 mode` → reply type `7C` |
 
-Modes used: `0` steady, `2` breathing (parameter `1` = red gradient, `2` = yellow gradient), `3` burst flash
+Modes used: `0` steady, `2` breathing (parameter `1` = red, `2` = yellow, `4` = cyan gradient), `3` burst flash
 (parameter `1` = red, `2` = yellow, `5` = blue; the app's list is 0 colourful, 1 red, 2 yellow, 3 green, 4 cyan,
 5 blue, 6 purple, 7 white). A single-byte reply `FF` is an ACK; `F0` checksum error, `F3` not
 supported, `FC` busy.
@@ -259,6 +267,41 @@ and stop is logged with the lamp byte of that look, e.g.
 the frame live: switch each indicator on once to check. Listening makes each round of live data a
 few hundred ms longer; `AppConfig.TurnSignals` can make it less frequent (`everyRounds`) or switch
 it off.
+
+### Wipers (rain mode)
+
+The wiper lever comes from the same frame. In the CX-5 the start stop unit reads the steering-column
+switches, the wiper lever (OFF / AUTO or INT / LO / HI, and the AUTO volume) and the washer among them,
+and sends them to the front body control module over CAN; the FBCM runs the wipers (in AUTO together
+with the rain sensor, over LIN). So the frame has the **lever position**, not the wiper motor:
+
+- LO or HI → rain mode (cyan gradient breathing), once two readings in a row agree
+- AUTO → only once the wipers really wipe. In AUTO the rain sensor decides, and the frame only says
+  "AUTO", so while the lever is there Autobot also reads the FBCM's wiper motor bit every round (`726`,
+  learned by the wiper finder) and starts rain mode at the first wipe. It stays on until 60 s after the
+  last wipe (`AppConfig.Rain.autoHold`), which bridges the pauses of intermittent wiping. Not counted:
+  the one wipe moving the lever from OFF to AUTO makes (`autoSettle`) and the washer's wipes
+  (`washerHold`). From LO / HI into AUTO it stays on. Without a learned motor bit AUTO never counts.
+- the washer has its own bits and never moves the lever: lever OFF + washer is not rain
+
+Which bits are which isn't documented for this car. Until they're learned, openpilot's CX-5 2017+
+layout is used for the lever (byte 4: `0x02` LO, `0x04` HI), and AUTO doesn't count. The **wiper
+finder** (dashboard → *Rain mode* → *Wiper finder*; `WiperFinder`, `WiperSignal`) learns both, parked
+with the engine running:
+
+1. *Scan* the front body control module once (`AppConfig.Rain.motorScanPlan`: `726` `C100`–`C1FF` and
+   `DA00`–`DAFF`; a few minutes, kept on the phone).
+2. Hold the lever in each position and tap it: OFF → AUTO on dry glass (if it wipes once, wait until
+   it has parked) → LO → HI (a quick spray first, so the blades don't run dry) → Washer (lever OFF,
+   pulled towards you and held until it's done) → OFF again once the wipers have parked.
+
+Each step takes about 2 s of the frame and every FBCM DID twice; the washer step reads only the DIDs
+that may hold the motor bit, so it's short to hold. Lever bits: those that keep their value within a
+position but differ from OFF (the indicator bits and anything that drifts drop out). Motor bit: steady
+while wiping (LO, HI, washer) and while parked (OFF, AUTO), different between the two. The washer is
+what tells the motor from the lever: the FBCM knows the lever position too, but while washing the lever
+is OFF and the wipers still wipe. *Use it* saves the bits on the phone, *Forget* goes back to the guess;
+if the motor bit isn't found, *Export raw scan* and send the file.
 
 ### Doors: which one is open
 
@@ -375,11 +418,13 @@ Autobot/
 ├── App/         AppModel (wiring), AutobotApp
 ├── Lamp/        LampProtocol (packets), LampController (BLE), LampState (scenes)
 ├── Lighting/    LightingArbiter (priority between lighting features), TurnSignalFlash (yellow flash
-│                while the indicators flash), ReverseLight (yellow breathing in R)
+│                while the indicators flash), ReverseLight (yellow breathing in R), RainMode (cyan
+│                breathing while it rains, from the wipers)
 ├── Vehicle/     OBDAdapter (OBD2 Bluetooth), ELM327 (adapter protocol), MazdaTCM (gearbox values),
 │                SignalDiff (finding on/off bits by comparison), DoorFinder (learns a door's switch),
 │                DoorMonitor (door state), DoorSafetyAlert, TurnSignals (the indicator lamp frame and
-│                when it counts as flashing)
+│                when it counts as flashing), Wipers (the wiper lever in the same frame),
+│                WiperFinder (learns its bits, and the FBCM's wiper motor bit for AUTO)
 ├── Driving/     ManualShiftDetector (manual shifting → Power Mode), MFinder (learns the M flag),
 │                EngineMonitor (RPM only),
 │                SpeedMonitor (GPS), PowerModeController (buffer zone), CarPlayMonitor
@@ -422,6 +467,9 @@ versions ignore sections they don't know.
 
 - Real lever over OBD2: P/R/N + gear from the TCM (`7E1 221E12`), M vs D from `7E1 221E03` bit
   `0x10` — **done**. R → yellow breathing (reverse lighting) — **done**.
+- Rain mode (cyan breathing while the wipers are on: LO / HI at once, AUTO once the rain sensor wipes;
+  not for the washer) — **done**; the wiper bits (lever, and the FBCM's wiper motor) are learned once
+  with the wiper finder.
 - Turn signals / hazard lights → yellow flash — **done**: heard on HS-CAN (frame `0x09A`, see
   [Turn signals](#turn-signals)); the first drive shows which of its bits this car uses.
 - Real door / boot state — **parked**: not reachable on this car's HS-CAN; needs an MS-CAN capable

@@ -77,6 +77,7 @@ final class LampController: NSObject, ObservableObject, CBCentralManagerDelegate
         case .blueBurstFlash: blueBurstFlash()
         case .yellowBurstFlash: yellowBurstFlash()
         case .yellowBreathing: yellowBreathing()
+        case .cyanBreathing: cyanBreathing()
         }
     }
 
@@ -97,6 +98,12 @@ final class LampController: NSObject, ObservableObject, CBCentralManagerDelegate
     /// 6 purple.
     func yellowBreathing() {
         breathing(gradient: 2, red: 0xFF, green: 0xFF, blue: 0x00)
+    }
+
+    /// Cyan gradient breathing, rain mode (RainMode): Breathe -> "Cyan Gradient" (青色渐变) in the
+    /// original app, gradient 4 of the list above: 2E 8D 05 02 [rhythm<<4 | mode1] 02 04 [speed] cs.
+    func cyanBreathing() {
+        breathing(gradient: 4, red: 0x00, green: 0xFF, blue: 0xFF)
     }
 
     /// Firmware breathing with one of the gradients above, the custom colour set to the same colour
