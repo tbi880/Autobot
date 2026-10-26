@@ -97,8 +97,8 @@ Runs once per drive when the lamp is connected and CarPlay audio is detected:
      **Home**, with a place marked **Work**: no question. Navigation to Work starts and the music
      is handled as in step 6, then *"Navigating to work."* and *"The music is now continued."*
      (once it's playing). Steps 3–5 are skipped.
-3. asks *"Where is our destination today?"* and listens (English and Mandarin at once,
-   on-device; stops 1.5 s after you finish, gives up after 10 s of silence)
+3. asks *"Where is our destination today?"* and listens (Mandarin only;
+   stops 1.5 s after you finish, gives up after 10 s of silence)
 4. understands the reply with Apple Intelligence when available, keyword rules otherwise
 5. opens Google Maps:
    - a **saved place** with an exact street address → starts navigation

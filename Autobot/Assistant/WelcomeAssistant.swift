@@ -10,7 +10,7 @@
 //      marked Work exists): no question - navigation to Work with the music handled as in step 8,
 //      announcing "Navigating to work." Otherwise:
 //   4. "Where is our destination today?"
-//   5. listen (ends 1.5 s after speaking; gives up after 10 s of silence)
+//   5. listen, in Mandarin only (ends 1.5 s after speaking; gives up after 10 s of silence)
 //   6. Google Maps target:
 //      - a saved place was named and its address is exact -> start navigation to it
 //      - a saved place with a vague address, or any other place -> search it
@@ -170,27 +170,20 @@ final class WelcomeAssistant: ObservableObject {
         lastHeard = nil
         lastDestination = nil
 
-        // English and Mandarin are recognised at the same time; most confident first,
-        // and on a tie the language listed first in AppConfig.Listening.languages (English)
-        let transcripts = await listener.listen(contextualStrings: places.places.map(\.name))
-            .enumerated()
-            .sorted { ($0.element.confidence, -$0.offset) > ($1.element.confidence, -$1.offset) }
-            .map(\.element)
-        SpeechDiagnosticLog.write("WelcomeAssistant: listener returned \(transcripts.count) transcript(s)")
-        guard let best = transcripts.first else {
+        // Recognised in Mandarin only (AppConfig.Listening.locale)
+        guard let heard = await listener.listen(contextualStrings: places.places.map(\.name)) else {
             SpeechDiagnosticLog.write("WelcomeAssistant: no reply because listener returned no transcript")
             status = "No reply"
             return .none
         }
-        lastHeard = transcripts.map { "\($0.text) [\($0.localeID)]" }.joined(separator: "  /  ")
+        SpeechDiagnosticLog.write("WelcomeAssistant: listener returned a transcript")
+        lastHeard = "\(heard.text) [\(heard.localeID)]"
+        let reply = heard.text
 
-        // 1. A saved place named in any language's version ("home", "take me home", "回家")
-        for transcript in transcripts {
-            if let place = places.place(mentionedIn: transcript.text) {
-                return target(for: place)
-            }
+        // 1. A saved place named in the reply
+        if let place = places.place(mentionedIn: reply) {
+            return target(for: place)
         }
-        let reply = best.text
 
         // 2. Anything else that sounds like a destination
         status = "Understanding (\(understandingEngine))…"

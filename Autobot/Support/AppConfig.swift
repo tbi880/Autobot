@@ -490,12 +490,8 @@ nonisolated enum AppConfig {
     }
 
     enum Listening {
-        /// Languages recognised at the same time. Each inner list is one language,
-        /// its locales tried in order until one is available on this iPhone.
-        static let languages: [[String]] = [
-            ["en-NZ", "en-US"],     // English
-            ["zh-CN"],              // Mandarin
-        ]
+        /// The reply is recognised in this language only: Mandarin (Simplified Chinese).
+        static let locale = "zh-CN"
         /// Apple's voice processing on the microphone (as in FaceTime/phone calls): echo
         /// cancellation, noise suppression and automatic gain.
         /// OFF: on this setup the voice-processing unit failed to render ("vpio render err -1")
