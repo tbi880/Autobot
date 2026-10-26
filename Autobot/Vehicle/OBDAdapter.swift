@@ -9,12 +9,22 @@
 //   -> which PIDs does it have (0100, 0120, …, logged) -> does any ECU report the gear (PID A4)?
 //   -> which transmission values does the car answer (selector 1E23, TCM gear 1E12, 1E1F)?
 //   -> does the body control module answer its door status (726 22C150)?
+//   -> can the climate control unit be reached (733, tester present)? It holds the A/C set
+//      temperature; on this car it's on MS-CAN, out of the KW905's reach, so no
 //   -> "010C0D" (RPM + speed), the pedal and the transmission in a loop -> sample
 //      (+ the doors every few rounds -> doorStates)
+//      (+ while the wiper lever is in AUTO: the wiper motor bits WiperFinder learned -> wiperMotorRunning)
+//      (+ a moment of listening to the bus for the lights frame 09A: the indicators -> turnSignal,
+//      the wiper lever -> lightsFrame)
+//
+// Listening (turn signals): the indicators aren't a value to ask for but a frame the car broadcasts,
+// so once a round the adapter monitors the bus for a moment (ATCAF0, ATCRA09A, ATMA … a space stops
+// it, ATCAF1) and TurnSignalDetector decides from what it heard (TurnSignals.swift). That makes a
+// round a few hundred ms longer (AppConfig.TurnSignals.everyRounds).
 //
 // One command at a time: the next one goes out after the ">" prompt (or a timeout). Work that needs
-// the adapter for longer (MFinder's / DoorFinder's scans and snapshots) runs between two rounds via
-// runBetweenRounds, so it never mixes with the live requests.
+// the adapter for longer (MFinder's / DoorFinder's / WiperFinder's scans and snapshots) runs between two
+// rounds via runBetweenRounds, so it never mixes with the live requests.
 // If the ECU stops answering (engine off) the set-up starts again; if the adapter disconnects,
 // scanning starts again, like the lamp. Close MAXOBD while driving: both apps would share the
 // adapter and get each other's replies.
@@ -78,6 +88,23 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     @Published private(set) var doorSignals: [DoorMonitor.Opening: BitSignal] = [:]
     /// The latest raw door values, "726 22C150" -> "00 00 80", for the doors screen.
     @Published private(set) var doorRaw: [String: String] = [:]
+    /// Whether the climate control unit (AppConfig.Climate.unitHeader) answers through the adapter;
+    /// nil until checked. It holds the A/C set temperature; on the 2015 CX-5 it's on the MS-CAN bus,
+    /// which the KW905 can't reach, so false is expected with that adapter.
+    @Published private(set) var reportsClimateUnit: Bool?
+    /// The turn signals / hazard lights, heard on the bus (TurnSignals.swift); nil while unknown (not
+    /// listening, the frame not heard, live data stopped). Feeds TurnSignalFlash.
+    @Published private(set) var turnSignal: TurnSignals.State?
+    /// The lights frame (AppConfig.TurnSignals.frameID) as last heard, set after every look: the
+    /// indicators come from it, and the wiper lever (RainMode). nil while it isn't heard.
+    @Published private(set) var lightsFrame: [UInt8]?
+    /// Whether the lights frame (AppConfig.TurnSignals.frameID: indicators, wiper lever) is heard on the
+    /// bus; nil until the first look, false also when the adapter can't listen.
+    @Published private(set) var hearsLightsFrame: Bool?
+    /// Whether the windshield wipers are wiping right now, from the front body control module: set after
+    /// every reading of `wiperMotorSignals` (once a round while RainMode asks for it, i.e. the lever in
+    /// AUTO), nil while they aren't read or didn't answer. Feeds RainMode.
+    @Published private(set) var wiperMotorRunning: Bool?
 
     /// The M flag, read every round with the TCM gear: built in (AppConfig.Transmission.mFlag),
     /// or the one MFinder learned.
@@ -85,6 +112,13 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     /// The doors DoorFinder learned; each one replaces the built-in signal for that door.
     var learnedDoorSignals: [DoorMonitor.Opening: BitSignal] = [:] {
         didSet { updateDoorSignals() }
+    }
+    /// The wiper motor bits WiperFinder learned, read every round while set: RainMode sets them while the
+    /// wiper lever is in AUTO (there the rain sensor decides when to wipe) and clears them otherwise.
+    var wiperMotorSignals: [BitSignal] = [] {
+        didSet {
+            if wiperMotorSignals.isEmpty { clearWiperMotor() }
+        }
     }
 
     /// Latest engine speed (r/min); nil while unknown.
@@ -116,6 +150,11 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     private var diagLast: [String: String] = [:]
     private var pedalReleased: Double?    // PID 49: lowest value seen, i.e. the pedal released
     private var pedalFloored = 80.0       // PID 49: highest value seen, at least 80 %
+    private var turnDetector = TurnSignalDetector()
+    private var turnLooked = false             // this session's first look (longer, IDs shown) is done
+    private var turnShowIDs = true             // show the CAN IDs while listening: the filter let others through
+    private var turnListenUnsupported = false  // the adapter refused to listen (ATMA, ATCAF0 or ATCRA)
+    private var turnMisses = 0                 // looks in a row without the frame
 
     /// Work waiting to run between two rounds of live data (runBetweenRounds).
     private struct Job {
@@ -124,6 +163,26 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     }
     private var jobs: [Job] = []
     private var jobRunning = false
+
+    /// One listening window (listen(to:…)): what has been heard so far. The lines come in through
+    /// peripheral(_:didUpdateValueFor:) while the ATMA command waits for its prompt.
+    private final class Listening {
+        let id: String
+        let showsIDs: Bool
+        let keepListening: ([CANFrame], Date, Date) -> Bool   // frames, started, now
+        let started = Date()
+        var frames: [CANFrame] = []
+        var otherIDs: Set<String> = []     // frames with other IDs that got through
+        var notes: [String] = []           // other lines: "?", "BUFFER FULL", "STOPPED"…
+        var ended: Date?                   // when it was decided to stop
+
+        init(id: String, showsIDs: Bool, keepListening: @escaping ([CANFrame], Date, Date) -> Bool) {
+            self.id = id
+            self.showsIDs = showsIDs
+            self.keepListening = keepListening
+        }
+    }
+    private var listening: Listening?
 
     /// The engine ECU's request header, or the broadcast address when none is set.
     private var baseHeader: String { AppConfig.OBD.requestHeader ?? "7DF" }
@@ -212,6 +271,16 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         return snapshot
     }
 
+    /// For work in runBetweenRounds: every frame with this ID heard during `duration` seconds (the wiper
+    /// finder's snapshots); nil if the adapter can't listen.
+    func listenFrames(id: String, duration: TimeInterval) async -> [CANFrame]? {
+        guard jobRunning, !turnListenUnsupported, !receiveFilterUnsupported else { return nil }
+        let heard = await listen(to: id, showingIDs: turnShowIDs, within: duration) { _, started, now in
+            now.timeIntervalSince(started) < duration
+        }
+        return heard?.frames
+    }
+
     /// Live data stopped (or the adapter went away): work still waiting gets nil.
     private func failPendingJobs() {
         let pending = jobs
@@ -229,12 +298,15 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
                 await checkGearReporting()
                 await checkTransmissionReporting()
                 await checkDoorReporting()
+                await checkClimateUnit()
                 await readLiveData()                   // returns when the ECU stops answering
             }
             failPendingJobs()
             isReady = false
             setSample(nil)
             clearDoors()                                      // unknown now
+            clearTurnSignals()
+            clearWiperMotor()
             try? await Task.sleep(for: AppConfig.OBD.retryDelay)
         }
     }
@@ -247,6 +319,10 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         currentHeader = nil                            // ATZ resets the adapter's header…
         currentReceive = nil                           // …and receive filter
         receiveFilterUnsupported = false
+        turnLooked = false                             // the turn signals get a first look again
+        turnShowIDs = true
+        turnListenUnsupported = false
+        turnMisses = 0
         let version = await send(ELM327.reset, timeout: AppConfig.OBD.resetTimeout)
         guard version != nil else {
             logLine("OBD: no answer to \(ELM327.reset)")
@@ -420,8 +496,33 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         updateDoorSignals()
     }
 
-    /// RPM + speed, the pedal and the transmission, round after round, until the engine ECU stops
-    /// answering. Work queued by runBetweenRounds runs between two rounds.
+    /// Can the climate control unit be reached (AppConfig.Climate.unitHeader, 733, replies from 73B)?
+    /// It holds the A/C set temperature. One "tester present" (3E00): any answer, even a refusal,
+    /// means yes. On the 2015 CX-5 it's on the MS-CAN bus (OBD pins 3/11) while the KW905 only
+    /// connects to HS-CAN (pins 6/14), so "not answering" is the expected result with that adapter;
+    /// an adapter that reaches MS-CAN turns it into "answers". See README, "A/C set temperature".
+    private func checkClimateUnit() async {
+        guard AppConfig.Climate.enabled, AppConfig.Climate.checkUnit else { return }
+        let header = AppConfig.Climate.unitHeader
+        var reply: String?
+        if await useHeader(header) {
+            reply = await send(ELM327.testerPresent)
+        }
+        await useHeader(baseHeader)
+        let answers = reply.map { ELM327.isTesterPresentAnswer($0) } ?? false
+        reportsClimateUnit = answers
+        if answers {
+            logLine("OBD: climate control unit (\(header)) answers (\(ELM327.readable(reply))); "
+                    + "its A/C set temperature can be looked for")
+        } else {
+            logLine("OBD: climate control unit (\(header)) not answering (\(ELM327.readable(reply))): "
+                    + "it's on the MS-CAN bus, out of this adapter's reach, so no A/C set temperature")
+        }
+    }
+
+    /// RPM + speed, the pedal and the transmission (and a moment of listening for the turn signals),
+    /// round after round, until the engine ECU stops answering. Work queued by runBetweenRounds runs
+    /// between two rounds.
     private func readLiveData() async {
         status = "OBD: reading live data"
         isReady = true
@@ -455,6 +556,8 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
             if !doorSignals.isEmpty, round % max(AppConfig.Doors.pollEveryRounds, 1) == 0 {
                 await readDoors()
             }
+            if !wiperMotorSignals.isEmpty { await readWiperMotor() }
+            let thisRound = round
             round += 1
             if let rpmData = values[ELM327.rpmPID] {
                 misses = 0
@@ -467,7 +570,11 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
                     return
                 }
             }
-            try? await Task.sleep(for: AppConfig.OBD.pollInterval)
+            // The indicators come last, so the live data above goes out without waiting for them.
+            let listened = await listenToLightsFrame(round: thisRound)
+            if !listened {                         // listening to the bus already took its time
+                try? await Task.sleep(for: AppConfig.OBD.pollInterval)
+            }
         }
     }
 
@@ -573,6 +680,26 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         if !doorRaw.isEmpty { doorRaw = [:] }
     }
 
+    /// The wiper motor bits (`wiperMotorSignals`), each DID read once: wiping if any of them says so.
+    /// Published after every reading, an unchanged one too: RainMode times the wipes from them.
+    private func readWiperMotor() async {
+        var replies: [String: [UInt8]] = [:]
+        var running: Bool?
+        for signal in wiperMotorSignals {
+            let key = "\(signal.header) 22\(signal.did)"
+            if replies[key] == nil, await useHeader(signal.header), let data = await readSignal(signal) {
+                replies[key] = data
+            }
+            if let isOn = signal.isOn(replies[key]) { running = (running ?? false) || isOn }
+        }
+        wiperMotorRunning = running
+    }
+
+    /// Not read any more (lever out of AUTO), live data stopped or the adapter went away: unknown now.
+    private func clearWiperMotor() {
+        if wiperMotorRunning != nil { wiperMotorRunning = nil }
+    }
+
     /// "00 00 80"
     private static func hex(_ bytes: [UInt8]) -> String {
         bytes.map { String(format: "%02X", $0) }.joined(separator: " ")
@@ -622,22 +749,243 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         return min(max((raw - released) / span * 100, 0), 100)
     }
 
+    // MARK: Lights frame: turn signals and wipers (listening to the bus)
+
+    /// Listens to the bus for the lights frame (AppConfig.TurnSignals.frameID): the turn signals
+    /// (`turnSignal`) come from it, and so does the wiper lever (`lightsFrame`, read by RainMode). The
+    /// first look of each session lasts `checkListen` with the CAN IDs shown: is the frame there, and
+    /// does the adapter keep other frames out while listening? Later looks last as long as
+    /// TurnSignalDetector needs. False when it didn't listen this round.
+    private func listenToLightsFrame(round: Int) async -> Bool {
+        let turnSignalsOn = AppConfig.TurnSignals.enabled
+        guard turnSignalsOn || AppConfig.Rain.enabled, !turnListenUnsupported, !receiveFilterUnsupported else {
+            return false
+        }
+        let every = hearsLightsFrame == false ? AppConfig.TurnSignals.retryRounds : AppConfig.TurnSignals.everyRounds
+        guard round % max(every, 1) == 0 else { return false }
+        let id = AppConfig.TurnSignals.frameID
+        let firstLook = !turnLooked
+        let checkListen = AppConfig.TurnSignals.checkListen
+        let firstFrameTimeout = AppConfig.TurnSignals.firstFrameTimeout
+        let within = max(AppConfig.TurnSignals.maxListen, checkListen)
+        let heard = await listen(to: id, showingIDs: firstLook || turnShowIDs, within: within) {
+            [weak self] frames, started, now in
+            guard let self else { return false }
+            if firstLook { return now.timeIntervalSince(started) < checkListen }
+            if !turnSignalsOn { return frames.isEmpty && now.timeIntervalSince(started) < firstFrameTimeout }
+            return self.turnDetector.keepListening(frames, started: started, now: now)
+        }
+        // Couldn't listen (no answer, refused): nothing heard. A flash then still ends after holdLimit.
+        let frames = heard?.frames ?? []
+        if let heard, firstLook {
+            turnLooked = true
+            turnShowIDs = !heard.otherIDs.isEmpty          // other frames got through: sort them out by ID
+            logFirstLook(heard)
+        }
+        if frames.isEmpty {
+            turnMisses += 1
+            let firstLookEmpty = firstLook && heard != nil                 // logged by logFirstLook
+            if firstLookEmpty || turnMisses >= AppConfig.TurnSignals.missLimit, hearsLightsFrame != false {
+                if !firstLookEmpty {
+                    logLine("OBD: lights frame \(id) not heard any more; listening for it every "
+                            + "\(AppConfig.TurnSignals.retryRounds) rounds")
+                }
+                hearsLightsFrame = false
+                lightsFrame = nil                           // the wiper lever is unknown now
+            }
+        } else {
+            if hearsLightsFrame == false, !firstLook { logLine("OBD: lights frame \(id) heard again") }
+            hearsLightsFrame = true
+            turnMisses = 0
+        }
+        if let last = frames.last {
+            lightsFrame = last.data                         // every look: RainMode counts its readings
+        }
+        guard turnSignalsOn else { return true }
+        let before = turnDetector.state
+        let steadyBefore = turnDetector.steadyBits
+        let state = turnDetector.finish(frames, ended: heard?.ended ?? Date())
+        let known: TurnSignals.State? = hearsLightsFrame == true ? state : nil
+        if known != turnSignal { turnSignal = known }
+        if state != before {
+            logLine("Turn signals: " + (state.isOn ? "\(state.label) flashing" : "stopped")
+                    + " · \(id) byte \(AppConfig.TurnSignals.lampByte): " + lampBytes(frames))
+        }
+        let newlySteady = turnDetector.steadyBits & ~steadyBefore
+        if newlySteady != 0 {
+            logLine("Turn signals: \(id) byte \(AppConfig.TurnSignals.lampByte) bit " + TurnSignals.hex([newlySteady])
+                    + " stays lit: taken as a steady light (lights on?), not an indicator")
+        }
+        return true
+    }
+
+    /// Listens to the bus for frames with one CAN ID, for as long as `keepListening` says (asked after
+    /// every frame and every 50 ms, with the frames so far, the start and the time now). CAN formatting
+    /// is off meanwhile, so a broadcast frame shows all its data bytes, and on again afterwards; the
+    /// receive filter stays on `id` until the next useHeader puts it back. nil if the adapter refused
+    /// (listening is then off for this session, see refuseListening).
+    private func listen(to id: String, showingIDs: Bool, within: TimeInterval,
+                        keepListening: @escaping ([CANFrame], Date, Date) -> Bool) async -> Listening? {
+        guard await listenSetting(ELM327.formattingOff) else {
+            if !turnListenUnsupported { await endListening(showingIDs: false) }   // no answer: make sure it's on
+            return nil
+        }
+        if showingIDs, !(await listenSetting(ELM327.headersOn)) {
+            await endListening(showingIDs: false)
+            return nil
+        }
+        guard await listenSetting(ELM327.receiveFilter(id)) else {
+            await endListening(showingIDs: showingIDs)
+            return nil
+        }
+        currentReceive = id
+        let run = Listening(id: id.uppercased(), showsIDs: showingIDs, keepListening: keepListening)
+        listening = run
+        let ticker = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(50))
+                guard !Task.isCancelled else { return }
+                self?.checkListening(run)
+            }
+        }
+        let reply = await send(ELM327.monitorAll, timeout: within + 1.5)    // stop + prompt take a moment
+        ticker.cancel()
+        listening = nil
+        if run.ended == nil { run.ended = Date() }         // stopped by itself (BUFFER FULL…) or no prompt
+        if reply == nil, writeChar != nil {
+            _ = await sendRaw(ELM327.stopMonitoring, timeout: 1)   // stop it again: it mustn't eat the next command
+        }
+        if run.notes.contains("?") {
+            refuseListening("\(ELM327.monitorAll): ?")
+        }
+        await endListening(showingIDs: showingIDs)
+        return turnListenUnsupported ? nil : run
+    }
+
+    /// Asks the window whether to listen on; if not, sends the stop character (the adapter finishes its
+    /// line and answers with the prompt, which ends the ATMA command).
+    private func checkListening(_ run: Listening) {
+        guard listening === run, run.ended == nil,
+              !run.keepListening(run.frames, run.started, Date()) else { return }
+        run.ended = Date()
+        if let adapter, let writeChar {
+            adapter.writeValue(Data(ELM327.stopMonitoring.utf8), for: writeChar, type: .withoutResponse)
+        }
+    }
+
+    /// While listening: every complete line before the prompt goes to the window as soon as it's in.
+    private func deliverMonitoredLines(to run: Listening) {
+        while let end = received.firstIndex(where: { $0.isNewline }) {
+            if let prompt = received.firstIndex(of: ELM327.prompt), prompt < end { return }
+            let line = String(received[..<end])
+            received.removeSubrange(...end)
+            if !line.isEmpty { monitoredLine(line, in: run) }
+        }
+    }
+
+    /// One line while listening: a frame with the wanted ID is kept (until it's decided to stop),
+    /// other frames are only noted.
+    private func monitoredLine(_ line: String, in run: Listening) {
+        guard let frame = ELM327.monitoredFrame(line, headers: run.showsIDs) else {
+            let note = line.trimmingCharacters(in: .whitespaces)
+            if !note.isEmpty, run.notes.count < 20 { run.notes.append(note) }
+            return
+        }
+        guard run.ended == nil else { return }
+        if let id = frame.id, id != run.id {
+            run.otherIDs.insert(id)
+            return
+        }
+        run.frames.append(CANFrame(time: Date(), data: frame.data))
+        checkListening(run)
+    }
+
+    /// One AT command for listening. False if it wasn't confirmed; a refusal ("?") switches listening
+    /// off for this session.
+    private func listenSetting(_ command: String) async -> Bool {
+        let reply = await send(command)
+        if ELM327.isOK(reply) { return true }
+        if let reply, ELM327.isUnknownCommand(reply) { refuseListening("\(command): ?") }
+        return false
+    }
+
+    /// Back to what the requests need: CAN formatting on, and no IDs in front of the replies.
+    private func endListening(showingIDs: Bool) async {
+        guard writeChar != nil else { return }                 // disconnected: ATZ sets it all up again
+        let reply = await send(ELM327.formattingOn)
+        if !ELM327.isOK(reply) {
+            logLine("OBD: CAN formatting not confirmed back on after listening (\(ELM327.readable(reply)))")
+        }
+        if showingIDs { _ = await send(ELM327.headersOff) }
+    }
+
+    /// The adapter can't listen to the bus: not again this session; the test buttons still work.
+    private func refuseListening(_ why: String) {
+        guard !turnListenUnsupported else { return }
+        turnListenUnsupported = true
+        hearsLightsFrame = false
+        clearTurnSignals()
+        logLine("OBD: the adapter can't listen to the bus (\(why)): no turn signals or wiper lever from "
+                + "the car, test buttons only")
+    }
+
+    /// The session's first look, for the log: is the frame there, and what else got through?
+    private func logFirstLook(_ heard: Listening) {
+        let seconds = String(format: "%.1f", AppConfig.TurnSignals.checkListen)
+        let others = heard.otherIDs.sorted()
+        guard let last = heard.frames.last else {
+            var line = "OBD: lights frame \(heard.id) not heard on the bus in \(seconds) s"
+            if !others.isEmpty { line += " (other frames got through: " + others.prefix(8).joined(separator: " ") + ")" }
+            if !heard.notes.isEmpty { line += " (" + heard.notes.prefix(3).joined(separator: " / ") + ")" }
+            logLine(line + "; no turn signals or wiper lever from the car, test buttons only")
+            return
+        }
+        var line = "OBD: lights frame \(heard.id) heard (\(heard.frames.count) in \(seconds) s, "
+            + TurnSignals.hex(last.data) + ")"
+        if !others.isEmpty {
+            line += "; the adapter lets other frames through while listening (\(others.count) IDs), sorted out by ID"
+        }
+        logLine(line + "; the turn signals and the wiper lever come from it")
+    }
+
+    /// "00 20 20 00": the lamp byte of each frame of a look (the last 12), for the log.
+    private func lampBytes(_ frames: [CANFrame]) -> String {
+        let index = AppConfig.TurnSignals.lampByte
+        let bytes = frames.suffix(12).compactMap { frame -> UInt8? in
+            frame.data.count > index ? frame.data[index] : nil
+        }
+        return bytes.isEmpty ? "--" : TurnSignals.hex(bytes)
+    }
+
+    /// Live data stopped or the adapter went away: the indicators are unknown now.
+    private func clearTurnSignals() {
+        turnDetector.reset()
+        turnMisses = 0
+        if turnSignal != nil { turnSignal = nil }
+        if lightsFrame != nil { lightsFrame = nil }
+    }
+
     // MARK: Commands
 
     /// Points requests at one ECU ("ATSH7E1"); skipped when the adapter is already set to it. ECUs
     /// outside 7E0–7E7 reply outside the 7E8–7EF range the adapter listens to by default (726 -> 72E),
-    /// so the adapter is told where to listen ("ATCRA72E"), and back to automatic ("ATAR") after.
+    /// so the adapter is told where to listen ("ATCRA72E"), and back to automatic ("ATAR") after. The
+    /// receive filter is checked even when the header stays the same: listening to the bus (turn
+    /// signals) leaves it on the frame it listened for.
     @discardableResult
     private func useHeader(_ header: String) async -> Bool {
-        if currentHeader == header { return true }
-        let reply = await send("ATSH" + header)
-        guard ELM327.isOK(reply) else {
-            currentHeader = nil
-            return false
-        }
-        currentHeader = header
         let wanted = Self.receiveAddress(for: header)
-        if wanted != currentReceive, !receiveFilterUnsupported {
+        let filterSet = receiveFilterUnsupported || wanted == currentReceive
+        if currentHeader == header, filterSet { return true }
+        if currentHeader != header {
+            let reply = await send("ATSH" + header)
+            guard ELM327.isOK(reply) else {
+                currentHeader = nil
+                return false
+            }
+            currentHeader = header
+        }
+        if !filterSet {
             let filterReply = await send(wanted.map { "ATCRA" + $0 } ?? "ATAR")
             if ELM327.isOK(filterReply) {
                 currentReceive = wanted
@@ -680,6 +1028,16 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
 
     /// Sends one command and waits for the ">" prompt. nil on timeout or when not connected.
     private func send(_ command: String, timeout: TimeInterval = AppConfig.OBD.replyTimeout) async -> String? {
+        await write(command + "\r", timeout: timeout)
+    }
+
+    /// Writes `text` as it is (no CR) and waits for the prompt: the stop character for monitoring, when
+    /// the adapter didn't answer the first one.
+    private func sendRaw(_ text: String, timeout: TimeInterval) async -> String? {
+        await write(text, timeout: timeout)
+    }
+
+    private func write(_ text: String, timeout: TimeInterval) async -> String? {
         guard let adapter, let writeChar, pendingReply == nil, !Task.isCancelled else { return nil }
         received = ""
         replyTimeout = Task { [weak self] in
@@ -689,7 +1047,7 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         }
         return await withCheckedContinuation { continuation in
             pendingReply = continuation
-            adapter.writeValue(Data((command + "\r").utf8), for: writeChar, type: .withoutResponse)
+            adapter.writeValue(Data(text.utf8), for: writeChar, type: .withoutResponse)
         }
     }
 
@@ -724,6 +1082,9 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         isReady = false
         setSample(nil)
         clearDoors()
+        listening = nil
+        clearTurnSignals()
+        clearWiperMotor()
     }
 
     // MARK: CBCentralManagerDelegate
@@ -805,6 +1166,7 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     func peripheral(_ p: CBPeripheral, didUpdateValueFor c: CBCharacteristic, error: Error?) {
         guard c.uuid == ELM327.notifyChar, let value = c.value, !value.isEmpty else { return }
         received += String(decoding: value, as: UTF8.self)
+        if let run = listening { deliverMonitoredLines(to: run) }     // frames, as they come in
         guard let end = received.firstIndex(of: ELM327.prompt) else {
             if received.count > 1024 { received = "" }    // never a prompt: don't grow forever
             return

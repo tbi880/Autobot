@@ -87,6 +87,18 @@ private struct DashboardView: View {
             AssistantView(assistant: app.assistant, onTest: app.testWelcome,
                           onTestCommute: app.testCommute)
             PowerModeTestView(powerMode: app.powerMode, onTest: app.testPowerMode)
+            if AppConfig.Reverse.enabled {
+                ReverseTestView(reverse: app.reverse, onTest: app.testReverse)
+            }
+            if AppConfig.Rain.enabled {
+                RainTestView(rain: app.rain, finder: app.wiperFinder, obd: app.obd, onTest: app.testRain)
+            }
+            if AppConfig.TurnSignals.enabled {
+                TurnSignalTestView(flash: app.turnSignals, obd: app.obd, onTest: app.testTurnSignal)
+            }
+            if AppConfig.Climate.enabled {        // hidden until there's an MS-CAN adapter
+                ClimateTestView(climate: app.climate, obd: app.obd, onTest: app.testClimate)
+            }
             SavedPlacesButton(store: app.places) { showingPlaces = true }
             PacketLogView(lamp: app.lamp)
         }
@@ -234,15 +246,22 @@ private struct SceneIndicator: View {
     }
 
     private var color: Color {
-        scene == .purpleSteady ? Color(red: 0.5, green: 0, blue: 1) : Color.red
+        switch scene {
+        case .purpleSteady: return Color(red: 0.5, green: 0, blue: 1)
+        case .blueBurstFlash: return .blue
+        case .yellowBurstFlash, .yellowBreathing: return .yellow
+        case .cyanBreathing: return .cyan
+        case .redBreathing, .redBurstFlash: return .red
+        }
     }
 
     private func opacity(at date: Date) -> Double {
         let t = date.timeIntervalSinceReferenceDate
         switch scene {
         case .purpleSteady: return 1
-        case .redBreathing: return 0.25 + 0.75 * (0.5 + 0.5 * sin(t * 2 * .pi / 2.5))   // ~2.5 s breath
-        case .redBurstFlash: return Int(t * 8) % 2 == 0 ? 1 : 0.1                       // fast flash
+        case .redBreathing, .yellowBreathing, .cyanBreathing:
+            return 0.25 + 0.75 * (0.5 + 0.5 * sin(t * 2 * .pi / 2.5))                   // ~2.5 s breath
+        case .redBurstFlash, .blueBurstFlash, .yellowBurstFlash: return Int(t * 8) % 2 == 0 ? 1 : 0.1   // fast flash
         }
     }
 }
@@ -332,6 +351,301 @@ private struct PowerModeTestView: View {
         }
         .font(.caption)
         .buttonStyle(.bordered)
+    }
+}
+
+/// Reverse (ReverseLight): yellow gradient breathing while the lever is in R. The button stands in for
+/// the lever: tap = in R, tap again = back to the car's lever.
+private struct ReverseTestView: View {
+    @ObservedObject var reverse: ReverseLight
+    let onTest: () -> Void
+
+    var body: some View {
+        HStack {
+            Text("Reverse test").font(.headline)
+            if reverse.isOn {
+                Text(reverse.simulated ? "R (simulated)" : "R from the car")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+            Spacer()
+            Button("R") { onTest() }
+                .tint(reverse.simulated ? .yellow : .gray)
+        }
+        .font(.caption)
+        .buttonStyle(.bordered)
+    }
+}
+
+/// Rain mode (RainMode): cyan gradient breathing while the wipers are on (not for the washer). The lever
+/// comes from the lights frame on HS-CAN, and in AUTO whether they really wipe from the front body control
+/// module; Rain stands in for both, Wiper finder learns this car's bits.
+private struct RainTestView: View {
+    @ObservedObject var rain: RainMode
+    @ObservedObject var finder: WiperFinder
+    @ObservedObject var obd: OBDAdapter
+    let onTest: () -> Void
+    @State private var showingFinder = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text("Rain mode").font(.headline)
+                Spacer()
+                Button("Wiper finder") { showingFinder = true }
+                Button("Rain") { onTest() }
+                    .tint(rain.simulated ? .cyan : .gray)
+            }
+            .font(.caption)
+            .buttonStyle(.bordered)
+            Text(statusText)
+                .font(.caption2)
+                .foregroundColor(rain.isOn ? .cyan : .secondary)
+        }
+        .sheet(isPresented: $showingFinder) {
+            WiperFinderView(finder: finder, rain: rain, obd: obd)
+        }
+    }
+
+    /// Now, the lever (in AUTO: whether they wipe), and where the bits come from.
+    private var statusText: String {
+        let now = rain.isOn ? "Raining → cyan breathing" : "Dry"
+        if rain.simulated { return now + " (simulated)" }
+        var parts = [now, "wipers " + (rain.lever?.label ?? "--") + (rain.washing ? " + washer" : "")]
+        if rain.lever == .auto {
+            parts.append(finder.learnedMotor.isEmpty ? "motor not learned: AUTO doesn't count"
+                         : rain.wipingInAuto ? "wiping" : "waiting for the rain sensor")
+        }
+        parts.append(finder.learned != nil ? "learned bits" : "built-in guess: Wiper finder learns them")
+        return parts.joined(separator: "  ·  ")
+    }
+}
+
+/// Learns this car's wiper bits (WiperFinder): the lights frame in each lever position, compared with OFF,
+/// and the front body control module's DIDs with the wipers parked and wiping (for AUTO).
+private struct WiperFinderView: View {
+    @ObservedObject var finder: WiperFinder
+    @ObservedObject var rain: RainMode
+    @ObservedObject var obd: OBDAdapter
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("Status") {
+                    Text(finder.message)
+                    if let progress {
+                        if let value = progress.value {
+                            ProgressView(value: value) { Text(progress.label).font(.caption) }
+                        } else {
+                            ProgressView { Text(progress.label).font(.caption) }
+                        }
+                        Button("Cancel", role: .cancel) { finder.cancel() }
+                    }
+                }
+                Section("Live from the car") {
+                    LabeledContent("Frame \(AppConfig.TurnSignals.frameID)",
+                                   value: obd.lightsFrame.map { TurnSignals.hex($0) } ?? "--")
+                        .font(.system(.caption, design: .monospaced))
+                    LabeledContent("Wiper lever", value: (rain.lever?.label ?? "--") + (rain.washing ? " + washer" : ""))
+                    LabeledContent("Wiper motor", value: motorText)
+                    LabeledContent("Rain mode", value: rain.isOn ? "on" : "off")
+                }
+                Section {
+                    Button("Scan the front body control module (once, a few min)") { finder.scan() }
+                        .disabled(finder.isBusy || !obd.isReady)
+                    LabeledContent("FBCM DIDs answering",
+                                   value: finder.scanned ? "\(finder.motorDIDs.count)" : "not scanned")
+                    ForEach(WiperSignal.Position.allCases) { position in
+                        Button("\(position.label)  ·  \(finder.counts[position] ?? 0) taken") {
+                            finder.snapshot(position)
+                        }
+                        .disabled(finder.isBusy || !obd.isReady)
+                    }
+                    Button("Reset snapshots", role: .destructive) { finder.resetSnapshots() }
+                        .disabled(finder.isBusy)
+                } header: {
+                    Text("Find the wiper bits")
+                } footer: {
+                    Text("Parked, engine running. Scan once. Then hold the lever in each position and tap it: "
+                         + "OFF → AUTO on dry glass → LO → HI (a quick spray first, so the blades don't run "
+                         + "on dry glass) → Washer: lever OFF, pull it towards you and keep holding until "
+                         + "it's done → OFF again once the wipers have parked. Then Use it. Without the scan "
+                         + "only the lever is learned, and AUTO doesn't count as rain.")
+                }
+                if finder.candidate != nil || !finder.motorCandidates.isEmpty {
+                    Section("Found") {
+                        ForEach(finder.candidate?.descriptions ?? [], id: \.self) { line in
+                            Text(line).font(.system(.caption, design: .monospaced))
+                        }
+                        ForEach(motorLines(finder.motorCandidates), id: \.self) { line in
+                            Text(line).font(.system(.caption, design: .monospaced))
+                        }
+                        notesList
+                        Button("Use it for rain mode") { finder.use() }
+                            .disabled(finder.isBusy)
+                    }
+                } else if !finder.notes.isEmpty {
+                    Section("Notes") { notesList }
+                }
+                Section("In use for rain mode") {
+                    ForEach(finder.inUse.descriptions, id: \.self) { line in
+                        Text(line).font(.system(.caption, design: .monospaced))
+                    }
+                    Text(finder.learned != nil ? "lever: learned on this car"
+                         : "lever: built-in guess (openpilot, CX-5 2017+)")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                    ForEach(motorLines(finder.learnedMotor), id: \.self) { line in
+                        Text(line).font(.system(.caption, design: .monospaced))
+                    }
+                    Text(finder.learnedMotor.isEmpty ? "wiper motor: not learned, AUTO doesn't count as rain"
+                         : "wiper motor: learned, read while the lever is in AUTO")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                    if finder.learned != nil || !finder.learnedMotor.isEmpty {
+                        Button("Forget (back to the built-in guess)", role: .destructive) { finder.forget() }
+                            .disabled(finder.isBusy)
+                    }
+                }
+                Section {
+                    if let url = finder.exportURL {
+                        ShareLink("Export raw scan (send to me)", item: url)
+                    } else {
+                        Text("Export raw scan — take some snapshots first")
+                            .foregroundColor(.secondary)
+                    }
+                } footer: {
+                    Text("If the wiper motor isn't found, export the raw scan after one full pass and share "
+                         + "the file, so the bits can be set by hand.")
+                }
+            }
+            .navigationTitle("Wiper finder")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+    }
+
+    private var notesList: some View {
+        ForEach(finder.notes, id: \.self) { note in
+            Text(note).font(.caption2).foregroundColor(.orange)
+        }
+    }
+
+    private func motorLines(_ signals: [BitSignal]) -> [String] {
+        signals.map { "Wiping: " + $0.label(off: "parked", on: "wiping") }
+    }
+
+    /// The wiper motor as read now (only while the lever is in AUTO).
+    private var motorText: String {
+        if finder.learnedMotor.isEmpty { return "not learned" }
+        switch obd.wiperMotorRunning {
+        case true?: return "wiping"
+        case false?: return "parked"
+        case nil: return rain.lever == .auto ? "--" : "read in AUTO only"
+        }
+    }
+
+    private var progress: (value: Double?, label: String)? {
+        switch finder.phase {
+        case .idle:
+            return nil
+        case .scanning(let done, let total):
+            return (total > 0 ? Double(done) / Double(total) : 0, "Scanning \(done) / \(total)")
+        case .listening(let label):
+            return (nil, "\(label): listening to the lever…")
+        case .reading(let label, let done, let total):
+            return (total > 0 ? Double(done) / Double(total) : 0, "\(label): FBCM \(done) / \(total)")
+        }
+    }
+}
+
+/// Turn signals and hazard lights (TurnSignalFlash): yellow burst flash while they flash. From the car
+/// (the indicator lamp frame on HS-CAN); the buttons stand in for the lever and the hazard switch: tap
+/// to start, tap again to stop.
+private struct TurnSignalTestView: View {
+    @ObservedObject var flash: TurnSignalFlash
+    @ObservedObject var obd: OBDAdapter
+    let onTest: (TurnSignals.State) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text("Turn signals").font(.headline)
+                Spacer()
+                Button("Left") { onTest(.left) }
+                    .tint(buttonTint(.left))
+                Button("Hazard") { onTest(.hazard) }
+                    .tint(buttonTint(.hazard))
+                Button("Right") { onTest(.right) }
+                    .tint(buttonTint(.right))
+            }
+            .font(.caption)
+            .buttonStyle(.bordered)
+            Text(statusText)
+                .font(.caption2)
+                .foregroundColor(flash.state.isOn ? .orange : .secondary)
+        }
+    }
+
+    private func buttonTint(_ side: TurnSignals.State) -> Color {
+        flash.simulated == side ? .yellow : .gray
+    }
+
+    /// What the indicators do now, and where that comes from.
+    private var statusText: String {
+        let now = flash.state.isOn ? "\(flash.state.label) flashing → yellow flash" : "Off"
+        if flash.simulated != nil { return now + " (simulated)" }
+        let frame = AppConfig.TurnSignals.frameID
+        switch obd.hearsLightsFrame {
+        case true?: return now + "  ·  from the car, \(frame): \(obd.lightsFrame.map { TurnSignals.hex($0) } ?? "--")"
+        case false?: return now + "  ·  frame \(frame) not heard on the bus: test buttons only (see the log)"
+        case nil: return now + "  ·  listened for once live data runs"
+        }
+    }
+}
+
+/// A/C temperature flash (ClimateTempFlash): a click of the dial colder → blue burst flash, warmer →
+/// red, until 3 s after the last click. These buttons stand in for the dial while the car's set
+/// temperature can't be read (the climate control unit is on MS-CAN, see README).
+private struct ClimateTestView: View {
+    @ObservedObject var climate: ClimateTempFlash
+    @ObservedObject var obd: OBDAdapter
+    let onTest: (ClimateTempFlash.Direction) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text("A/C temp test").font(.headline)
+                if let setPoint = climate.setPoint {
+                    Text(String(format: "%.1f °C", setPoint) + (climate.simulated ? " (simulated)" : ""))
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+                Button("A/C −") { onTest(.colder) }
+                    .tint(.blue)
+                Button("A/C +") { onTest(.warmer) }
+                    .tint(.red)
+            }
+            .font(.caption)
+            .buttonStyle(.bordered)
+            Text(unitText)
+                .font(.caption2)
+                .foregroundColor(.secondary)
+        }
+    }
+
+    /// Whether the car's set temperature could be read through this adapter.
+    private var unitText: String {
+        switch obd.reportsClimateUnit {
+        case true?: return "Climate control unit answers: its set temperature can be looked for"
+        case false?: return "Climate control unit not reachable (MS-CAN): test buttons only"
+        case nil: return "Climate control unit: checked when the adapter connects"
+        }
     }
 }
 

@@ -32,7 +32,8 @@ final class ManualShiftDetector: ObservableObject, PowerModeTrigger {
     /// True when `gear` comes from the car (PID A4 / DID 1E1F), false when worked out from RPM ÷ speed.
     @Published private(set) var gearFromCar = false
     /// The real gear-selector lever (P/R/N/D/M) from the car, when it reports it (DID 1E23); nil
-    /// otherwise. R is exposed here too, for future use (reverse lighting, etc.).
+    /// otherwise. R is exposed here too (the reverse lighting, ReverseLight, reads the lever straight
+    /// from the samples, without this debounce).
     @Published private(set) var selector: ELM327.Selector?
     /// True while Power Mode follows the car's real M/D selector; false while it's worked out from
     /// RPM/speed/pedal (the car doesn't report the selector).

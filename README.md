@@ -1,8 +1,9 @@
 # Autobot
 
 A personal iOS companion app for the car. It drives a Bluetooth LED ambient-light controller
-directly (no vendor app needed), reacts to manual shifting (worked out from OBD2 live data) and
-door state, and greets the driver with a voice assistant when the phone connects to CarPlay.
+directly (no vendor app needed), reacts to manual shifting (worked out from OBD2 live data), the
+turn signals (heard on the car's CAN bus) and door state, and greets the driver with a voice
+assistant when the phone connects to CarPlay.
 
 > Personal hobby project. Not affiliated with the lamp manufacturer, Google, Tencent (QQ Music)
 > or Hasbro. Use the voice features hands-free and keep your eyes on the road.
@@ -12,7 +13,8 @@ door state, and greets the driver with a voice assistant when the phone connects
 ### Ambient lighting
 - **Power Mode when shifting by hand** (M; OBD2 Bluetooth adapter, see
   [Manual shifting detection](#manual-shifting-detection))
-  - driving in D: steady purple (zone 1 at 50 %, zone 2 at 100 %)
+  - driving in D: steady purple (zone 1 at 50 %, zone 2 at 100 %), or cyan breathing while it
+    rains (rain mode, below)
   - shifting yourself and holding the revs: firmware *Red Gradient* breathing, until the revs
     have stayed at or below 2500 r/min for 10 s
   - switching goes through a 3-second *buffer zone*: red burst flash + the Power Mode
@@ -20,12 +22,39 @@ door state, and greets the driver with a voice assistant when the phone connects
     old one restored if it went back
   - other triggers in `AppConfig.PowerMode.trigger`: `.engineRPM` (2500 r/min) and `.speed`
     (GPS, 90 km/h)
+- **Reverse → yellow breathing**: with the lever in R the lamp does the firmware's *Yellow Gradient*
+  breathing, on Power Mode's level: the turn signals / hazard lights, the A/C flash, Power Mode's
+  switch flash and the door alert still go above it. Out of R it's Power Mode again (purple steady,
+  red breathing in M). The lever is the TCM's `7E1 221E12` (`3C` in R), already read every round;
+  the dashboard's *R* button stands in for it.
+- **Rain mode → cyan breathing**: while it rains as far as the windshield wipers say — lever in LO or
+  HI, or in AUTO once the rain sensor really makes them wipe — the lamp does the firmware's *Cyan
+  Gradient* breathing, but not when they only run for the washer. Above the normal purple steady, below
+  Power Mode (in M it's red breathing as usual). The lever comes from the car's CAN bus, the wiping in
+  AUTO from the front body control module (see [Wipers](#wipers-rain-mode)); the dashboard's *Rain*
+  button stands in for both, and its *Wiper finder* learns this car's bits.
+- **Turn signals and hazard lights → Yellow Burst Flash** (OBD2 adapter, see
+  [Turn signals](#turn-signals)): while the indicators or the hazard lights flash, the lamp does the
+  firmware's *Yellow Burst Flash*, above Power Mode — in M too, and during a Power Mode switch. When
+  they stop, the lamp goes back to what it should show then: red breathing if still in M, the red
+  switch flash if a Power Mode switch is still in its 3 s, purple steady in D. The dashboard's
+  *Left* / *Hazard* / *Right* buttons stand in for them (tap to start, tap again to stop).
+- **A/C temperature flash**: the temperature dial turned colder → *Blue Burst Flash*, warmer →
+  *Red Burst Flash*, until 3 s after the last click. Another click the same way starts the 3 s
+  again; a click the other way switches the colour at once (the later turn wins). Then the previous
+  lighting comes back. Ready, but not fed by the car yet: this CX-5 keeps the set temperature in the
+  climate control unit on MS-CAN, which the KW905 can't reach (see
+  [A/C set temperature](#ac-set-temperature)); the dashboard's *A/C −* / *A/C +* buttons stand in
+  for the dial. **Currently off** (`AppConfig.Climate.enabled = false`): the A/C row is hidden and
+  the climate control unit isn't checked, until there's an MS-CAN capable adapter.
 - **Door safety alert** (highest priority): any door or the boot open → *Red Burst Flash* and
   "Door open detected"; when everything is closed the previous lighting comes back.
   Door state comes from the car: the body control module's door status (`726 22C150`), or a
   door the [door finder](#doors-which-one-is-open) learned (test buttons while neither is read).
 - **Priority arbiter**: every lighting feature requests a scene with a priority, the highest
-  one wins, and withdrawing a request restores the next one.
+  one wins, and withdrawing a request restores the next one. From the top: door alert, turn
+  signals, A/C flash, Power Mode switch flash, then reverse / Power Mode (R and M never meet), rain
+  mode, and the normal purple steady underneath everything.
 - **Reliable commands**: one packet at a time, mode changes are read back and resent if the
   lamp disagrees, "busy" / checksum-error replies are retried.
 
@@ -102,7 +131,8 @@ weekday commute check. Hours, days and radius are in `AppConfig.Commute`.
 4. Optional: in Settings → Accessibility → Spoken Content → Voices, download an enhanced or
    premium English (US) female voice (e.g. Zoe or Ava) for clearer voices.
 
-The dashboard has test buttons for the welcome flow, both Power Mode voices and every door.
+The dashboard has test buttons for the welcome flow, both Power Mode voices, every door, reverse,
+the turn signals and rain mode.
 
 ## Lamp protocol
 
@@ -125,9 +155,17 @@ Frame: `2E | type | len | data… | checksum`, where
 | Mode | `8D` | `02, rhythm<<4 \| mode1, mode, parameter, speed` |
 | Query | `90` | `7C, 00 brightness / 01 colour / 02 mode` → reply type `7C` |
 
-Modes used: `0` steady, `2` breathing (parameter `1` = red gradient), `3` burst flash
-(parameter `1` = red). A single-byte reply `FF` is an ACK; `F0` checksum error, `F3` not
+Modes used: `0` steady, `2` breathing (parameter `1` = red, `2` = yellow, `4` = cyan gradient), `3` burst flash
+(parameter `1` = red, `2` = yellow, `5` = blue; the app's list is 0 colourful, 1 red, 2 yellow, 3 green, 4 cyan,
+5 blue, 6 purple, 7 white). A single-byte reply `FF` is an ACK; `F0` checksum error, `F3` not
 supported, `FC` busy.
+
+The firmware also knows "original car" functions (turn signal, doors, overspeed… and a
+*Temperature adjustment Reminder*, 气候模式). The app only offers them when the controller reports
+them for the selected car model (query `90 9C`), which takes the vendor's CAN box wired to the car;
+Autobot doesn't use them. Its yellow turn-signal flash is its own: it hears the indicators on the CAN
+bus through the OBD2 adapter (see [Turn signals](#turn-signals)) and sends the plain *Yellow Burst
+Flash* mode (`2E 8D 05 02 xx 03 02 ss cs`, after the custom colour `FF FF 00`).
 
 ## OBD2 adapter
 
@@ -143,7 +181,8 @@ ECU answering from `7E8`.
 
 After connecting: `ATZ`, `ATE0`, `ATL0`, `ATS0`, `ATH0`, `ATAT1`, `ATSP6`, `ATSH7E0`, then `0100`
 until the engine ECU answers (ignition on), then `0100`, `0120`, … to list the PIDs it has
-(written to the log). After that, about three times a second:
+(written to the log). After that, about three times a second (a little less often while the turn
+signals are listened for, see [Turn signals](#turn-signals)):
 
 | Request | Reply | Value |
 |---|---|---|
@@ -191,6 +230,78 @@ learn a different one for another car (it then replaces the built-in flag until 
 Live data pauses while a finder scans or snapshots (it runs between two rounds, never interleaved).
 MAXOBD's own Mazda module reads these values through `MZD_*.BIN` definition files it downloads
 separately (none ship in the APK), so the IDs come from measuring the car, not from the app.
+
+### Turn signals
+
+The indicators aren't a value the adapter can ask for: the car *broadcasts* them. In the 2015 CX-5's
+SkyActiv family the indicator lamps are in frame **`0x09A`**, sent about 10 times a second on HS-CAN,
+the bus the KW905 is on (from community databases, not yet confirmed on this car: the first look of
+every connection checks it, see below). So once a round Autobot listens to the bus for a moment:
+
+`ATCAF0` (CAN formatting off: the frame has no ISO-TP length byte, so all 8 bytes are shown as they
+are) → `ATCRA09A` (only that frame) → `ATMA` (monitor) … a space stops it → `ATCAF1`; the next request
+puts the receive filter back (`ATAR`).
+
+Byte 2 follows the flasher: lit, dark, lit… about 0.35 s each. Which bit is which isn't certain for
+this car, because the two community databases disagree:
+
+| Byte 2 | `0x20` | `0x10` | `0x08` | `0x04` |
+|---|---|---|---|---|
+| Mazda SkyActiv CAN database ([majbthrd/MazdaCANbus](https://github.com/majbthrd/MazdaCANbus), first-generation SkyActiv) | left | right | lights on | – |
+| openpilot `mazda_2017.dbc` (CX-5 2017+, Mazda3 / Mazda6 2017) | – | – | right | left |
+
+So all four bits are watched and only a bit that **flashes** counts (`TurnSignalDetector`); one that
+stays lit for 1 s, like the lights-on bit, is a steady light and is ignored:
+
+- off → flashing: a lit phase that ended. Each look lasts at least one dark phase (0.45 s), so
+  flashing indicators are always caught, typically within about a second
+- flashing → off: dark for 0.6 s while listening, typically about a second after they stop (3-flash
+  lane changes included)
+- left and right together: the hazard lights
+
+The first look of every connection lasts 1 s, with the CAN IDs shown, and logs what it heard:
+`OBD: turn signals: frame 09A heard (10 in 1.0 s, 00 00 08 00 …)`, or `not heard` (then the yellow
+flash only follows the test buttons, and the frame is looked for again every 30 rounds). Every start
+and stop is logged with the lamp byte of that look, e.g.
+`Turn signals: Left flashing · 09A byte 2: 00 20 20 00`, and the dashboard's *Turn signals* row shows
+the frame live: switch each indicator on once to check. Listening makes each round of live data a
+few hundred ms longer; `AppConfig.TurnSignals` can make it less frequent (`everyRounds`) or switch
+it off.
+
+### Wipers (rain mode)
+
+The wiper lever comes from the same frame. In the CX-5 the start stop unit reads the steering-column
+switches, the wiper lever (OFF / AUTO or INT / LO / HI, and the AUTO volume) and the washer among them,
+and sends them to the front body control module over CAN; the FBCM runs the wipers (in AUTO together
+with the rain sensor, over LIN). So the frame has the **lever position**, not the wiper motor:
+
+- LO or HI → rain mode (cyan gradient breathing), once two readings in a row agree
+- AUTO → only once the wipers really wipe. In AUTO the rain sensor decides, and the frame only says
+  "AUTO", so while the lever is there Autobot also reads the FBCM's wiper motor bit every round (`726`,
+  learned by the wiper finder) and starts rain mode at the first wipe. It stays on until 60 s after the
+  last wipe (`AppConfig.Rain.autoHold`), which bridges the pauses of intermittent wiping. Not counted:
+  the one wipe moving the lever from OFF to AUTO makes (`autoSettle`) and the washer's wipes
+  (`washerHold`). From LO / HI into AUTO it stays on. Without a learned motor bit AUTO never counts.
+- the washer has its own bits and never moves the lever: lever OFF + washer is not rain
+
+Which bits are which isn't documented for this car. Until they're learned, openpilot's CX-5 2017+
+layout is used for the lever (byte 4: `0x02` LO, `0x04` HI), and AUTO doesn't count. The **wiper
+finder** (dashboard → *Rain mode* → *Wiper finder*; `WiperFinder`, `WiperSignal`) learns both, parked
+with the engine running:
+
+1. *Scan* the front body control module once (`AppConfig.Rain.motorScanPlan`: `726` `C100`–`C1FF` and
+   `DA00`–`DAFF`; a few minutes, kept on the phone).
+2. Hold the lever in each position and tap it: OFF → AUTO on dry glass (if it wipes once, wait until
+   it has parked) → LO → HI (a quick spray first, so the blades don't run dry) → Washer (lever OFF,
+   pulled towards you and held until it's done) → OFF again once the wipers have parked.
+
+Each step takes about 2 s of the frame and every FBCM DID twice; the washer step reads only the DIDs
+that may hold the motor bit, so it's short to hold. Lever bits: those that keep their value within a
+position but differ from OFF (the indicator bits and anything that drifts drop out). Motor bit: steady
+while wiping (LO, HI, washer) and while parked (OFF, AUTO), different between the two. The washer is
+what tells the motor from the lever: the FBCM knows the lever position too, but while washing the lever
+is OFF and the wipers still wipe. *Use it* saves the bits on the phone, *Forget* goes back to the guess;
+if the motor bit isn't found, *Export raw scan* and send the file.
 
 ### Doors: which one is open
 
@@ -247,6 +358,26 @@ holds **no** door at all — only `DA13` (counts down by itself) and `DA1E` (bat
 when the courtesy lamps come on) ever change. The 12V-battery DIDs (`4027`–`402B`) drift constantly
 and drowned the door bits before that. All of them are ignored (`AppConfig.Doors.ignoredDIDs`).
 
+### A/C set temperature
+
+> **Not readable with the KW905.** The set temperature is kept by the climate control unit, and the
+> CX-5 workshop manual puts that unit (full-auto air conditioner) on the **MS-CAN** bus, with the
+> rear body control module, BSM and audio unit; the instrument cluster is the gateway to HS-CAN. The
+> KW905 only connects to HS-CAN (OBD pins 6/14). What the cluster passes on to HS-CAN for the engine
+> is the A/C request, the blower speed and the i-stop requests (frame `0x436` in the Mazda3 SkyActiv
+> CAN database), not the set temperature.
+
+At every connection Autobot sends the climate control unit (`733`, Ford/Mazda layout, replies from
+`73B`) one harmless *tester present* (`3E00`) and logs whether it answers;
+`OBD: climate control unit (733) not answering …` is the expected line with the KW905
+(`AppConfig.Climate`). The dashboard's *A/C temp test* row shows the same.
+
+What it would take: an adapter that also reaches MS-CAN (pins 3/11, 125 kbit/s) and works with an
+iPhone, e.g. a BLE adapter sold for FORScan such as the vLinker FD+. The set temperature can then be
+found like the M flag: scan the climate control unit's DIDs and compare snapshots at different
+settings, or watch its MS-CAN frames while turning the dial (0.5 °C steps, 15.0–32.0 °C).
+The readings go to `ClimateTempFlash.setPointChanged(to:)`; the lighting part already works.
+
 ## Manual shifting detection
 
 `ManualShiftDetector` drives Power Mode from the **M** gate. It uses the real selector when the car
@@ -255,7 +386,8 @@ reports it and works it out from the numbers when it doesn't:
 **Real lever (preferred).** P/R/N come from the TCM (`221E12`), and D vs M from the M flag
 (`7E1 221E03` bit `0x10`, built in; see
 [Transmission](#transmission-p--r--n-the-gear-and-m-vs-d)), or from `221E23` on cars that answer it. Power Mode then follows the lever directly: `M` → red breathing, anything else → purple steady,
-debounced by a couple of readings. `R` is surfaced too, for future use (e.g. reverse lighting).
+debounced by a couple of readings. `R` (TCM `3C`) drives the reverse lighting: yellow breathing
+(`ReverseLight`, `AppConfig.Reverse`).
 
 **Worked out from RPM/speed/pedal (fallback, when the TCM doesn't answer).** Standard OBD2
 (SAE J1979) has no selector position, and the TCM's gear value reads the same in D and M, so
@@ -285,13 +417,18 @@ RPM, gear, speed, pedal and why manual was detected, and the log lists the PIDs 
 Autobot/
 ├── App/         AppModel (wiring), AutobotApp
 ├── Lamp/        LampProtocol (packets), LampController (BLE), LampState (scenes)
-├── Lighting/    LightingArbiter (priority between lighting features)
+├── Lighting/    LightingArbiter (priority between lighting features), TurnSignalFlash (yellow flash
+│                while the indicators flash), ReverseLight (yellow breathing in R), RainMode (cyan
+│                breathing while it rains, from the wipers)
 ├── Vehicle/     OBDAdapter (OBD2 Bluetooth), ELM327 (adapter protocol), MazdaTCM (gearbox values),
 │                SignalDiff (finding on/off bits by comparison), DoorFinder (learns a door's switch),
-│                DoorMonitor (door state), DoorSafetyAlert
+│                DoorMonitor (door state), DoorSafetyAlert, TurnSignals (the indicator lamp frame and
+│                when it counts as flashing), Wipers (the wiper lever in the same frame),
+│                WiperFinder (learns its bits, and the FBCM's wiper motor bit for AUTO)
 ├── Driving/     ManualShiftDetector (manual shifting → Power Mode), MFinder (learns the M flag),
 │                EngineMonitor (RPM only),
 │                SpeedMonitor (GPS), PowerModeController (buffer zone), CarPlayMonitor
+├── Climate/     ClimateTempFlash (A/C set colder / warmer → blue / red burst flash)
 ├── Voice/       AudioSessionManager, Speaker, MetallicVoiceEffect, VoiceCoordinator (queue)
 ├── Assistant/   WelcomeAssistant (flow), SpeechListener, DestinationParser,
 │                WeatherService, CommuteCheck, MapsLauncher, ShortcutsLauncher
@@ -329,7 +466,15 @@ versions ignore sections they don't know.
 ## Roadmap
 
 - Real lever over OBD2: P/R/N + gear from the TCM (`7E1 221E12`), M vs D from `7E1 221E03` bit
-  `0x10` — **done**. R is read for future use (reverse lighting).
+  `0x10` — **done**. R → yellow breathing (reverse lighting) — **done**.
+- Rain mode (cyan breathing while the wipers are on: LO / HI at once, AUTO once the rain sensor wipes;
+  not for the washer) — **done**; the wiper bits (lever, and the FBCM's wiper motor) are learned once
+  with the wiper finder.
+- Turn signals / hazard lights → yellow flash — **done**: heard on HS-CAN (frame `0x09A`, see
+  [Turn signals](#turn-signals)); the first drive shows which of its bits this car uses.
 - Real door / boot state — **parked**: not reachable on this car's HS-CAN; needs an MS-CAN capable
   adapter (door frame `0x43E`). Code and door finder kept, switched off (`AppConfig.Doors.enabled`).
+- A/C set temperature → blue / red flash — **parked**: lighting done, switched off
+  (`AppConfig.Climate.enabled`); reading the set temperature needs an MS-CAN capable adapter
+  (climate control unit `733`, pins 3/11).
 - More lighting features through `LightingArbiter`

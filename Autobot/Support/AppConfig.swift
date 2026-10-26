@@ -249,15 +249,151 @@ nonisolated enum AppConfig {
         ]
     }
 
+    /// A/C temperature flash (ClimateTempFlash): blue burst flash when the A/C is set colder, red
+    /// burst flash when it's set warmer.
+    enum Climate {
+        /// The A/C feature on or off. Off for now: the set temperature is on MS-CAN, which the KW905
+        /// can't reach. While off, the dashboard hides the A/C row and the climate control unit isn't
+        /// checked; the code stays for an MS-CAN capable adapter later.
+        static let enabled = false
+        /// How long a flash lasts after the last click of the temperature dial. Another click the
+        /// same way starts the time again; a click the other way switches the colour at once.
+        static let flashDuration: Duration = .seconds(3)
+        /// The climate control unit, which holds the set temperature: request header in the Ford/Mazda
+        /// layout (HVAC 733, replies from 73B). OBDAdapter checks once per connection whether it
+        /// answers. On the 2015 CX-5 it's on the MS-CAN bus (OBD pins 3/11) and the KW905 only reaches
+        /// HS-CAN (pins 6/14), so "not answering" is expected with that adapter — see README.
+        static let unitHeader = "733"
+        /// Do that check at all (one harmless "tester present", 3E00, per connection).
+        static let checkUnit = true
+        /// Dashboard test buttons: one click of the dial (the CX-5's dials move 0.5 °C a click)…
+        static let testStep = 0.5
+        /// …starting from this set temperature (°C).
+        static let testStartTemperature = 22.0
+    }
+
+    /// Turn signals and hazard lights (TurnSignalFlash): yellow burst flash while the indicators flash,
+    /// above Power Mode and its switch flash. Heard on the car's HS-CAN bus: once a round the adapter
+    /// listens for the indicator lamp frame (TurnSignals.swift, README "Turn signals").
+    enum TurnSignals {
+        /// The feature on or off. Off: the bus isn't listened to (live data as fast as before) and the
+        /// dashboard row is hidden.
+        static let enabled = true
+        /// The HS-CAN frame with the indicator lamps: 0x09A ("lights"), about 10 times a second.
+        static let frameID = "09A"
+        /// Its byte with the lamp bits…
+        static let lampByte = 2
+        /// …and the bits that may be the left / right indicator. Two layouts are known and both are
+        /// watched; only a bit that flashes counts, so the steady lights-on bit (0x08 in the first one)
+        /// never does:
+        ///   Mazda SkyActiv CAN database: 0x20 left, 0x10 right (0x08 lights on)
+        ///   openpilot (CX-5 2017+):      0x04 left, 0x08 right
+        static let leftBits: UInt8 = 0x24
+        static let rightBits: UInt8 = 0x18
+        /// Listen every this many rounds of live data. Each time adds a few hundred ms to the round;
+        /// 2 halves that, but the yellow flash then starts and ends up to a round later.
+        static let everyRounds = 1
+        /// Nothing flashing: listen this long, a bit more than the indicators' dark phase (about 0.35 s),
+        /// so flashing indicators are always caught.
+        static let idleListen: TimeInterval = 0.45
+        /// Flashing: dark this long while listening means they've stopped. Must be longer than the dark
+        /// phase plus one frame (0.1 s).
+        static let offWindow: TimeInterval = 0.6
+        /// A bit lit this long without a break is a steady light (lights on), not an indicator.
+        static let steadyWindow: TimeInterval = 1.0
+        /// No frame within this: none this round.
+        static let firstFrameTimeout: TimeInterval = 0.4
+        /// A look never lasts longer than this.
+        static let maxListen: TimeInterval = 1.3
+        /// Flashing ends this long after the last flash heard when nothing conclusive comes in (frames
+        /// missing), so the yellow flash can't get stuck.
+        static let holdLimit: TimeInterval = 3
+        /// The first look of each connection lasts this long, with the CAN IDs shown, to check that the
+        /// frame is there and that the adapter keeps other frames out while listening.
+        static let checkListen: TimeInterval = 1.0
+        /// This many looks in a row without the frame: it's taken as gone (logged), then listened for
+        /// only every `retryRounds` rounds.
+        static let missLimit = 5
+        static let retryRounds = 30
+    }
+
+    /// Reverse (ReverseLight): yellow gradient breathing while the lever is in R, on Power Mode's level
+    /// (the turn signals, the A/C flash, Power Mode's switch flash and the door alert go above it).
+    enum Reverse {
+        /// The feature on or off. Off: R shows what Power Mode shows (purple steady) and the dashboard's
+        /// Reverse row is hidden.
+        static let enabled = true
+        /// A lever reading (in R, or out of it) counts once it has held for this many readings in a row.
+        /// The TCM's R code (7E1 221E12 = 3C) is unmistakable, so 1 is enough; 2 waits a round longer.
+        static let confirmReadings = 1
+    }
+
+    /// Rain mode (RainMode): cyan gradient breathing while it rains as far as the windshield wipers say,
+    /// not while they only run for the washer. Above the normal purple steady, below Power Mode. The wiper
+    /// lever comes from the lights frame (AppConfig.TurnSignals.frameID, Wipers.swift), which is listened
+    /// for while either feature is on: LO and HI count at once. In AUTO the rain sensor decides when to
+    /// wipe, so there it's the wiper motor that counts, read from the front body control module (the
+    /// bits WiperFinder learns) while the lever is in AUTO.
+    enum Rain {
+        /// The feature on or off. Off: the wipers don't change the lighting and the dashboard row is
+        /// hidden.
+        static let enabled = true
+        /// The wiper bits until the wiper finder has learned this car's: openpilot's CX-5 2017+ layout of
+        /// frame 09A, byte 4: 0x02 LO, 0x04 HI (AUTO / INT and the washer aren't in it).
+        static let builtIn = WiperSignal(
+            low: [WiperSignal.Term(byte: 4, mask: 0x02, value: 0x02)],
+            high: [WiperSignal.Term(byte: 4, mask: 0x04, value: 0x04)],
+            off: [WiperSignal.Term(byte: 4, mask: 0x06, value: 0x00)])
+        /// A lever reading counts once it has held for this many readings in a row (one a round), so a
+        /// quick MIST flick, or passing a position on the way to another, doesn't count.
+        static let confirmReadings = 2
+        /// Lever in AUTO: rain mode stays on this long after the last wipe the motor bits showed. Long
+        /// enough to bridge the pauses of intermittent wiping, and a wipe a reading misses (the motor is
+        /// read about once a second, a single wipe takes about as long); when the rain stops, rain mode
+        /// ends this long after the last wipe. Coming from LO or HI into AUTO counts as a wipe, so the
+        /// lamp doesn't drop back to purple in between.
+        static let autoHold: TimeInterval = 60
+        /// Lever in AUTO: wipes within this long after the lever got there don't count. Moving the lever
+        /// from OFF to AUTO wipes once (owner's manual), rain or not.
+        static let autoSettle: TimeInterval = 4
+        /// Lever in AUTO: wipes within this long after the washer was last seen in use don't count. The
+        /// washer wipes too (and twice more after letting go), and the rain sensor may take the fluid on
+        /// the glass for rain for a moment.
+        static let washerHold: TimeInterval = 10
+        /// How long one wiper finder snapshot listens to the frame.
+        static let snapshotListen: TimeInterval = 2
+
+        /// Where WiperFinder looks for the wiper motor bits: the front body control module (726, replies
+        /// from 72E), which drives the wiper LO and HI relays and reads the motor's auto-stop switch.
+        /// C100–C1FF (the body status block on other Mazdas) and DA00–DAFF (58 DIDs answer on this car,
+        /// live inputs among them: DA05 is the brake switch). Widen it if nothing is found (4000–40FF,
+        /// DD00–DD0F…); the scan result is kept until this changes.
+        static let motorScanPlan: [(header: String, ranges: [ClosedRange<Int>])] = [
+            ("726", [0xC100...0xC1FF, 0xDA00...0xDAFF]),
+        ]
+        /// The ECU that drives the wipers; its candidates are preferred.
+        static let motorHeader = "726"
+        /// Wait per DID while scanning (seconds).
+        static let motorScanTimeout: TimeInterval = 0.6
+        /// Every DID is read this many times per snapshot (in separate passes), so values that change by
+        /// themselves, and the auto-stop switch (it flips once a wipe), show up as unsteady and drop out.
+        static let motorReadsPerSnapshot = 2
+        /// Never the wiper motor, even if they slip into the scan: the values that drift or count by
+        /// themselves (Doors.ignoredDIDs: 12V battery, brake switch, a counter, the battery voltage —
+        /// which sags while the motor runs, so it would look like a wiper bit).
+        static let motorIgnoredDIDs: Set<String> = AppConfig.Doors.ignoredDIDs
+    }
+
     enum Lamp {
         /// How many times to resend a mode command if the lamp reports a different mode afterwards.
         static let modeRetries = 2
         /// How many times to resend a packet the lamp answered with "busy" or "checksum error".
         static let nackRetries = 2
-        /// Set the lamp's custom colour to red before red gradient breathing. Some firmware breathes
-        /// the custom colour instead of the gradient parameter (seen as purple breathing after the
-        /// purple steady state). Set to false if this ever makes the breathing colourful instead.
-        static let setRedBeforeBreathing = true
+        /// Set the lamp's custom colour to the breathing colour (red in M, yellow in R) before gradient
+        /// breathing. Some firmware breathes the custom colour instead of the gradient parameter (seen
+        /// as purple breathing after the purple steady state). Set to false if this ever makes the
+        /// breathing colourful instead.
+        static let setColourBeforeBreathing = true
     }
 
     enum CarPlay {
