@@ -58,6 +58,31 @@ assistant when the phone connects to CarPlay.
 - **Reliable commands**: one packet at a time, mode changes are read back and resent if the
   lamp disagrees, "busy" / checksum-error replies are retried.
 
+### i-stop auto-off
+
+Switches Mazda's **i-stop** (idling stop — the engine stopping at a standstill) off at the start of each
+drive, so you don't reach for the dash button every time. A few seconds after the engine is running (well
+clear of the battery-management reset window), if i-stop is on it sends **one short OFF press** and checks
+it took. Tuning in `AppConfig.IStop`.
+
+Nothing about i-stop is a standard OBD2 value, so the app learns two things on the car first, with the
+**i-stop finder** (dashboard → *i-stop finder*), parked with the engine running:
+
+- **the i-stop state** (reliable): which PCM value says i-stop is armed vs disabled, found by comparing
+  snapshots taken with the OFF button pressed and not (`SignalDiff`, the same way as the M flag). Read-only;
+  this is what lets auto-off confirm it worked.
+- **the OFF button** (experimental): which frame the start stop unit broadcasts for the OFF button, found by
+  capturing the whole bus with the button released and held (`FrameDiff`, like the turn-signal frame). This
+  is the frame that gets replayed.
+
+The press is always short — never the 3-second long-press that resets battery management — and only happens
+once the engine is actually running, never in the engine-off window where that reset lives.
+
+**Currently on** (`AppConfig.IStop.enabled = true`), but nothing is sent to the car until the OFF button is
+learned. Caveat: the start stop unit also broadcasts that frame about ten times a second, so replaying it on
+the same id is best-effort and the PCM may ignore it. If it doesn't take, the log says so and the reliable
+permanent route is a one-off coding change with FORScan (see [i-stop](#i-stop-idling-stop) and the roadmap).
+
 ### Voice
 - "Power Mode Activated" / "Power Mode Deactivated" in the assistant's female voice, spoken navigation-style: other audio is ducked,
   not stopped.
@@ -378,6 +403,31 @@ found like the M flag: scan the climate control unit's DIDs and compare snapshot
 settings, or watch its MS-CAN frames while turning the dial (0.5 °C steps, 15.0–32.0 °C).
 The readings go to `ClimateTempFlash.setPointChanged(to:)`; the lighting part already works.
 
+### i-stop (idling stop)
+
+i-stop has no standard OBD2 PID. On this platform the i-stop OFF button is part of the **cluster switch** by
+the driver's knee — a resistor ladder (about 84 Ω between its B and C pins while the OFF button is held,
+~1150 Ω otherwise). The start stop unit reads it and the PCM exposes a read-only `I-Stop_OFF` state (Mazda's
+PID table lists `I-Stop_OFF`, `I-Stop_TRD`, `I-Stop_VSP`, `I-Stop_VST`). The factory tester can read those but
+not force them, so there is no single "turn i-stop off" command; the app fakes the OFF button instead.
+
+Two things are learned on the car (`IStopFinder`, `IStop.swift`):
+
+- **State** — a flag in a PCM service-22 value, found by snapshot diff with i-stop armed vs disabled (reuses
+  `BitSignal` / `SignalDiff`). `AppConfig.IStop.stateScanPlan` lists the PCM DID blocks to scan.
+- **OFF-button frame** — found by monitoring the whole bus (`ATCM000` to pass every id, then `ATMA`, headers
+  on) with the button released and held, and diffing by CAN id (`FrameDiff`). It's replayed by
+  `OBDAdapter.injectFrame`: `ATSH <id>`, `ATCAF0` (formatting off), `ATR0` (no reply expected), write the
+  bytes a few times, then restore.
+
+Two honest limits on the software route with the KW905:
+
+- the adapter has to monitor every id (`ATCM000`); if it won't, the capture comes back empty and only the
+  state can be learned (auto-off then has nothing to press).
+- the start stop unit keeps broadcasting the real frame on the same id, so an injected copy races with it and
+  may be ignored by the PCM. If it is, the permanent alternative is clearing the i-stop bit in the start stop
+  unit's as-built data with FORScan (SSU, one-off) — outside this app.
+
 ## Manual shifting detection
 
 `ManualShiftDetector` drives Power Mode from the **M** gate. It uses the real selector when the car
@@ -425,9 +475,11 @@ Autobot/
 │                DoorMonitor (door state), DoorSafetyAlert, TurnSignals (the indicator lamp frame and
 │                when it counts as flashing), Wipers (the wiper lever in the same frame),
 │                WiperFinder (learns its bits, and the FBCM's wiper motor bit for AUTO)
+│                IStop (i-stop state flag + OFF-button frame, FrameDiff)
 ├── Driving/     ManualShiftDetector (manual shifting → Power Mode), MFinder (learns the M flag),
 │                EngineMonitor (RPM only),
-│                SpeedMonitor (GPS), PowerModeController (buffer zone), CarPlayMonitor
+│                SpeedMonitor (GPS), PowerModeController (buffer zone), CarPlayMonitor,
+│                IStopController (i-stop auto-off), IStopFinder (learns the state + OFF-button frame)
 ├── Climate/     ClimateTempFlash (A/C set colder / warmer → blue / red burst flash)
 ├── Voice/       AudioSessionManager, Speaker, MetallicVoiceEffect, VoiceCoordinator (queue)
 ├── Assistant/   WelcomeAssistant (flow), SpeechListener, DestinationParser,
@@ -477,4 +529,9 @@ versions ignore sections they don't know.
 - A/C set temperature → blue / red flash — **parked**: lighting done, switched off
   (`AppConfig.Climate.enabled`); reading the set temperature needs an MS-CAN capable adapter
   (climate control unit `733`, pins 3/11).
+- i-stop auto-off: replay the OFF button at the start of a drive — **experimental**, software-only through
+  the OBD2 adapter (`AppConfig.IStop`, see [i-stop](#i-stop-idling-stop)). Learns the PCM i-stop state
+  (reliable) and the OFF-button frame (may not replay on this car, since the start stop unit shares the id).
+  Reliable permanent alternative outside the app: clear the i-stop bit in the start stop unit's as-built data
+  with FORScan (SSU, one-off).
 - More lighting features through `LightingArbiter`

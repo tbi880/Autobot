@@ -105,6 +105,9 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     /// every reading of `wiperMotorSignals` (once a round while RainMode asks for it, i.e. the lever in
     /// AUTO), nil while they aren't read or didn't answer. Feeds RainMode.
     @Published private(set) var wiperMotorRunning: Bool?
+    /// Whether i-stop is currently OFF (disabled) as the learned state signal reads it; nil while
+    /// unknown (no learned signal, not read yet, live data stopped). Feeds IStopController.
+    @Published private(set) var iStopOff: Bool?
 
     /// The M flag, read every round with the TCM gear: built in (AppConfig.Transmission.mFlag),
     /// or the one MFinder learned.
@@ -119,6 +122,11 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         didSet {
             if wiperMotorSignals.isEmpty { clearWiperMotor() }
         }
+    }
+    /// The learned i-stop state signal (IStopFinder): when set, it's read every few rounds so the
+    /// dashboard and IStopController know whether i-stop is on. nil = not learned, state unknown.
+    var iStopSignal: BitSignal? {
+        didSet { if iStopSignal == nil, iStopOff != nil { iStopOff = nil } }
     }
 
     /// Latest engine speed (r/min); nil while unknown.
@@ -169,16 +177,20 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     private final class Listening {
         let id: String
         let showsIDs: Bool
+        let captureAll: Bool               // record every frame (by id), not just `id` (bus capture)
         let keepListening: ([CANFrame], Date, Date) -> Bool   // frames, started, now
         let started = Date()
         var frames: [CANFrame] = []
+        var allFrames: [(id: String, data: [UInt8])] = []     // every frame heard, while captureAll
         var otherIDs: Set<String> = []     // frames with other IDs that got through
         var notes: [String] = []           // other lines: "?", "BUFFER FULL", "STOPPED"…
         var ended: Date?                   // when it was decided to stop
 
-        init(id: String, showsIDs: Bool, keepListening: @escaping ([CANFrame], Date, Date) -> Bool) {
+        init(id: String, showsIDs: Bool, captureAll: Bool = false,
+             keepListening: @escaping ([CANFrame], Date, Date) -> Bool) {
             self.id = id
             self.showsIDs = showsIDs
+            self.captureAll = captureAll
             self.keepListening = keepListening
         }
     }
@@ -281,6 +293,50 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         return heard?.frames
     }
 
+    /// For work in runBetweenRounds: every frame heard on the whole bus during `within` seconds, as
+    /// (id, data) pairs. Used by the i-stop finder to find the OFF-button frame. Opens the acceptance
+    /// mask so every id passes, and puts it back (ATAR) afterwards. nil if the adapter can't listen.
+    func captureAllFrames(within: TimeInterval) async -> [(id: String, data: [UInt8])]? {
+        guard jobRunning, !turnListenUnsupported, !receiveFilterUnsupported else { return nil }
+        let run = await listen(to: "", showingIDs: true, within: within, captureAll: true) { _, started, now in
+            now.timeIntervalSince(started) < within
+        }
+        _ = await send(ELM327.receiveAuto)        // undo the accept-all mask
+        currentHeader = nil
+        currentReceive = nil
+        return run?.allFrames
+    }
+
+    /// Replays a CAN broadcast frame (the learned i-stop OFF button): sets the header to `id`, turns
+    /// CAN formatting and responses off, writes the bytes `count` times `interval` apart (the start
+    /// stop unit sends the real one ~10/s, so one frame may be ignored), then restores. SHORT press
+    /// only — never the 3 s long-press that resets battery management, and IStopController only calls
+    /// it once the engine is running. For runBetweenRounds. False if it couldn't be sent.
+    func injectFrame(id: String, bytes: [UInt8], count: Int, interval: Duration) async -> Bool {
+        guard jobRunning, !bytes.isEmpty, writeChar != nil else { return false }
+        _ = await send("ATSH" + id)
+        currentHeader = nil                         // not a request header: drop the tracking
+        guard ELM327.isOK(await send(ELM327.formattingOff)) else { await restoreAfterInject(); return false }
+        _ = await send(ELM327.responsesOff)
+        let hex = bytes.map { String(format: "%02X", $0) }.joined()
+        for _ in 0..<max(count, 1) {
+            _ = await sendRaw(hex + "\r", timeout: AppConfig.OBD.replyTimeout)
+            try? await Task.sleep(for: interval)
+        }
+        await restoreAfterInject()
+        return true
+    }
+
+    /// Back to what the requests need after replaying a frame: responses and CAN formatting on, and
+    /// the request header / receive filter set again on the next useHeader.
+    private func restoreAfterInject() async {
+        _ = await send(ELM327.responsesOn)
+        _ = await send(ELM327.formattingOn)
+        _ = await send(ELM327.receiveAuto)
+        currentHeader = nil
+        currentReceive = nil
+    }
+
     /// Live data stopped (or the adapter went away): work still waiting gets nil.
     private func failPendingJobs() {
         let pending = jobs
@@ -307,6 +363,7 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
             clearDoors()                                      // unknown now
             clearTurnSignals()
             clearWiperMotor()
+            clearIStop()
             try? await Task.sleep(for: AppConfig.OBD.retryDelay)
         }
     }
@@ -557,6 +614,9 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
                 await readDoors()
             }
             if !wiperMotorSignals.isEmpty { await readWiperMotor() }
+            if let signal = iStopSignal, round % max(AppConfig.IStop.pollEveryRounds, 1) == 0 {
+                await readIStop(signal)
+            }
             let thisRound = round
             round += 1
             if let rpmData = values[ELM327.rpmPID] {
@@ -700,6 +760,25 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         if wiperMotorRunning != nil { wiperMotorRunning = nil }
     }
 
+    /// Reads the learned i-stop state signal and publishes whether i-stop is currently off
+    /// (disabled). A change is logged with the raw value.
+    private func readIStop(_ signal: BitSignal) async {
+        guard await useHeader(signal.header), let data = await readSignal(signal) else { return }
+        let off = signal.isOn(data)
+        if off != iStopOff {
+            if let off {
+                logLine("i-stop: " + (off ? "off (disabled)" : "on (armed)") + " · "
+                        + signal.label(off: "on", on: "off") + " = " + Self.hex(data))
+            }
+            iStopOff = off
+        }
+    }
+
+    /// Live data stopped or the adapter went away: the i-stop state is unknown now.
+    private func clearIStop() {
+        if iStopOff != nil { iStopOff = nil }
+    }
+
     /// "00 00 80"
     private static func hex(_ bytes: [UInt8]) -> String {
         bytes.map { String(format: "%02X", $0) }.joined(separator: " ")
@@ -824,22 +903,28 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     /// is off meanwhile, so a broadcast frame shows all its data bytes, and on again afterwards; the
     /// receive filter stays on `id` until the next useHeader puts it back. nil if the adapter refused
     /// (listening is then off for this session, see refuseListening).
-    private func listen(to id: String, showingIDs: Bool, within: TimeInterval,
+    private func listen(to id: String, showingIDs: Bool, within: TimeInterval, captureAll: Bool = false,
                         keepListening: @escaping ([CANFrame], Date, Date) -> Bool) async -> Listening? {
         guard await listenSetting(ELM327.formattingOff) else {
             if !turnListenUnsupported { await endListening(showingIDs: false) }   // no answer: make sure it's on
             return nil
         }
-        if showingIDs, !(await listenSetting(ELM327.headersOn)) {
+        if showingIDs || captureAll, !(await listenSetting(ELM327.headersOn)) {
             await endListening(showingIDs: false)
             return nil
         }
-        guard await listenSetting(ELM327.receiveFilter(id)) else {
-            await endListening(showingIDs: showingIDs)
-            return nil
+        if captureAll {
+            _ = await send(ELM327.acceptAllMask)            // every id passes (best effort)
+            currentReceive = nil
+        } else {
+            guard await listenSetting(ELM327.receiveFilter(id)) else {
+                await endListening(showingIDs: showingIDs)
+                return nil
+            }
+            currentReceive = id
         }
-        currentReceive = id
-        let run = Listening(id: id.uppercased(), showsIDs: showingIDs, keepListening: keepListening)
+        let run = Listening(id: id.uppercased(), showsIDs: showingIDs || captureAll,
+                            captureAll: captureAll, keepListening: keepListening)
         listening = run
         let ticker = Task { [weak self] in
             while !Task.isCancelled {
@@ -892,6 +977,10 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
             return
         }
         guard run.ended == nil else { return }
+        if run.captureAll {
+            if let id = frame.id, run.allFrames.count < 4000 { run.allFrames.append((id: id, data: frame.data)) }
+            return
+        }
         if let id = frame.id, id != run.id {
             run.otherIDs.insert(id)
             return
@@ -1085,6 +1174,7 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         listening = nil
         clearTurnSignals()
         clearWiperMotor()
+        clearIStop()
     }
 
     // MARK: CBCentralManagerDelegate

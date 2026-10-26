@@ -165,6 +165,15 @@ enum ELM327 {
     /// CAN IDs in front of every line while listening, when the receive filter can't be trusted.
     static let headersOn = "ATH1"
     static let headersOff = "ATH0"
+    /// Responses off/on (ATR0/ATR1): after a transmitted frame the adapter returns at once instead of
+    /// waiting for a reply. Used when replaying a broadcast frame (the i-stop OFF button), which
+    /// expects no reply.
+    static let responsesOff = "ATR0"
+    static let responsesOn = "ATR1"
+    /// CAN acceptance mask, all bits "don't care" (ATCM000): every id passes while monitoring, so the
+    /// whole bus can be captured instead of one frame. Undone with ATAR (automatic).
+    static let acceptAllMask = "ATCM000"
+    static let receiveAuto = "ATAR"
 
     /// Only frames with this 11-bit ID get through: "ATCRA09A".
     static func receiveFilter(_ id: String) -> String { "ATCRA" + id }

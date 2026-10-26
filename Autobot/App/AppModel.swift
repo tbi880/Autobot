@@ -20,6 +20,9 @@
 //   (purple steady itself is the `.base` request, under everything else)
 //   OBDAdapter (indicator lamp frame 09A, listened for on HS-CAN) ──turnSignal──▶ TurnSignalFlash
 //     ──scene (turnSignal: yellow flash, above Power Mode)──▶ LightingArbiter
+//   OBDAdapter (learned i-stop state DID) ──iStopOff──▶ IStopController: at the start of a drive it
+//     replays the learned OFF-button frame (OBDAdapter.injectFrame) to switch i-stop off, then checks.
+//     IStopFinder learns the state DID and the OFF-button frame on the car.
 //   LampController.isReady ┐
 //   CarPlayMonitor.isConnected ┼──▶ WelcomeAssistant (once per drive, via VoiceCoordinator)
 //   BootSequence finished ─────┘
@@ -54,6 +57,8 @@ final class AppModel: ObservableObject {
     let reverse: ReverseLight
     let rain: RainMode
     let wiperFinder: WiperFinder
+    let iStop: IStopController
+    let iStopFinder: IStopFinder
     private let voice: VoiceCoordinator
     private let doorAlert: DoorSafetyAlert
 
@@ -103,6 +108,12 @@ final class AppModel: ObservableObject {
         let wiperFinder = WiperFinder(obd: obd, rain: rain)
         wiperFinder.onLog = { [weak lamp] message in lamp?.addLog(message) }
         self.wiperFinder = wiperFinder
+        let iStop = IStopController(obd: obd)
+        iStop.onLog = { [weak lamp] message in lamp?.addLog(message) }
+        self.iStop = iStop
+        let iStopFinder = IStopFinder(obd: obd, controller: iStop)
+        iStopFinder.onLog = { [weak lamp] message in lamp?.addLog(message) }
+        self.iStopFinder = iStopFinder
         self.manual = manual
         let mFinder = MFinder(obd: obd)
         mFinder.onLog = { [weak lamp] message in lamp?.addLog(message) }
@@ -147,6 +158,7 @@ final class AppModel: ObservableObject {
         speed.start()
         obd.start()
         carPlay.start()
+        iStop.start()
 
         obd.$doorStates
             .sink { [weak self] states in self?.doorStatesChanged(states) }

@@ -272,6 +272,50 @@ nonisolated enum AppConfig {
         static let testStartTemperature = 22.0
     }
 
+    /// i-stop (idling stop) auto-off (IStopController, IStopFinder): switch i-stop off at the start of
+    /// each drive by replaying the OFF button the start stop unit broadcasts on the bus (learned on the
+    /// car). i-stop is Mazda's engine stop-at-idle; the car has a physical OFF button for it. See
+    /// README, "i-stop auto-off".
+    enum IStop {
+        /// The feature on or off. On: the dashboard shows the i-stop row and auto-off runs once the
+        /// OFF-button frame is learned (i-stop finder). Nothing is sent to the car until it's learned.
+        static let enabled = true
+        /// Wait this long after the engine ECU starts answering before the auto-off, well clear of the
+        /// battery-management reset window (a long-press within 5 s of ignition on, engine off). The
+        /// press is short and only happens once the engine is running (minRunningRpm), never in that window.
+        static let pressDelay: Duration = .seconds(5)
+        /// Try about this many times (1 s apart) to catch the engine running, then give up for this drive.
+        static let armAttempts = 20
+        /// The engine counts as running above this (r/min): press only then, never with the engine off.
+        static let minRunningRpm: Double = 400
+        /// A simulated press sends the learned button frame this many times at this spacing (the start
+        /// stop unit sends the real one ~10/s, so one frame may be ignored). A SHORT press — never the
+        /// 3 s long-press that resets battery management.
+        static let pressFrameCount = 4
+        static let pressFrameInterval: Duration = .milliseconds(60)
+        /// Re-read the i-stop state this long after a press to confirm it took.
+        static let confirmDelay: Duration = .seconds(2)
+        /// Only auto-press when the learned state says i-stop is currently on. Off by default: without a
+        /// learned state the press still goes out once at the start of a drive (it just can't be confirmed).
+        static let requireStateKnown = false
+        /// Read the learned i-stop state every this many rounds of live data.
+        static let pollEveryRounds = 4
+        /// The PCM that holds the i-stop state (the engine ECU, same as live data).
+        static let stateHeader = "7E0"
+        /// Finder: PCM DID blocks scanned to find the i-stop state flag. These are where Mazda/Ford
+        /// SkyActiv switch and i-stop values tend to live; widen it if nothing differs on the car.
+        static let stateScanPlan: [(header: String, ranges: [ClosedRange<Int>])] = [
+            ("7E0", [0x0900...0x09FF, 0x1100...0x11FF, 0xA200...0xA2FF]),
+        ]
+        static let scanTimeout: TimeInterval = 0.6
+        static let readsPerSnapshot = 2
+        static let snapshotsToConfirm = 2
+        /// Finder: how long each bus capture listens for the OFF-button frame.
+        static let captureListen: TimeInterval = 2.0
+        /// DIDs the state search ignores (none known yet on this car).
+        static let ignoredDIDs: Set<String> = []
+    }
+
     /// Turn signals and hazard lights (TurnSignalFlash): yellow burst flash while the indicators flash,
     /// above Power Mode and its switch flash. Heard on the car's HS-CAN bus: once a round the adapter
     /// listens for the indicator lamp frame (TurnSignals.swift, README "Turn signals").

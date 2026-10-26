@@ -96,6 +96,9 @@ private struct DashboardView: View {
             if AppConfig.TurnSignals.enabled {
                 TurnSignalTestView(flash: app.turnSignals, obd: app.obd, onTest: app.testTurnSignal)
             }
+            if AppConfig.IStop.enabled {
+                IStopView(controller: app.iStop, finder: app.iStopFinder, obd: app.obd)
+            }
             if AppConfig.Climate.enabled {        // hidden until there's an MS-CAN adapter
                 ClimateTestView(climate: app.climate, obd: app.obd, onTest: app.testClimate)
             }
@@ -979,6 +982,178 @@ private struct SelectorDiagnosticsView: View {
         .padding(8)
         .background(Color.secondary.opacity(0.1))
         .cornerRadius(10)
+    }
+}
+
+/// i-stop (idling stop) auto-off (IStopController): replays the OFF button at the start of a drive so
+/// i-stop is off without pressing it. "Test off" presses now; "i-stop finder" learns this car's bits.
+private struct IStopView: View {
+    @ObservedObject var controller: IStopController
+    @ObservedObject var finder: IStopFinder
+    @ObservedObject var obd: OBDAdapter
+    @State private var showingFinder = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text("i-stop").font(.headline)
+                Spacer()
+                Button("i-stop finder") { showingFinder = true }
+                Button("Test off") { controller.test() }
+                    .tint(.indigo)
+                    .disabled(controller.busy || finder.learnedFrame == nil || !obd.isReady)
+            }
+            .font(.caption)
+            .buttonStyle(.bordered)
+            Text(statusText)
+                .font(.caption2)
+                .foregroundColor(obd.iStopOff == true ? .green : .secondary)
+        }
+        .sheet(isPresented: $showingFinder) {
+            IStopFinderView(finder: finder, controller: controller, obd: obd)
+        }
+    }
+
+    /// i-stop now, whether the button is learned, and what the last press did.
+    private var statusText: String {
+        var parts: [String] = []
+        switch obd.iStopOff {
+        case true?: parts.append("now off")
+        case false?: parts.append("now on")
+        case nil: parts.append(finder.learnedState == nil ? "state not learned" : "state --")
+        }
+        parts.append(finder.learnedFrame == nil ? "OFF button not learned: open the i-stop finder"
+                     : "auto-off at the start of each drive")
+        if let action = controller.lastAction { parts.append(action) }
+        return parts.joined(separator: "  ·  ")
+    }
+}
+
+/// Learns this car's i-stop bits (IStopFinder): the PCM state flag (i-stop on vs off, read-only) and
+/// the OFF-button frame on the bus (released vs held, experimental — see the README).
+private struct IStopFinderView: View {
+    @ObservedObject var finder: IStopFinder
+    @ObservedObject var controller: IStopController
+    @ObservedObject var obd: OBDAdapter
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("Status") {
+                    Text(finder.message)
+                    if let progress {
+                        if let value = progress.value {
+                            ProgressView(value: value) { Text(progress.label).font(.caption) }
+                        } else {
+                            ProgressView { Text(progress.label).font(.caption) }
+                        }
+                        Button("Cancel", role: .cancel) { finder.cancel() }
+                    }
+                }
+                Section("Live from the car") {
+                    LabeledContent("i-stop now", value: stateText)
+                    Button("Press OFF now") { controller.test() }
+                        .disabled(controller.busy || finder.learnedFrame == nil || !obd.isReady)
+                }
+                Section {
+                    Button("Scan the PCM (once, 1–2 min)") { finder.scan() }
+                        .disabled(finder.isBusy || !obd.isReady)
+                    LabeledContent("PCM DIDs answering",
+                                   value: finder.supported.isEmpty ? "not scanned" : "\(finder.supported.count)")
+                    Button("Snapshot i-stop OFF  ·  \(finder.offSnapshots) taken") { finder.snapshotState(off: true) }
+                        .disabled(finder.isBusy || finder.supported.isEmpty)
+                    Button("Snapshot i-stop ON  ·  \(finder.onSnapshots) taken") { finder.snapshotState(off: false) }
+                        .disabled(finder.isBusy || finder.supported.isEmpty)
+                } header: {
+                    Text("1 · Find the i-stop state (read-only)")
+                } footer: {
+                    Text("Parked, engine running. Scan once. Press the real OFF button so i-stop shows OFF → "
+                         + "Snapshot i-stop OFF; press again so it shows ON → Snapshot i-stop ON. Repeat once. "
+                         + "This is what lets auto-off confirm it worked.")
+                }
+                if !finder.stateCandidates.isEmpty {
+                    Section("State candidates, best first") {
+                        ForEach(finder.stateCandidates.prefix(6)) { candidate in
+                            Text(candidate.signal.label(off: "on", on: "off") + "  ·  score \(candidate.score)")
+                                .font(.system(.caption, design: .monospaced))
+                        }
+                    }
+                }
+                Section {
+                    Button("Capture bus · nothing pressed  ·  \(finder.idleCaptures)") { finder.captureBus(pressed: false) }
+                        .disabled(finder.isBusy || !obd.isReady)
+                    Button("Capture bus · OFF button held  ·  \(finder.pressedCaptures)") { finder.captureBus(pressed: true) }
+                        .disabled(finder.isBusy || !obd.isReady)
+                } header: {
+                    Text("2 · Find the OFF button (experimental)")
+                } footer: {
+                    Text("Capture with nothing pressed, then press and HOLD the OFF button for the whole 2 s and "
+                         + "capture again. Twice each, then Use it. If no frame is found, the button may not be on "
+                         + "the bus on this car — use FORScan coding instead (see the README).")
+                }
+                if !finder.frameCandidates.isEmpty {
+                    Section("Button candidates, best first") {
+                        ForEach(finder.frameCandidates.prefix(6)) { candidate in
+                            Text(candidate.frame.label() + "  ·  score \(candidate.score)")
+                                .font(.system(.caption, design: .monospaced))
+                        }
+                    }
+                }
+                Section {
+                    Button("Use what was found") { finder.use() }
+                        .disabled(finder.isBusy)
+                    Button("Reset snapshots & captures", role: .destructive) { finder.resetWork() }
+                        .disabled(finder.isBusy)
+                }
+                Section("In use") {
+                    LabeledContent("State",
+                                   value: finder.learnedState.map { $0.label(off: "on", on: "off") } ?? "not learned")
+                        .font(.system(.caption, design: .monospaced))
+                    LabeledContent("OFF button", value: finder.learnedFrame.map { $0.label() } ?? "not learned")
+                        .font(.system(.caption, design: .monospaced))
+                    if finder.learnedState != nil || finder.learnedFrame != nil {
+                        Button("Forget (state and button)", role: .destructive) { finder.forget() }
+                            .disabled(finder.isBusy)
+                    }
+                }
+                Section {
+                    if let url = finder.exportURL {
+                        ShareLink("Export raw bus capture (send to me)", item: url)
+                    } else {
+                        Text("Export raw bus capture — take some captures first").foregroundColor(.secondary)
+                    }
+                } footer: {
+                    Text("If the OFF button can't be found automatically, export the raw captures after a full "
+                         + "pass and share the file, so the frame can be worked out by hand.")
+                }
+            }
+            .navigationTitle("i-stop finder")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
+            }
+        }
+    }
+
+    private var stateText: String {
+        switch obd.iStopOff {
+        case true?: return "OFF (disabled)"
+        case false?: return "ON (armed)"
+        case nil: return finder.learnedState == nil ? "state not learned" : "--"
+        }
+    }
+
+    private var progress: (value: Double?, label: String)? {
+        switch finder.phase {
+        case .idle:
+            return nil
+        case .scanning(let done, let total):
+            return (total > 0 ? Double(done) / Double(total) : 0, "Scanning \(done) / \(total)")
+        case .snapshot(let label, let done, let total):
+            return (total > 0 ? Double(done) / Double(total) : 0, "\(label): \(done) / \(total)")
+        case .capturing(let label):
+            return (nil, "Capturing (\(label))…")
+        }
     }
 }
 
