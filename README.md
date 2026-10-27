@@ -33,12 +33,12 @@ assistant when the phone connects to CarPlay.
   Power Mode (in M it's red breathing as usual). The lever comes from the car's CAN bus, the wiping in
   AUTO from the front body control module (see [Wipers](#wipers-rain-mode)); the dashboard's *Rain*
   button stands in for both, and its *Wiper finder* learns this car's bits.
-- **Turn signals and hazard lights → Yellow Burst Flash** (OBD2 adapter, see
-  [Turn signals](#turn-signals)): while the indicators or the hazard lights flash, the lamp does the
-  firmware's *Yellow Burst Flash*, above Power Mode — in M too, and during a Power Mode switch. When
-  they stop, the lamp goes back to what it should show then: red breathing if still in M, the red
-  switch flash if a Power Mode switch is still in its 3 s, purple steady in D. The dashboard's
-  *Left* / *Hazard* / *Right* buttons stand in for them (tap to start, tap again to stop).
+- **Turn signals and hazard lights → current mode colour flash** (OBD2 adapter, see
+  [Turn signals](#turn-signals)): while the indicators or hazard lights flash, the lamp does a purple
+  burst flash in normal driving mode or a red burst flash in Power Mode. It follows mode changes while
+  the indicators stay on. When they stop, the lamp goes back to what it should show then: red breathing
+  if still in M, the red switch flash if a Power Mode switch is still in its 3 s, purple steady in D.
+  The dashboard's *Left* / *Hazard* / *Right* buttons stand in for them (tap to start, tap again to stop).
 - **A/C temperature flash**: the temperature dial turned colder → *Blue Burst Flash*, warmer →
   *Red Burst Flash*, until 3 s after the last click. Another click the same way starts the 3 s
   again; a click the other way switches the colour at once (the later turn wins). Then the previous
@@ -188,16 +188,15 @@ Frame: `2E | type | len | data… | checksum`, where
 | Query | `90` | `7C, 00 brightness / 01 colour / 02 mode` → reply type `7C` |
 
 Modes used: `0` steady, `2` breathing (parameter `1` = red, `2` = yellow, `4` = cyan gradient), `3` burst flash
-(parameter `1` = red, `2` = yellow, `5` = blue; the app's list is 0 colourful, 1 red, 2 yellow, 3 green, 4 cyan,
-5 blue, 6 purple, 7 white). A single-byte reply `FF` is an ACK; `F0` checksum error, `F3` not
-supported, `FC` busy.
+(parameter `1` = red, `5` = blue, `6` = purple; the firmware's list also has 0 colourful, 2 yellow, 3 green,
+4 cyan and 7 white). A single-byte reply `FF` is an ACK; `F0` checksum error, `F3` not supported, `FC` busy.
 
 The firmware also knows "original car" functions (turn signal, doors, overspeed… and a
 *Temperature adjustment Reminder*, 气候模式). The app only offers them when the controller reports
 them for the selected car model (query `90 9C`), which takes the vendor's CAN box wired to the car;
-Autobot doesn't use them. Its yellow turn-signal flash is its own: it hears the indicators on the CAN
-bus through the OBD2 adapter (see [Turn signals](#turn-signals)) and sends the plain *Yellow Burst
-Flash* mode (`2E 8D 05 02 xx 03 02 ss cs`, after the custom colour `FF FF 00`).
+Autobot doesn't use them. Its turn-signal flash is its own: it hears the indicators on the CAN bus
+through the OBD2 adapter (see [Turn signals](#turn-signals)) and sends a plain purple or red burst
+flash, depending on the current Power Mode state.
 
 ## OBD2 adapter
 
@@ -292,7 +291,7 @@ stays lit for 1 s, like the lights-on bit, is a steady light and is ignored:
 - left and right together: the hazard lights
 
 The first look of every connection lasts 1 s, with the CAN IDs shown, and logs what it heard:
-`OBD: turn signals: frame 09A heard (10 in 1.0 s, 00 00 08 00 …)`, or `not heard` (then the yellow
+`OBD: turn signals: frame 09A heard (10 in 1.0 s, 00 00 08 00 …)`, or `not heard` (then the mode-coloured
 flash only follows the test buttons, and the frame is looked for again every 30 rounds). Every start
 and stop is logged with the lamp byte of that look, e.g.
 `Turn signals: Left flashing · 09A byte 2: 00 20 20 00`, and the dashboard's *Turn signals* row shows
@@ -477,7 +476,7 @@ RPM, gear, speed, pedal and why manual was detected, and the log lists the PIDs 
 Autobot/
 ├── App/         AppModel (wiring), AutobotApp
 ├── Lamp/        LampProtocol (packets), LampController (BLE), LampState (scenes)
-├── Lighting/    LightingArbiter (priority between lighting features), TurnSignalFlash (yellow flash
+├── Lighting/    LightingArbiter (priority between lighting features), TurnSignalFlash (mode-coloured flash
 │                while the indicators flash), ReverseLight (yellow breathing in R), RainMode (cyan
 │                breathing while it rains, from the wipers)
 ├── Vehicle/     OBDAdapter (OBD2 Bluetooth), ELM327 (adapter protocol), MazdaTCM (gearbox values),
@@ -532,7 +531,7 @@ versions ignore sections they don't know.
 - Rain mode (cyan breathing while the wipers are on: LO / HI at once, AUTO once the rain sensor wipes;
   not for the washer) — **done**; the wiper bits (lever, and the FBCM's wiper motor) are learned once
   with the wiper finder.
-- Turn signals / hazard lights → yellow flash — **done**: heard on HS-CAN (frame `0x09A`, see
+- Turn signals / hazard lights → purple / red flash by Power Mode — **done**: heard on HS-CAN (frame `0x09A`, see
   [Turn signals](#turn-signals)); the first drive shows which of its bits this car uses.
 - Real door / boot state — **parked**: not reachable on this car's HS-CAN; needs an MS-CAN capable
   adapter (door frame `0x43E`). Code and door finder kept, switched off (`AppConfig.Doors.enabled`).

@@ -24,7 +24,7 @@ final class LightingArbiter: ObservableObject {
                                      // meet, and everything above Power Mode is above this too
         case powerTransition = 500   // 3-second red flash while Power Mode switches
         case climateTemp = 600       // A/C set colder / warmer: 3-second blue / red flash
-        case turnSignal = 700        // turn signals or hazard lights flashing: yellow flash
+        case turnSignal = 700        // turn signals or hazard lights flashing: current mode colour
         case doorAlert = 1000        // door or boot open: overrides everything
 
         static func < (a: Source, b: Source) -> Bool { a.rawValue < b.rawValue }

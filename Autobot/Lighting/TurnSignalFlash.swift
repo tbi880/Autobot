@@ -1,6 +1,7 @@
 // TurnSignalFlash.swift
-// Yellow burst flash while the turn signals or the hazard lights flash. When they stop, the request
-// is withdrawn and the lamp shows what it should show by then:
+// Flashes in the current Power Mode colour while the turn signals or hazard lights flash: purple in
+// normal driving, red in Power Mode. When they stop, the request is withdrawn and the lamp shows
+// what it should show by then:
 //
 //   - lever in M (Power Mode)               -> red gradient breathing again
 //   - Power Mode switching (buffer zone)    -> its red burst flash, until the 3 s are over
@@ -11,8 +12,8 @@
 // a tap starts flashing, the same tap again stops it, and a change from the car takes over.
 //
 // The flash is a LightingArbiter request from `.turnSignal`: above Power Mode, its switch flash and the
-// A/C flash, below the door alert. Power Mode carries on underneath (it can even switch meanwhile), so
-// whatever it wants at the moment the indicators stop is what comes back.
+// A/C flash, below the door alert. Power Mode carries on underneath and the signal colour updates when
+// its committed state changes, so whatever it wants at the moment the indicators stop comes back.
 
 import Combine
 import Foundation
@@ -28,16 +29,22 @@ final class TurnSignalFlash: ObservableObject {
     var onLog: ((String) -> Void)?
 
     private let lighting: LightingArbiter
+    private let powerMode: PowerModeController
     private var fromCar: TurnSignals.State = .off
     private var subscription: AnyCancellable?
+    private var powerModeSubscription: AnyCancellable?
 
-    init(obd: OBDAdapter, lighting: LightingArbiter) {
+    init(obd: OBDAdapter, lighting: LightingArbiter, powerMode: PowerModeController) {
         self.lighting = lighting
+        self.powerMode = powerMode
         subscription = obd.$turnSignal
             .map { $0 ?? .off }                     // unknown (not heard, no live data) counts as off
             .removeDuplicates()
             .dropFirst()                            // the initial "off"
             .sink { [weak self] state in self?.carChanged(to: state) }
+        powerModeSubscription = powerMode.$committed
+            .dropFirst()
+            .sink { [weak self] _ in self?.updateLighting() }
     }
 
     /// Debug: as if the indicators on that side (or the hazard lights) started flashing; the same
@@ -61,10 +68,18 @@ final class TurnSignalFlash: ObservableObject {
         let now = simulated ?? fromCar
         guard now != state else { return }
         state = now
-        if now.isOn {
-            lighting.request(.yellowBurstFlash, from: .turnSignal)
-        } else {
+        updateLighting()
+    }
+
+    private func updateLighting() {
+        guard state.isOn else {
             lighting.clear(.turnSignal)                 // back to Power Mode (or its switch flash)
+            return
+        }
+        if powerMode.committed == .redBreathing {
+            lighting.request(.redBurstFlash, from: .turnSignal)
+        } else {
+            lighting.request(.purpleBurstFlash, from: .turnSignal)
         }
     }
 }

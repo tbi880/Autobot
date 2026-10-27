@@ -10,8 +10,8 @@
 //
 // The breathing is a LightingArbiter request from `.reverse`, on Power Mode's level (R and M never
 // meet): Power Mode's switch flash, the A/C flash, the turn signals / hazard lights and the door alert
-// all go above it, and it comes back when they end (hazard lights on while reversing: yellow burst
-// flash, then yellow breathing again).
+// all go above it, and it comes back when they end (hazard lights on while reversing: the current
+// Power Mode colour flashes, then yellow breathing resumes).
 
 import Combine
 import Foundation

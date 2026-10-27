@@ -2,7 +2,7 @@
 // The turn signals and the hazard lights, heard on the car's HS-CAN bus: which frame and bits carry
 // the indicator lamps, and when they count as flashing. Pure value code (no Bluetooth): OBDAdapter
 // listens to the bus for a moment every round (ELM327 "ATMA") and hands what it heard to
-// TurnSignalDetector; TurnSignalFlash turns the result into the yellow flash.
+// TurnSignalDetector; TurnSignalFlash turns the result into a flash in the current Power Mode colour.
 //
 // The frame: 0x09A ("lights"), broadcast about 10 times a second on HS-CAN (OBD pins 6/14, the bus the
 // KW905 connects to). Byte 2 has the indicator lamps, following the flasher: lit, dark, lit… about

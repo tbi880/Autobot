@@ -256,8 +256,9 @@ private struct SceneIndicator: View {
     private var color: Color {
         switch scene {
         case .purpleSteady: return Color(red: 0.5, green: 0, blue: 1)
+        case .purpleBurstFlash: return Color(red: 0.5, green: 0, blue: 1)
         case .blueBurstFlash: return .blue
-        case .yellowBurstFlash, .yellowBreathing: return .yellow
+        case .yellowBreathing: return .yellow
         case .cyanBreathing: return .cyan
         case .redBreathing, .redBurstFlash: return .red
         }
@@ -269,7 +270,7 @@ private struct SceneIndicator: View {
         case .purpleSteady: return 1
         case .redBreathing, .yellowBreathing, .cyanBreathing:
             return 0.25 + 0.75 * (0.5 + 0.5 * sin(t * 2 * .pi / 2.5))                   // ~2.5 s breath
-        case .redBurstFlash, .blueBurstFlash, .yellowBurstFlash: return Int(t * 8) % 2 == 0 ? 1 : 0.1   // fast flash
+        case .redBurstFlash, .blueBurstFlash, .purpleBurstFlash: return Int(t * 8) % 2 == 0 ? 1 : 0.1   // fast flash
         }
     }
 }
@@ -571,9 +572,9 @@ private struct WiperFinderView: View {
     }
 }
 
-/// Turn signals and hazard lights (TurnSignalFlash): yellow burst flash while they flash. From the car
-/// (the indicator lamp frame on HS-CAN); the buttons stand in for the lever and the hazard switch: tap
-/// to start, tap again to stop.
+/// Turn signals and hazard lights (TurnSignalFlash): current Power Mode colour flash while they flash.
+/// The signal state comes from the indicator lamp frame on HS-CAN; the buttons stand in for the lever
+/// and hazard switch (tap to start, tap again to stop).
 private struct TurnSignalTestView: View {
     @ObservedObject var flash: TurnSignalFlash
     @ObservedObject var obd: OBDAdapter
@@ -605,7 +606,7 @@ private struct TurnSignalTestView: View {
 
     /// What the indicators do now, and where that comes from.
     private var statusText: String {
-        let now = flash.state.isOn ? "\(flash.state.label) flashing → yellow flash" : "Off"
+        let now = flash.state.isOn ? "\(flash.state.label) flashing → mode-coloured flash" : "Off"
         if flash.simulated != nil { return now + " (simulated)" }
         let frame = AppConfig.TurnSignals.frameID
         switch obd.hearsLightsFrame {

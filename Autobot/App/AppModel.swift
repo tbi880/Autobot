@@ -19,7 +19,7 @@
 //     ──scene (rain: cyan breathing, above the normal purple, below Power Mode)──▶ LightingArbiter
 //   (purple steady itself is the `.base` request, under everything else)
 //   OBDAdapter (indicator lamp frame 09A, listened for on HS-CAN) ──turnSignal──▶ TurnSignalFlash
-//     ──scene (turnSignal: yellow flash, above Power Mode)──▶ LightingArbiter
+//     ──scene (turnSignal: current Power Mode colour flash)──▶ LightingArbiter
 //   OBDAdapter (learned i-stop state DID) ──iStopOff──▶ IStopController: at the start of a drive it
 //     may replay an experimental observed frame (OBDAdapter.injectFrame), then checks PCM state.
 //     IStopFinder learns the state DID and compares CAN captures while the physical switch is held.
@@ -97,9 +97,6 @@ final class AppModel: ObservableObject {
         manual.onLog = { [weak lamp] message in lamp?.addLog(message) }
         self.obd = obd
         self.engine = engine
-        let turnSignals = TurnSignalFlash(obd: obd, lighting: lighting)
-        turnSignals.onLog = { [weak lamp] message in lamp?.addLog(message) }
-        self.turnSignals = turnSignals
         let reverse = ReverseLight(obd: obd, lighting: lighting)
         reverse.onLog = { [weak lamp] message in lamp?.addLog(message) }
         self.reverse = reverse
@@ -128,7 +125,11 @@ final class AppModel: ObservableObject {
         case .engineRPM: trigger = engine
         case .speed: trigger = speed
         }
-        self.powerMode = PowerModeController(trigger: trigger, lighting: lighting, voice: voice)
+        let powerMode = PowerModeController(trigger: trigger, lighting: lighting, voice: voice)
+        self.powerMode = powerMode
+        let turnSignals = TurnSignalFlash(obd: obd, lighting: lighting, powerMode: powerMode)
+        turnSignals.onLog = { [weak lamp] message in lamp?.addLog(message) }
+        self.turnSignals = turnSignals
         let places = SavedPlacesStore()
         self.places = places
         self.backup = BackupManager(places: places)

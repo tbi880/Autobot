@@ -319,9 +319,10 @@ nonisolated enum AppConfig {
         static let ignoredDIDs: Set<String> = []
     }
 
-    /// Turn signals and hazard lights (TurnSignalFlash): yellow burst flash while the indicators flash,
-    /// above Power Mode and its switch flash. Heard on the car's HS-CAN bus: once a round the adapter
-    /// listens for the indicator lamp frame (TurnSignals.swift, README "Turn signals").
+    /// Turn signals and hazard lights (TurnSignalFlash): flash in the current Power Mode colour while
+    /// the indicators flash, above Power Mode and its switch flash. Heard on the car's HS-CAN bus:
+    /// once a round the adapter listens for the indicator lamp frame (TurnSignals.swift, README
+    /// "Turn signals").
     enum TurnSignals {
         /// The feature on or off. Off: the bus isn't listened to (live data as fast as before) and the
         /// dashboard row is hidden.
@@ -338,7 +339,7 @@ nonisolated enum AppConfig {
         static let leftBits: UInt8 = 0x24
         static let rightBits: UInt8 = 0x18
         /// Listen every this many rounds of live data. Each time adds a few hundred ms to the round;
-        /// 2 halves that, but the yellow flash then starts and ends up to a round later.
+        /// 2 halves that, but the mode-coloured flash then starts and ends up to a round later.
         static let everyRounds = 1
         /// Nothing flashing: listen this long, a bit more than the indicators' dark phase (about 0.35 s),
         /// so flashing indicators are always caught.
@@ -353,7 +354,7 @@ nonisolated enum AppConfig {
         /// A look never lasts longer than this.
         static let maxListen: TimeInterval = 1.3
         /// Flashing ends this long after the last flash heard when nothing conclusive comes in (frames
-        /// missing), so the yellow flash can't get stuck.
+        /// missing), so the turn-signal flash can't get stuck.
         static let holdLimit: TimeInterval = 3
         /// The first look of each connection lasts this long, with the CAN IDs shown, to check that the
         /// frame is there and that the adapter keeps other frames out while listening.

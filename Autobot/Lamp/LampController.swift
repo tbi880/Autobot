@@ -75,7 +75,7 @@ final class LampController: NSObject, ObservableObject, CBCentralManagerDelegate
         case .redBreathing: redBreathing()
         case .redBurstFlash: redBurstFlash()
         case .blueBurstFlash: blueBurstFlash()
-        case .yellowBurstFlash: yellowBurstFlash()
+        case .purpleBurstFlash: purpleBurstFlash()
         case .yellowBreathing: yellowBreathing()
         case .cyanBreathing: cyanBreathing()
         }
@@ -129,13 +129,11 @@ final class LampController: NSObject, ObservableObject, CBCentralManagerDelegate
         setModeVerified(mode2: 3, param: 5, prepare: [{ LampProtocol.setColor(0x00, 0x00, 0xFF) }])
     }
 
-    /// Yellow Burst Flash, while the turn signals or the hazard lights flash (TurnSignalFlash): the
-    /// same firmware strobe with parameter 2 ("Yellow Burst Flash" / 黄色爆闪 in the original app's
-    /// ColorModeItem.modeParamStrobe), i.e. 2E 8D 05 02 [rhythm<<4 | mode1] 03 02 [speed] cs.
-    /// The custom colour is set to yellow first (2E 8D 08 01 08 FF FF 00 FF FF 00 65), like red and
-    /// blue above.
-    func yellowBurstFlash() {
-        setModeVerified(mode2: 3, param: 2, prepare: [{ LampProtocol.setColor(0xFF, 0xFF, 0x00) }])
+    /// Purple Burst Flash, while the indicators flash in normal driving mode: the same firmware
+    /// strobe with parameter 6 (the original app's purple entry). Set the custom colour to the same
+    /// purple used by the normal steady scene before switching modes.
+    func purpleBurstFlash() {
+        setModeVerified(mode2: 3, param: 6, prepare: [{ LampProtocol.setColor(0x80, 0x00, 0xFF) }])
     }
 
     /// Purple steady: monocolor mode, purple, Zone 1 = 50, Zone 2 = 100
