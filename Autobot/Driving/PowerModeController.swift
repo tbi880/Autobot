@@ -1,30 +1,16 @@
 // PowerModeController.swift
-// Switches Power Mode (purple steady <-> red gradient breathing) through a short
-// "buffer zone" instead of jumping straight to the new lighting:
+// When the trigger changes, show the red burst flash and announcement for the buffer duration,
+// then recheck the trigger and apply its current Power Mode. This keeps the visible transition while
+// allowing a brief selector fluctuation to settle before committing the breathing scene.
 //
-//   1. The trigger crosses the threshold -> red burst flash for 3 s + "Power Mode Activated/Deactivated"
-//   2. After 3 s the trigger is checked again:
-//      - still on the new side  -> switch to the new lighting (no second announcement)
-//      - back on the old side    -> restore the previous lighting (no announcement)
-// Changes during the 3 s are not acted on; only the state at the end counts.
-// Crossing again later starts a new buffer zone, with its own announcement.
-//
-// The trigger (AppConfig.PowerMode.trigger) is manual shifting worked out from the OBD2 live data
-// (ManualShiftDetector), the engine RPM alone (EngineMonitor, 2500 r/min) or the GPS speed
-// (SpeedMonitor, 90 km/h).
-//
-// The flash is a LightingArbiter request from `.powerTransition` (above Power Mode, below the
-// door alert), so an open door still overrides it, and withdrawing it restores the right scene.
-// Power Mode itself only asks for red breathing (`.powerMode`) while it's on; when it's off it
-// withdraws, so what's underneath shows: rain mode's cyan breathing (`.rain`) or the normal purple
-// steady (`.base`).
+// The trigger is the real manual selector (ManualShiftDetector) or GPS speed. Power Mode asks for
+// red breathing (`.powerMode`) while on; when off it withdraws its request so rain mode's cyan
+// breathing or the normal purple steady scene underneath can show.
 
 import Combine
 import Foundation
 
-/// Decides which side of the Power Mode threshold the car is on: `.redBreathing` (Power Mode)
-/// or `.purpleSteady`, already debounced. Provided by ManualShiftDetector, EngineMonitor (RPM) or
-/// SpeedMonitor (GPS).
+/// The active Power Mode side: `.redBreathing` or `.purpleSteady`, already debounced.
 @MainActor
 protocol PowerModeTrigger: AnyObject {
     var state: LampState { get }
@@ -36,7 +22,7 @@ final class PowerModeController: ObservableObject {
 
     /// The Power Mode lighting currently in effect (purple steady or red breathing).
     @Published private(set) var committed: LampState
-    /// Set during the 3-second buffer zone: the state being switched to.
+    /// Set during the 3-second buffer zone: the state requested by the trigger.
     @Published private(set) var switchingTo: LampState?
     /// Test override (Power ON / OFF buttons): treated as the trigger state until the real
     /// trigger state changes or another test button is pressed.
@@ -62,20 +48,17 @@ final class PowerModeController: ObservableObject {
         }
     }
 
-    /// Debug: pretend the trigger (manual shifting, RPM or speed) is on the given side. Goes
-    /// through the buffer zone (flash + announcement) exactly like real driving.
+    /// Debug: run through the same buffer, announcement and lighting change as the real trigger.
     func simulate(_ state: LampState) {
         simulated = state
         stateChanged(to: state)
     }
 
-    /// The trigger state that counts: the test override if set, otherwise the real one.
+    /// The trigger state that counts: test override if present, otherwise the real trigger state.
     private var currentState: LampState { simulated ?? trigger.state }
 
-    // MARK: Buffer zone
-
     private func stateChanged(to state: LampState) {
-        guard bufferTask == nil, state != committed else { return }   // decided at the end of a running buffer
+        guard bufferTask == nil, state != committed else { return }
         beginBuffer(switchingTo: state)
     }
 
@@ -97,13 +80,12 @@ final class PowerModeController: ObservableObject {
         let now = currentState
         if now != committed {
             committed = now
-            applyPowerMode(now)                       // set before the flash is withdrawn: no flicker
+            applyPowerMode(now)                   // apply before withdrawing the flash
         }
-        lighting.clear(.powerTransition)              // back to the (new or unchanged) Power Mode scene
+        lighting.clear(.powerTransition)
     }
 
-    /// Power Mode on: red breathing from `.powerMode`. Off: no request, so the scene underneath shows
-    /// (rain mode's cyan breathing, or the normal purple steady).
+    /// Power Mode on: red breathing. Off: rain mode or the normal purple steady scene shows through.
     private func applyPowerMode(_ state: LampState) {
         if state == .redBreathing {
             lighting.request(.redBreathing, from: .powerMode)

@@ -9,7 +9,7 @@
 // (tap = in R, tap again = back to the car's lever) until the car's lever changes.
 //
 // The breathing is a LightingArbiter request from `.reverse`, on Power Mode's level (R and M never
-// meet): Power Mode's switch flash, the A/C flash, the turn signals / hazard lights and the door alert
+// meet): Power Mode's switch flash, A/C flash, turn signals / hazard lights and the door alert
 // all go above it, and it comes back when they end (hazard lights on while reversing: the current
 // Power Mode colour flashes, then yellow breathing resumes).
 

@@ -5,8 +5,8 @@
 // engine stop-at-idle; the car has a physical OFF button for it, and this does the same thing so
 // you don't have to press it every time you get in.
 //
-//   OBDAdapter.isReady (engine ECU answering) ──▶ wait out of the battery-reset window, until the
-//   engine is really running ──▶ if i-stop is on (the learned state signal), send one short frame
+//   OBDAdapter.isReady (engine ECU answering) ──▶ wait out of the battery-reset window, then make a
+//   low-rate, one-off RPM safety check until the engine is running ──▶ if i-stop is on, send one short frame
 //   sequence (OBDAdapter.injectFrame) ──▶ re-read the state to confirm. Once per OBD session.
 //
 // Why a finder and not a fixed command: nothing about i-stop is a standard OBD2 PID, and this car
@@ -83,7 +83,7 @@ final class IStopController: ObservableObject {
         try? await Task.sleep(for: Tuning.pressDelay)
         for _ in 0..<Tuning.armAttempts {
             if Task.isCancelled || !obd.isReady { return }
-            if let rpm = obd.rpm, rpm >= Tuning.minRunningRpm {
+            if await obd.isEngineRunningForIStop() {
                 await autoOff()
                 return
             }

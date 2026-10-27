@@ -19,11 +19,10 @@
 //   8. music + Google Maps:
 //      - was playing  -> open Google Maps, let the music resume, then "The music is now continued."
 //                        (if it really resumed)
-//      - was not      -> run a shortcut (AppConfig.Music):
-//                        navigation (commute, exact saved place) -> "最近播放的歌" with the
-//                          navigation link: opens it, then QQ Music 最近播放
-//                        search / no destination -> "Lamp Drive" with the search text:
-//                          QQ Music 继续播放, then Google Maps search (Maps ends up in front)
+//      - was not      -> run the music shortcut (AppConfig.Music): QQ Music only, then it
+//                        opens autobot://maps to come back; Autobot then opens Google Maps
+//                        itself (navigation: comgooglemaps://?saddr=&daddr=…&directionsmode=
+//                        driving, as Gaspy does; search: comgooglemaps://?q=…).
 //                        If iOS refuses to open Shortcuts, Google Maps is opened directly
 //                        (no music). Announce once the music is playing.
 //
@@ -217,23 +216,23 @@ final class WelcomeAssistant: ObservableObject {
         }
     }
 
-    /// No music was playing: the QQ Music shortcut runs, then opens Google Maps itself.
-    /// `announcement` (where we're going) and "The music is now continued." wait until the
-    /// music is actually playing (or the timeout passes).
+    /// No music was playing: the QQ Music shortcut starts the music and comes back to Autobot
+    /// (its last action opens autobot://maps), then Autobot opens Google Maps itself.
+    /// (iOS only lets the app in front open another app, so Maps has to wait until we're back.)
+    /// `announcement` (where we're going) and "The music is now continued." follow once Maps is up.
     private func startMusicAndOpenMaps(_ target: MapsTarget, announcement: String?) async {
-        guard Self.isAppInForeground, let mapsURL = MapsLauncher.url(for: target) else {
+        guard Self.isAppInForeground else {
             status = "Skipped Google Maps (app no longer in foreground)"
             return
         }
-        status = "Starting QQ Music + Google Maps"
-        let (name, input) = Self.shortcut(for: target, mapsURL: mapsURL)
-        let outcome = await playMusicThenOpenMaps(shortcut: name, input: input, mapsURL: mapsURL)
-        lastShortcut = "\(name) <- " + (input.map { "\"\($0)\"" } ?? "no input") + ": \(outcome)"
+        status = "Starting QQ Music"
+        let name = AppConfig.Music.shortcutName
+        let (outcome, mapsOpened) = await playMusicThenOpenMaps(shortcut: name, target: target)
+        lastShortcut = "\(name): \(outcome)"
         SpeechDiagnosticLog.write("WelcomeAssistant: shortcut " + (lastShortcut ?? ""))
+        guard mapsOpened else { return }
 
-        // Let the shortcut bring Google Maps up first (music that was only paused by us
-        // resumes almost at once, so don't announce before the hand-over has started)
-        try? await Task.sleep(for: .seconds(1))
+        try? await Task.sleep(for: .seconds(1))   // let Google Maps come up first
         let musicStarted = await waitForOtherAudio(timeout: AppConfig.Music.startTimeout)
         var lines: [String] = []
         if let line = announcement { lines.append(line) }
@@ -247,35 +246,59 @@ final class WelcomeAssistant: ObservableObject {
         await audio.release()
     }
 
-    /// Which shortcut, and its input:
-    /// - navigation (commute, saved place with an exact address): the navigation link, so the
-    ///   shortcut opens it first (the route starts by itself) and then starts QQ Music
-    /// - search: the text, for Lamp Drive's Google Maps Search action (Maps ends up in front)
-    /// - no destination: Lamp Drive without input (it just opens Google Maps)
-    private static func shortcut(for target: MapsTarget, mapsURL: URL) -> (name: String, input: String?) {
-        switch target {
-        case .navigate: return (AppConfig.Music.navigateShortcutName, mapsURL.absoluteString)
-        case .search(let text): return (AppConfig.Music.searchShortcutName, text)
-        case .none: return (AppConfig.Music.searchShortcutName, nil)
-        }
+    /// The music shortcut came back (ContentView.onOpenURL, autobot://maps).
+    /// Ignored unless a Welcome is waiting for it.
+    func musicShortcutReturned() {
+        guard isAwaitingMusicShortcut else { return }
+        musicShortcutDidReturn = true
     }
 
-    /// Runs the shortcut, which starts QQ Music and opens Google Maps itself. If iOS refuses to
-    /// open Shortcuts, Google Maps is opened directly instead (no music), so Maps always opens.
-    /// Returns what happened, for the dashboard and the diagnostic log.
-    private func playMusicThenOpenMaps(shortcut name: String, input: String?, mapsURL: URL) async -> String {
-        if let url = ShortcutsLauncher.url(named: name, input: input),
-           await ShortcutsLauncher.open(url) {
-            return "opened"
+    private var isAwaitingMusicShortcut = false
+    private var musicShortcutDidReturn = false
+
+    /// Runs the music shortcut, waits for it to come back to Autobot, then opens Google Maps.
+    /// If iOS refuses to open Shortcuts, Google Maps is opened directly (no music).
+    /// Returns what happened (for the dashboard and the diagnostic log) and whether Maps opened.
+    private func playMusicThenOpenMaps(shortcut name: String,
+                                       target: MapsTarget) async -> (String, Bool) {
+        musicShortcutDidReturn = false
+        isAwaitingMusicShortcut = true
+        defer { isAwaitingMusicShortcut = false }
+
+        guard let url = ShortcutsLauncher.url(named: name), await ShortcutsLauncher.open(url) else {
+            let canOpen = ShortcutsLauncher.canOpenShortcuts
+            SpeechDiagnosticLog.write("WelcomeAssistant: iOS refused to open Shortcuts "
+                                      + "(app state \(UIApplication.shared.applicationState.rawValue), "
+                                      + "canOpenURL(shortcuts://) = \(canOpen))")
+            guard Self.isAppInForeground else { return ("Shortcuts refused; app left the foreground", false) }
+            let opened = await MapsLauncher.openReportingResult(target)
+            return ("Shortcuts REFUSED (canOpenURL(shortcuts://) = \(canOpen)); no music; "
+                    + "Google Maps opened directly: " + (opened ? "yes" : "NO"), opened)
         }
-        let canOpen = ShortcutsLauncher.canOpenShortcuts
-        SpeechDiagnosticLog.write("WelcomeAssistant: iOS refused to open Shortcuts "
-                                  + "(app state \(UIApplication.shared.applicationState.rawValue), "
-                                  + "canOpenURL(shortcuts://) = \(canOpen))")
-        guard Self.isAppInForeground else { return "Shortcuts refused; app left the foreground" }
-        let mapsOpened = await UIApplication.shared.open(mapsURL, options: [:])
-        return "Shortcuts REFUSED (canOpenURL(shortcuts://) = \(canOpen)); no music; "
-            + "Google Maps opened directly: " + (mapsOpened ? "yes" : "NO")
+
+        status = "Waiting for the music shortcut to come back"
+        let timeout = AppConfig.Music.returnTimeout
+        let deadline = Date().addingTimeInterval(timeout)
+        while !musicShortcutDidReturn, Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(200))
+        }
+        guard musicShortcutDidReturn else {
+            status = "Music shortcut didn't come back - Google Maps not opened"
+            return ("opened, but didn't come back within \(Int(timeout)) s "
+                    + "(last action must open autobot://maps); Google Maps NOT opened", false)
+        }
+
+        // The URL can arrive just before the app is fully active again
+        let activeDeadline = Date().addingTimeInterval(2)
+        while !Self.isAppInForeground, Date() < activeDeadline {
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        guard Self.isAppInForeground else {
+            return ("came back, but Autobot isn't active; Google Maps NOT opened", false)
+        }
+        status = "Opening Google Maps"
+        let opened = await MapsLauncher.openReportingResult(target)
+        return ("music started, came back; Google Maps opened: " + (opened ? "yes" : "NO"), opened)
     }
 
     private func waitForOtherAudio(timeout: TimeInterval) async -> Bool {

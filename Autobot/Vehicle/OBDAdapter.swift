@@ -1,17 +1,16 @@
 // OBDAdapter.swift
-// Connects to the OBD2 Bluetooth adapter (KONNWEI, ELM327-compatible) and reads live data a few
-// times a second: RPM, road speed, the accelerator pedal (or the engine load) and the transmission
-// (lever position and gear). Commands and reply parsing: ELM327.swift, MazdaTCM.swift. The data
-// goes out as `sample` to ManualShiftDetector and EngineMonitor.
+// Connects to the OBD2 Bluetooth adapter (KONNWEI, ELM327-compatible) and reads road speed and the
+// transmission selector. RPM is queried only by i-stop's startup safety check. Commands and reply
+// parsing: ELM327.swift, MazdaTCM.swift. Live data goes out as `sample` to ManualShiftDetector and
+// the lighting monitors.
 //
 //   ENGINE START -> scan for the adapter (service FFF0, name "KONNWEI") -> connect -> FFF1 notify on
 //   -> ATZ + set-up -> "0100" until the engine ECU answers (ignition on)
-//   -> which PIDs does it have (0100, 0120, …, logged) -> does any ECU report the gear (PID A4)?
-//   -> which transmission values does the car answer (selector 1E23, TCM gear 1E12, 1E1F)?
+//   -> which transmission values does the car answer (selector 1E23 or TCM gear 1E12)?
 //   -> does the body control module answer its door status (726 22C150)?
 //   -> can the climate control unit be reached (733, tester present)? It holds the A/C set
 //      temperature; on this car it's on MS-CAN, out of the KW905's reach, so no
-//   -> "010C0D" (RPM + speed), the pedal and the transmission in a loop -> sample
+//   -> speed and the transmission in a loop -> sample
 //      (+ the doors every few rounds -> doorStates)
 //      (+ while the wiper lever is in AUTO: the wiper motor bits WiperFinder learned -> wiperMotorRunning)
 //      (+ a moment of listening to the bus for the lights frame 09A: the indicators -> turnSignal,
@@ -35,14 +34,9 @@ import SwiftUI
 
 /// One round of live data.
 struct OBDSample {
-    let time: Date
-    /// Engine speed, r/min.
-    let rpm: Double
     /// Road speed, km/h (PID 0D); nil if the car doesn't report it.
     let speed: Double?
-    /// How hard the accelerator is pressed, 0–100 %: pedal PID 5A or 49, otherwise engine load 04.
-    let demand: Double?
-    /// Gear from PID A4, the TCM (1E12) or the engaged-gear DID (1E1F), when the car reports it.
+    /// Gear from the TCM DID 1E12, when the car reports it.
     let gear: Int?
     /// The gear lever (P/R/N/D/M) when the car tells it: from the selector DID (1E23) on cars that
     /// have it, otherwise from the TCM (P/R/N always, D or M once the M flag is learned). nil when
@@ -64,12 +58,6 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     @Published private(set) var isReady = false
     /// The latest live data; nil while unknown (not connected, ECU silent).
     @Published private(set) var sample: OBDSample?
-    /// Mode 01 PIDs the engine ECU supports (empty until asked).
-    @Published private(set) var supportedPIDs: Set<UInt8> = []
-    /// Where `sample.demand` comes from, for the dashboard: "pedal (PID 5A)", "engine load (PID 04)"…
-    @Published private(set) var demandSource: String?
-    /// Whether the car reports the current gear (standard PID A4); nil until checked.
-    @Published private(set) var reportsGear: Bool?
     /// Whether the TCM answers its gear value (7E1 221E12: P/R/N and the gear); nil until checked.
     @Published private(set) var reportsTCMGear: Bool?
     /// The latest raw TCM gear code (46 P, 3C R, 32 N, 01…06 gear), for the M finder screen.
@@ -129,9 +117,6 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         didSet { if iStopSignal == nil, iStopOff != nil { iStopOff = nil } }
     }
 
-    /// Latest engine speed (r/min); nil while unknown.
-    var rpm: Double? { sample?.rpm }
-
     /// Connection and set-up messages for the dashboard log (not every reading).
     var onLog: ((String) -> Void)?
 
@@ -144,20 +129,14 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     private var pendingReply: CheckedContinuation<String?, Never>?   // the command waiting for ">"
     private var replyTimeout: Task<Void, Never>?
     private var useReplyCount = true      // "…1" at the end of requests; false if the adapter says "?"
-    private var combineRequests = true    // "010C0D"; false if the ECU answers one PID per request
-    private var demandPID: UInt8?
-    private var gearFromECU = false
     private var selectorAvailable = false   // some ECU answers "221E23" (Ford-style P/R/N/D/M)
     private var selectorHeader: String?     // …and which one
     private var tcmGearAvailable = false    // the TCM answers "221E12" (P/R/N + gear)
-    private var engagedGearAvailable = false // the PCM answers "221E1F" with a gear number
     private var builtInDoorSignals: [DoorMonitor.Opening: BitSignal] = [:]   // the ones the car answered
     private var currentHeader: String?      // request header the adapter is set to (nil = unknown)
     private var currentReceive: String?     // receive address set with ATCRA (nil = automatic)
     private var receiveFilterUnsupported = false
     private var diagLast: [String: String] = [:]
-    private var pedalReleased: Double?    // PID 49: lowest value seen, i.e. the pedal released
-    private var pedalFloored = 80.0       // PID 49: highest value seen, at least 80 %
     private var turnDetector = TurnSignalDetector()
     private var turnLooked = false             // this session's first look (longer, IDs shown) is done
     private var turnShowIDs = true             // show the CAN IDs while listening: the filter let others through
@@ -225,6 +204,19 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
                 },
                 cancel: { continuation.resume(returning: nil) }))
         }
+    }
+
+    /// A single RPM query for i-stop's startup safety gate. RPM is intentionally not part of the
+    /// recurring live-data requests; IStopController calls this at most once per second while arming.
+    func isEngineRunningForIStop() async -> Bool {
+        await runBetweenRounds { adapter in
+            guard await adapter.useHeader(adapter.baseHeader),
+                  let reply = await adapter.request([ELM327.rpmPID]),
+                  let data = ELM327.values(in: reply, first: ELM327.rpmPID)[ELM327.rpmPID] else {
+                return false
+            }
+            return ELM327.rpm(data) >= AppConfig.IStop.minRunningRpm
+        } ?? false
     }
 
     /// One service-22 read for work running in runBetweenRounds: switches the request header as
@@ -378,8 +370,6 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     private func runSession() async {
         while !Task.isCancelled {
             if await setUp(), await waitForEngine() {
-                await discoverSupportedPIDs()
-                await checkGearReporting()
                 await checkTransmissionReporting()
                 await checkDoorReporting()
                 await checkClimateUnit()
@@ -400,7 +390,6 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     private func setUp() async -> Bool {
         status = "OBD: setting up the adapter…"
         useReplyCount = true
-        combineRequests = true
         currentHeader = nil                            // ATZ resets the adapter's header…
         currentReceive = nil                           // …and receive filter
         receiveFilterUnsupported = false
@@ -448,64 +437,12 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         return false
     }
 
-    /// Asks the engine ECU which mode 01 PIDs it has: 0100, then 0120, 0140… as long as each block
-    /// lists the next one. Picks where the pedal comes from and logs the list.
-    private func discoverSupportedPIDs() async {
-        var found: Set<UInt8> = []
-        var base: UInt8 = 0x00
-        while !Task.isCancelled {
-            guard let reply = await request([base], timeout: AppConfig.OBD.probeTimeout),
-                  let pids = ELM327.supportedPIDs(in: reply, base: base) else { break }
-            found.formUnion(pids)
-            guard base < 0xC0, pids.contains(base + 0x20) else { break }
-            base += 0x20
-        }
-        supportedPIDs = found
-        if found.isEmpty {
-            demandPID = ELM327.loadPID                 // list unknown: engine load, nearly every car has it
-        } else {
-            demandPID = [ELM327.relativePedalPID, ELM327.pedalPID, ELM327.loadPID].first { found.contains($0) }
-        }
-        gearFromECU = found.contains(ELM327.gearPID)
-        demandSource = demandPID.map { Self.demandName($0) }
-        logLine("OBD: engine ECU has \(found.count) PIDs: "
-                + found.sorted().map { String(format: "%02X", $0) }.joined(separator: " "))
-        logLine("OBD: reading RPM, speed, \(demandSource ?? "no pedal")" + (gearFromECU ? ", gear (PID A4)" : ""))
-    }
-
-    private static func demandName(_ pid: UInt8) -> String {
-        switch pid {
-        case ELM327.relativePedalPID: return "pedal (PID 5A)"
-        case ELM327.pedalPID: return "pedal (PID 49)"
-        default: return "engine load (PID 04)"
-        }
-    }
-
-    /// Does any ECU report the gear (PID A4)? Shown on the dashboard; the gear itself is only read
-    /// when the engine ECU has it.
-    private func checkGearReporting() async {
-        if gearFromECU {
-            reportsGear = true
-            logLine("OBD: gear (PID A4) reported by the engine ECU")
-            return
-        }
-        await useHeader("7DF")                                  // ask every ECU
-        let reply = await send(ELM327.gearCheck, timeout: AppConfig.OBD.probeTimeout)
-        await useHeader(baseHeader)                             // back to the engine ECU
-        let reports = reply.flatMap { ELM327.reportsGear($0) } ?? false
-        reportsGear = reports
-        logLine("OBD: gear (PID A4) " + (reports ? "reported by another ECU, not read" : "not reported by the car"))
-    }
-
-    /// Which transmission values does the car answer? In order of preference:
-    ///   1. the selector DID 1E23 (P/R/N/D/M in one byte, Ford-style; not on the 2015 CX-5 2.2D),
-    ///   2. the TCM gear 1E12 (P/R/N and the gear; D vs M from the M flag MFinder learns),
-    ///   3. the engaged gear 1E1F, for a gear number when nothing above gives one.
+    /// Which selector values does the car answer? Prefer one direct selector DID; otherwise use the
+    /// TCM's P/R/N/gear code together with its separate M flag.
     private func checkTransmissionReporting() async {
         selectorAvailable = false
         selectorHeader = nil
         tcmGearAvailable = false
-        engagedGearAvailable = false
         guard AppConfig.OBD.readSelector, !AppConfig.OBD.selectorDiagnostics else {
             reportsTCMGear = false
             logLine("OBD: transmission read off" + (AppConfig.OBD.selectorDiagnostics ? " (raw diagnostics on)" : ""))
@@ -531,15 +468,9 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         }
         reportsTCMGear = tcmGearAvailable
         if !selectorAvailable, !tcmGearAvailable {
-            logLine("OBD: no transmission values (221E23, 7E1 221E12); M worked out from RPM/speed/pedal")
+            logLine("OBD: no selector values (221E23, 7E1 221E12); run M finder if the built-in M flag doesn't apply")
         }
         await useHeader(baseHeader)
-        if !gearFromECU, !tcmGearAvailable,
-           let reply = await send22(ELM327.engagedGearDID, timeout: AppConfig.OBD.probeTimeout),
-           ELM327.engagedGear(in: reply) != nil {
-            engagedGearAvailable = true
-            logLine("OBD: engaged gear (221E1F) reported; using it for the gear number")
-        }
     }
 
     /// Does the body control module answer the built-in door status (AppConfig.Doors.builtIn,
@@ -605,9 +536,8 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         }
     }
 
-    /// RPM + speed, the pedal and the transmission (and a moment of listening for the turn signals),
-    /// round after round, until the engine ECU stops answering. Work queued by runBetweenRounds runs
-    /// between two rounds.
+    /// Speed and the selector, round after round, until the engine ECU stops answering. RPM and pedal
+    /// PIDs are not part of this loop. Work queued by runBetweenRounds runs between two rounds.
     private func readLiveData() async {
         status = "OBD: reading live data"
         isReady = true
@@ -621,23 +551,19 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
                 jobRunning = false
                 continue
             }
-            await useHeader(baseHeader)
-            var values: [UInt8: [UInt8]] = [:]
-            for group in requestGroups() {
-                guard let first = group.first, let reply = await request(group) else { continue }
-                let found = ELM327.values(in: reply, first: first)
-                if combineRequests, group.count > 1, found[first] != nil, found.count < group.count {
-                    combineRequests = false
-                    logLine("OBD: the ECU answers one PID per request, asking separately")
-                }
-                values.merge(found) { _, new in new }
-            }
-            var engagedGear: Int?
-            if engagedGearAvailable, let reply = await send22(ELM327.engagedGearDID) {
-                engagedGear = ELM327.engagedGear(in: reply)
-            }
-            if AppConfig.OBD.selectorDiagnostics { selectorDiag = await diagnose() }
             let transmission = await readTransmission()
+            if transmission.answered {
+                // Publish the selector before the independent speed request, so a shift does not
+                // wait for a dashboard-only value before it reaches PowerModeController.
+                setSample(makeSample(speed: sample?.speed, selector: transmission.selector,
+                                     gear: transmission.gear))
+            }
+            await useHeader(baseHeader)
+            let speedReply = await request([ELM327.speedPID])
+            let speed = speedReply
+                .flatMap { ELM327.values(in: $0, first: ELM327.speedPID)[ELM327.speedPID]?.first }
+                .map { Double($0) }
+            if AppConfig.OBD.selectorDiagnostics { selectorDiag = await diagnose() }
             if !doorSignals.isEmpty, round % max(AppConfig.Doors.pollEveryRounds, 1) == 0 {
                 await readDoors()
             }
@@ -647,14 +573,13 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
             }
             let thisRound = round
             round += 1
-            if let rpmData = values[ELM327.rpmPID] {
+            if speed != nil || transmission.answered {
                 misses = 0
-                setSample(makeSample(values, rpmData: rpmData, selector: transmission.selector,
-                                     gear: transmission.gear ?? engagedGear))
+                setSample(makeSample(speed: speed, selector: transmission.selector, gear: transmission.gear))
             } else {
                 misses += 1
                 if misses >= AppConfig.OBD.maxMissedReadings {
-                    logLine("OBD: engine ECU stopped answering")
+                    logLine("OBD: vehicle stopped answering live-data requests")
                     return
                 }
             }
@@ -666,37 +591,48 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         }
     }
 
-    /// The mode 01 requests for one round, each small enough for a single CAN frame.
-    private func requestGroups() -> [[UInt8]] {
-        let hasSpeed = supportedPIDs.isEmpty || supportedPIDs.contains(ELM327.speedPID)
-        let core: [UInt8] = hasSpeed ? [ELM327.rpmPID, ELM327.speedPID] : [ELM327.rpmPID]
-        var groups: [[UInt8]] = combineRequests ? [core] : core.map { [$0] }
-        if let demandPID { groups.append([demandPID]) }
-        if gearFromECU { groups.append([ELM327.gearPID]) }
-        return groups
-    }
-
     /// The lever and gear for this round: from the selector DID (1E23) on cars that have it,
     /// otherwise from the TCM gear code (1E12) plus the learned M flag.
-    private func readTransmission() async -> (selector: ELM327.Selector?, gear: Int?) {
+    private func readTransmission() async -> (selector: ELM327.Selector?, gear: Int?, answered: Bool) {
         if selectorAvailable {
-            guard await useHeader(selectorHeader ?? baseHeader) else { return (nil, nil) }
-            return (await send22(ELM327.selectorDID).flatMap { ELM327.selector(in: $0) }, nil)
+            guard await useHeader(selectorHeader ?? baseHeader) else { return (nil, nil, false) }
+            let selector = await send22(ELM327.selectorDID).flatMap { ELM327.selector(in: $0) }
+            return (selector, nil, selector != nil)
         }
-        guard tcmGearAvailable else { return (nil, nil) }
-        var code: UInt8?
+
+        // Read the M flag first: it alone confirms M, so do not wait for the separate gear read
+        // before turning Power Mode on. A false flag only ends M immediately if the previous state
+        // was M; otherwise the gear code is needed to distinguish D from P/R/N for the dashboard.
         var manual: Bool?
-        if await useHeader(MazdaTCM.header) {
-            code = await send22(MazdaTCM.gearDID).flatMap { ELM327.payload22(MazdaTCM.gearDID, in: $0)?.first }
-            if let signal = mFlag, signal.header == MazdaTCM.header {
-                manual = signal.isOn(await readSignal(signal))
+        var answered = false
+        if let signal = mFlag, await useHeader(signal.header) {
+            let bytes = await readSignal(signal)
+            manual = signal.isOn(bytes)
+            answered = bytes != nil
+            if let manual, manual, sample?.selector != .manual {
+                setSample(makeSample(speed: sample?.speed,
+                                     selector: .manual,
+                                     gear: sample?.gear))
+            } else if let manual, !manual, sample?.selector == .manual {
+                setSample(makeSample(speed: sample?.speed,
+                                     selector: .drive,
+                                     gear: sample?.gear))
             }
         }
-        if let signal = mFlag, signal.header != MazdaTCM.header, await useHeader(signal.header) {
-            manual = signal.isOn(await readSignal(signal))
+
+        var code: UInt8?
+        if tcmGearAvailable, await useHeader(MazdaTCM.header) {
+            let reply = await send22(MazdaTCM.gearDID)
+            code = reply.flatMap { ELM327.payload22(MazdaTCM.gearDID, in: $0)?.first }
+            answered = answered || code != nil
         }
         tcmGearCode = code
-        return MazdaTCM.reading(gearCode: code, manual: manual)
+        if let code {
+            let reading = MazdaTCM.reading(gearCode: code, manual: manual)
+            return (reading.selector, reading.gear, answered)
+        }
+        if let manual { return (manual ? .manual : .drive, nil, answered) }
+        return (nil, nil, answered)
     }
 
     /// A learned signal's DID; the whole reply when it's longer than one CAN frame.
@@ -830,30 +766,8 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         return rows
     }
 
-    private func makeSample(_ values: [UInt8: [UInt8]], rpmData: [UInt8],
-                            selector: ELM327.Selector?, gear: Int?) -> OBDSample {
-        var demand: Double?
-        if let pid = demandPID, let data = values[pid] {
-            let percent = ELM327.percent(data)
-            demand = pid == ELM327.pedalPID ? scaledPedal(percent) : percent
-        }
-        return OBDSample(time: Date(),
-                         rpm: ELM327.rpm(rpmData),
-                         speed: values[ELM327.speedPID].map { Double($0[0]) },
-                         demand: demand,
-                         gear: values[ELM327.gearPID].flatMap { ELM327.gear($0) } ?? gear,
-                         selector: selector)
-    }
-
-    /// PID 49 is the raw pedal sensor: roughly 15 % released and 80 % floored. Scaled to 0–100 %
-    /// between the lowest value seen (released) and the highest. Unknown until the pedal has been
-    /// seen released.
-    private func scaledPedal(_ raw: Double) -> Double? {
-        if raw < 30 { pedalReleased = min(pedalReleased ?? raw, raw) }
-        pedalFloored = max(pedalFloored, raw)
-        guard let released = pedalReleased else { return nil }
-        let span = max(pedalFloored - released, 1)
-        return min(max((raw - released) / span * 100, 0), 100)
+    private func makeSample(speed: Double?, selector: ELM327.Selector?, gear: Int?) -> OBDSample {
+        OBDSample(speed: speed, gear: gear, selector: selector)
     }
 
     // MARK: Lights frame: turn signals and wipers (listening to the bus)

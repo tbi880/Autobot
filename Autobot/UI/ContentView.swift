@@ -1,6 +1,6 @@
 // ContentView.swift
 // Root: the start screen (BootView) first; once it reaches 100 % it flies through the ring into
-// the dashboard: connection status, live data (RPM, gear, manual shifting), lamp state, assistant
+// the dashboard: connection status, live selector, lamp state, assistant
 // status, packet log.
 
 import Combine
@@ -28,9 +28,16 @@ struct ContentView: View {
             }
         }
         .onOpenURL { url in
-            guard url.scheme == "autobot", url.host == "start" else { return }
-            app.startFromCarPlayAutomation()
-            showDashboard = true
+            guard url.scheme == "autobot" else { return }
+            switch url.host {
+            case "start":
+                app.startFromCarPlayAutomation()
+                showDashboard = true
+            case "maps":   // the QQ Music shortcut is done: Autobot opens Google Maps now
+                app.assistant.musicShortcutReturned()
+            default:
+                break
+            }
         }
     }
 }
@@ -142,58 +149,25 @@ private struct DrivingView: View {
     @ObservedObject var speed: SpeedMonitor
     @ObservedObject var manual: ManualShiftDetector
 
-    private var rpmText: String { obd.rpm.map { String(format: "%.0f", $0) } ?? "--" }
     private var gpsSpeedText: String { speed.speedKmh.map { String(format: "%.0f", $0) } ?? "--" }
     private var obdSpeedText: String { obd.sample?.speed.map { String(format: "%.0f", $0) } ?? "--" }
-    private var gearText: String {
-        if let lever = manual.selector, lever != .drive, lever != .manual { return lever.label }   // P, R, N
-        guard let gear = manual.gear else { return "gear --" }
-        let prefix = manual.selector == .manual ? "M" : (manual.selector == .drive ? "D" : "gear ")
-        return prefix + "\(gear)" + (manual.gearFromCar ? "" : " (est.)")
-    }
-    private var demandText: String {
-        let label = obd.demandSource?.hasPrefix("engine load") == true ? "load" : "pedal"
-        return label + " " + (obd.sample?.demand.map { String(format: "%.0f %%", $0) } ?? "--")
-    }
 
     var body: some View {
         VStack(spacing: 4) {
             switch AppConfig.PowerMode.trigger {
             case .manualShift:
-                Text(rpmText)
+                Text(manual.selector?.label ?? "--")
                     .font(.system(size: 64, weight: .bold, design: .rounded))
-                    .monospacedDigit()
-                Text("r/min  ·  \(gearText)  ·  \(obdSpeedText) km/h  ·  \(demandText)")
+                Text(manual.state == .redBreathing ? "M · Power Mode on" : "Power Mode off")
                     .font(.subheadline)
                     .foregroundColor(.secondary)
-                if manual.state == .redBreathing {
-                    Text("Manual: \(manual.reason ?? "shifting by hand")")
-                        .font(.subheadline.bold())
-                        .foregroundColor(.red)
-                } else {
-                    Text(manual.usingRealSelector ? "Selector in \(manual.selector?.label ?? "D")" : "Driving in D")
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
-                }
-                if manual.usingRealSelector {
-                    Text("Lever \(manual.selector?.label ?? "--") from the car  ·  GPS \(gpsSpeedText) km/h")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                } else {
-                    Text("Selector estimated · top gear " + String(format: "%.1f", manual.topGearRatio)
-                         + " r/min per km/h  ·  GPS \(gpsSpeedText) km/h")
+                if manual.selector == nil {
+                    Text("Selector signal unavailable · use M finder if needed")
                         .font(.caption2)
                         .foregroundColor(.secondary)
                 }
-            case .engineRPM:
-                Text(rpmText)
-                    .font(.system(size: 64, weight: .bold, design: .rounded))
-                    .monospacedDigit()
-                Text("r/min  ·  Power Mode at \(Int(AppConfig.Engine.powerModeThresholdRpm))")
+                Text("GPS \(gpsSpeedText) km/h  ·  OBD \(obdSpeedText) km/h")
                     .font(.subheadline)
-                    .foregroundColor(.secondary)
-                Text("GPS \(gpsSpeedText) km/h  ·  Location: \(speed.authorization)")
-                    .font(.caption)
                     .foregroundColor(.secondary)
             case .speed:
                 Text(gpsSpeedText)
@@ -202,7 +176,7 @@ private struct DrivingView: View {
                 Text("km/h  ·  Power Mode at \(Int(AppConfig.Speed.powerModeThresholdKmh))")
                     .font(.subheadline)
                     .foregroundColor(.secondary)
-                Text("Engine \(rpmText) r/min  ·  Location: \(speed.authorization)")
+                Text("Location: \(speed.authorization)")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -227,7 +201,7 @@ private struct LampStateView: View {
                     Text(active.scene.label).font(.title3.bold())
                 }
                 if let target = powerMode.switchingTo {
-                    Text("Buffer zone → \(target.label)")
+                    Text("3-second buffer → \(target.label)")
                         .font(.subheadline.bold())
                         .foregroundColor(.red)
                 }
@@ -341,7 +315,7 @@ private struct AssistantView: View {
     }
 }
 
-/// Pretends the Power Mode trigger switched: buffer zone flash, announcement, then the new lighting.
+/// Pretends the Power Mode trigger switched: 3-second flash, announcement, then new lighting.
 private struct PowerModeTestView: View {
     @ObservedObject var powerMode: PowerModeController
     let onTest: (LampState) -> Void

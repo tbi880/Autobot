@@ -2,9 +2,9 @@
 // Creates every component and wires them together:
 //
 //   MFinder (finds the M flag once) ──learned M flag──▶ OBDAdapter (TCM: P/R/N, gear, M/D)
-//   OBDAdapter ──live data──▶ ManualShiftDetector ──▶ PowerModeController ──scenes (powerMode, powerTransition)──▶ LightingArbiter ──▶ LampController
+//   OBDAdapter ──live selector──▶ ManualShiftDetector ──▶ PowerModeController ──scenes (powerMode, powerTransition)──▶ LightingArbiter ──▶ LampController
 //                                                                         └─"Power Mode Activated/Deactivated"──▶ VoiceCoordinator
-//     (AppConfig.PowerMode.trigger: ManualShiftDetector, EngineMonitor (RPM only) or SpeedMonitor (GPS))
+//     (AppConfig.PowerMode.trigger: ManualShiftDetector or SpeedMonitor (GPS))
 //   SpeedMonitor (GPS) ──▶ speed on the dashboard, location for the weather briefing / commute check
 //   OBDAdapter (BCM door status 726 22C150; DoorFinder fills in doors it learned) ──doorStates──▶ DoorMonitor
 //   DoorMonitor ──▶ DoorSafetyAlert ──scene (doorAlert)──▶ LightingArbiter
@@ -48,7 +48,6 @@ final class AppModel: ObservableObject {
     let doors: DoorMonitor
     let powerMode: PowerModeController
     let obd: OBDAdapter
-    let engine: EngineMonitor
     let manual: ManualShiftDetector
     let mFinder: MFinder
     let doorFinder: DoorFinder
@@ -92,11 +91,9 @@ final class AppModel: ObservableObject {
         self.climate = climate
         let obd = OBDAdapter()
         obd.onLog = { [weak lamp] message in lamp?.addLog(message) }
-        let engine = EngineMonitor(obd: obd)
         let manual = ManualShiftDetector(obd: obd)
         manual.onLog = { [weak lamp] message in lamp?.addLog(message) }
         self.obd = obd
-        self.engine = engine
         let reverse = ReverseLight(obd: obd, lighting: lighting)
         reverse.onLog = { [weak lamp] message in lamp?.addLog(message) }
         self.reverse = reverse
@@ -122,7 +119,6 @@ final class AppModel: ObservableObject {
         let trigger: any PowerModeTrigger
         switch AppConfig.PowerMode.trigger {
         case .manualShift: trigger = manual
-        case .engineRPM: trigger = engine
         case .speed: trigger = speed
         }
         let powerMode = PowerModeController(trigger: trigger, lighting: lighting, voice: voice)
@@ -192,7 +188,7 @@ final class AppModel: ObservableObject {
         voice.runConversation { await assistant.testCommute() }
     }
 
-    /// Debug: behave as if the Power Mode trigger switched to `state` (buffer zone, announcement, lighting).
+    /// Debug: behave as if the Power Mode trigger switched to `state` (3-second flash, announcement, lighting).
     func testPowerMode(_ state: LampState) {
         powerMode.simulate(state)
     }

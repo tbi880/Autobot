@@ -19,10 +19,10 @@ final class LightingArbiter: ObservableObject {
         case base = 0                // purple steady: the normal lighting, always there underneath
         case rain = 5                // wipers on (not just the washer): cyan breathing. Above the normal
                                      // purple, below Power Mode
-        case powerMode = 10          // red breathing while Power Mode is on (manual shifting, RPM or speed)
+        case powerMode = 10          // red breathing while Power Mode is on (M selector or GPS speed)
         case reverse = 20            // lever in R: yellow breathing. Power Mode's level: R and M never
                                      // meet, and everything above Power Mode is above this too
-        case powerTransition = 500   // 3-second red flash while Power Mode switches
+        case powerTransition = 500   // red burst flash and voice while Power Mode switches
         case climateTemp = 600       // A/C set colder / warmer: 3-second blue / red flash
         case turnSignal = 700        // turn signals or hazard lights flashing: current mode colour
         case doorAlert = 1000        // door or boot open: overrides everything

@@ -1,7 +1,7 @@
 # Autobot
 
 A personal iOS companion app for the car. It drives a Bluetooth LED ambient-light controller
-directly (no vendor app needed), reacts to manual shifting (worked out from OBD2 live data), the
+directly (no vendor app needed), reacts to the car's reported manual selector (M) and the
 turn signals (heard on the car's CAN bus) and door state, and greets the driver with a voice
 assistant when the phone connects to CarPlay.
 
@@ -15,17 +15,15 @@ assistant when the phone connects to CarPlay.
   [Manual shifting detection](#manual-shifting-detection))
   - driving in D: steady purple (zone 1 at 50 %, zone 2 at 100 %), or cyan breathing while it
     rains (rain mode, below)
-  - shifting yourself and holding the revs: firmware *Red Gradient* breathing, until the revs
-    have stayed at or below 2500 r/min for 10 s
-  - switching goes through a 3-second *buffer zone*: red burst flash + the Power Mode
-    announcement, then the trigger is checked again and the new lighting is applied, or the
-    old one restored if it went back
-  - other triggers in `AppConfig.PowerMode.trigger`: `.engineRPM` (2500 r/min) and `.speed`
-    (GPS, 90 km/h)
+  - the M/D decision follows the car's selector after one reading. A change starts the original
+    3-second red burst and voice announcement; after the flash, the current selector is checked and
+    red breathing is applied if it is still in M
+  - `.speed` (GPS, 90 km/h) remains available as an alternate trigger
 - **Reverse → yellow breathing**: with the lever in R the lamp does the firmware's *Yellow Gradient*
-  breathing, on Power Mode's level: the turn signals / hazard lights, the A/C flash, Power Mode's
-  switch flash and the door alert still go above it. Out of R it's Power Mode again (purple steady,
-  red breathing in M). The lever is the TCM's `7E1 221E12` (`3C` in R), already read every round;
+  breathing, on Power Mode's level: the Power Mode switch flash, turn signals / hazard lights, the
+  A/C flash and the door alert
+  still go above it. Out of R it's Power Mode again (purple steady, red breathing
+  in M). The lever is the TCM's `7E1 221E12` (`3C` in R), read every round;
   the dashboard's *R* button stands in for it.
 - **Rain mode → cyan breathing**: while it rains as far as the windshield wipers say — lever in LO or
   HI, or in AUTO once the rain sensor really makes them wipe — the lamp does the firmware's *Cyan
@@ -37,7 +35,7 @@ assistant when the phone connects to CarPlay.
   [Turn signals](#turn-signals)): while the indicators or hazard lights flash, the lamp does a purple
   burst flash in normal driving mode or a red burst flash in Power Mode. It follows mode changes while
   the indicators stay on. When they stop, the lamp goes back to what it should show then: red breathing
-  if still in M, the red switch flash if a Power Mode switch is still in its 3 s, purple steady in D.
+  if still in M, the red Power Mode switch flash if it is still in its 3 seconds, or purple steady in D.
   The dashboard's *Left* / *Hazard* / *Right* buttons stand in for them (tap to start, tap again to stop).
 - **A/C temperature flash**: the temperature dial turned colder → *Blue Burst Flash*, warmer →
   *Red Burst Flash*, until 3 s after the last click. Another click the same way starts the 3 s
@@ -107,11 +105,10 @@ Runs once per drive when the lamp is connected and CarPlay audio is detected:
    - anything else → searches so you can pick
 6. music:
    - was playing → it resumes after Google Maps opens
-   - nothing was playing → runs a shortcut that starts QQ Music and opens Google Maps:
-     - navigation (weekday commute, saved place with an exact address) → **最近播放的歌** with
-       the navigation link (the route starts by itself, then QQ Music comes up)
-     - search or no destination → **Lamp Drive** with the search text (QQ Music first, then
-       Google Maps search, so you can pick the result)
+   - nothing was playing → runs the **最近播放的歌** shortcut, which only starts QQ Music and then
+     opens `autobot://maps` to come back; Autobot then opens Google Maps itself — navigation
+     with `comgooglemaps://?saddr=&daddr=<address>&directionsmode=driving` (the same link the
+     Gaspy app uses; the route starts by itself), search with `comgooglemaps://?q=…`
      - if iOS refuses to open Shortcuts, Google Maps is opened directly (no music)
 
 If the phone is locked or the app is in the background, it only says the greeting.
@@ -135,8 +132,7 @@ weekday commute check. Hours, days and radius are in `AppConfig.Commute`.
   plugged into the car's OBD port. Close its own app (MAXOBD) while driving, otherwise both apps
   talk to the adapter at once
 - The car: set up for a Mazda CX-5 2.2 diesel (2015) with the 6-speed automatic. For another
-  car, change the gear ratios, the top-gear r/min per km/h and the D-mode limits in
-  `AppConfig.Manual`
+  car, use *M finder* to learn its selector signal if the built-in M flag does not apply.
 - Optional: Google Maps, QQ Music, CarPlay head unit, an iPhone with Apple Intelligence
 
 ## Getting started
@@ -145,26 +141,63 @@ weekday commute check. Hours, days and radius are in `AppConfig.Commute`.
    CarPlay don't work in the simulator). A free developer account works; the app must be
    re-signed every 7 days.
 2. Allow Bluetooth, Location ("While Using" is enough), Microphone and Speech Recognition.
-3. For "start music when nothing was playing", create two shortcuts in the Shortcuts app
-   (names in `AppConfig.Music`):
-   - **最近播放的歌** (navigation; input = Google Maps navigation link):
-     *Open* (Shortcut Input) → *QQ音乐 – 最近播放*
-   - **Lamp Drive** (search / no destination; input = search text or nothing):
-     *QQ音乐 – 继续播放* → *If* Shortcut Input *has any value*: *Google Maps – Search*
-     (query = Shortcut Input), *Otherwise*: *Open App – Google Maps* → *End If*
-
-   The app runs them with plain `shortcuts://run-shortcut` links (no x-callback: since
-   iOS 26.5, iOS refuses to open x-callback Shortcuts links from other apps).
+3. Set up the shortcut and the automation in the Shortcuts app — see [Shortcuts](#shortcuts).
 4. Optional: in Settings → Accessibility → Spoken Content → Voices, download an enhanced or
    premium English (US) female voice (e.g. Zoe or Ava) for clearer voices.
 
 The dashboard has test buttons for the welcome flow, both Power Mode voices, every door, reverse,
 the turn signals and rain mode.
 
-To start the OBD/i-stop monitor when CarPlay connects, create a personal automation in Shortcuts:
-**CarPlay → Connects → Open URL → `autobot://start`**, then set the automation to run immediately (without asking).
-This opens Autobot and starts its vehicle monitors; the app still needs to be installed and the OBD adapter
-available. The i-stop frame replay remains experimental as described below.
+## Shortcuts
+
+Autobot needs one shortcut and one personal automation in the Shortcuts app. Names and
+timings are in `AppConfig.Music`.
+
+### 最近播放的歌 (music shortcut)
+
+Starts QQ Music, then hands control back to Autobot. It does **not** open Google Maps.
+
+| # | Action | Setting |
+|---|--------|---------|
+| 1 | *QQ音乐 – 最近播放* (or *继续播放*) | — |
+| 2 | *Open URLs* | `autobot://maps` |
+
+- **When it runs:** the Welcome assistant runs it only when no music was playing when the car
+  connected. If music was already playing, Autobot opens Google Maps directly and the music
+  resumes by itself.
+- **How it's run:** a plain `shortcuts://run-shortcut?name=最近播放的歌` link. x-callback
+  links aren't used, because since iOS 26.5 iOS refuses to open x-callback Shortcuts links
+  from other apps.
+- **Why step 2 matters:** iOS only lets the app in front open another app. Once Shortcuts is in
+  front, Autobot can't open Google Maps, so the shortcut has to bring Autobot back first.
+  Autobot waits up to `AppConfig.Music.returnTimeout` (20 s) for `autobot://maps`, then opens
+  Google Maps itself:
+  - saved place with an exact address → `comgooglemaps://?saddr=&daddr=<address>&directionsmode=driving`
+    (the same link the Gaspy app uses; turn-by-turn navigation starts by itself)
+  - any other place → `comgooglemaps://?q=<place>` (search, you pick the result)
+  - no destination → `comgooglemaps://`
+- **If something goes wrong:** if the shortcut never comes back, Google Maps isn't opened. If
+  iOS refuses to open Shortcuts, Autobot opens Google Maps directly, without music. Either way,
+  the dashboard's *last shortcut* line says what happened.
+
+The old **Lamp Drive** shortcut (QQ Music + Google Maps search) is no longer used. Delete it,
+along with any automation that still runs it.
+
+### CarPlay automation
+
+**Automation → CarPlay → Connects → Open URL → `autobot://start`**, set to *Run Immediately*
+(don't ask).
+
+This opens Autobot and starts its vehicle monitors without the start animation. The app still
+needs to be installed and the OBD adapter available. The i-stop frame replay remains
+experimental, as described below.
+
+### URL scheme
+
+| URL | Opened by | What Autobot does |
+|-----|-----------|-------------------|
+| `autobot://start` | CarPlay automation | starts the monitors, skips the start animation |
+| `autobot://maps` | 最近播放的歌, last step | opens Google Maps for the waiting Welcome (ignored otherwise) |
 
 ## Lamp protocol
 
@@ -211,23 +244,23 @@ ECU answering from `7E8`.
 | Notify | `FFF1`: ASCII reply in chunks, ending with the `>` prompt |
 
 After connecting: `ATZ`, `ATE0`, `ATL0`, `ATS0`, `ATH0`, `ATAT1`, `ATSP6`, `ATSH7E0`, then `0100`
-until the engine ECU answers (ignition on), then `0100`, `0120`, … to list the PIDs it has
-(written to the log). After that, about three times a second (a little less often while the turn
-signals are listened for, see [Turn signals](#turn-signals)):
+until the engine ECU answers (ignition on). Autobot no longer scans supported PIDs or continuously
+requests RPM, pedal, engine load, or estimated gear ratios. Live rounds request speed (`010D1`) and
+the selector values needed for Power Mode and reverse lighting (see below), about three times a
+second when the adapter responds promptly:
 
 | Request | Reply | Value |
 |---|---|---|
-| `010C0D1` | `41 0C A B 0D C` | RPM = (256·A + B) / 4, speed = C km/h |
-| `015A1` (or `01491`, `01041`) | `41 5A A` | pedal (or engine load) = A · 100 / 255 % |
-| `01A41`, only if the car has it | `41 A4 A B C D` | gear = upper half of B |
+| `010D1` | `41 0D C` | road speed = C km/h |
 
 The trailing `1` tells the adapter one reply is enough; it is dropped if the adapter answers `?`.
-If the ECU answers only one PID per request, RPM and speed are asked separately.
+RPM is queried separately at most once per second during i-stop's startup safety check; it is not
+part of live driving updates.
 Protocol, request header and timings are in `AppConfig.OBD`.
 
 ### Transmission: P / R / N, the gear, and M vs D
 
-After the PID list, Autobot asks the transmission module (TCM, `7E1`, answers from `7E9`) over UDS
+After the engine ECU answers, Autobot asks the transmission module (TCM, `7E1`, answers from `7E9`) over UDS
 *service 22* (read data by identifier), which the KW905 passes straight through. Measured on this
 car with the lever in each position:
 
@@ -240,7 +273,7 @@ car with the lever in each position:
 | M1 | `01` | `81` |
 | M2 | `02` | `81` |
 
-So `221E12` gives **P, R, N and the real gear** (no more RPM ÷ speed estimate), but **D1 and M1 read
+So `221E12` gives **P, R, N and the real gear** (gear-ratio estimation has been removed), but **D1 and M1 read
 the same** — neither value carries the M flag. The M finder (below) found it in **`7E1 221E03`,
 byte 0, bit `0x10`**: `00` in D, `10` in M. That is built in (`AppConfig.Transmission.mFlag`), so
 Power Mode follows M ↔ D straight away. The Ford-style selector DID `221E23` (one byte for
@@ -439,36 +472,18 @@ Two honest limits on the software route with the KW905:
 
 ## Manual shifting detection
 
-`ManualShiftDetector` drives Power Mode from the **M** gate. It uses the real selector when the car
-reports it and works it out from the numbers when it doesn't:
+`ManualShiftDetector` drives Power Mode from the **M** gate reported by the car. It does not infer M
+from RPM, speed, pedal position, or gear ratios; if the selector signal is unavailable, use M finder
+to learn it. Until then Power Mode stays off.
 
-**Real lever (preferred).** P/R/N come from the TCM (`221E12`), and D vs M from the M flag
+P/R/N come from the TCM (`221E12`), and D vs M from the M flag
 (`7E1 221E03` bit `0x10`, built in; see
 [Transmission](#transmission-p--r--n-the-gear-and-m-vs-d)), or from `221E23` on cars that answer it. Power Mode then follows the lever directly: `M` → red breathing, anything else → purple steady,
-debounced by a couple of readings. `R` (TCM `3C`) drives the reverse lighting: yellow breathing
+after one confirmed reading. Each change starts a 3-second red burst and announcement; after the
+flash, Power Mode applies whichever selector state is current. `R` (TCM `3C`) drives reverse lighting: yellow breathing
 (`ReverseLight`, `AppConfig.Reverse`).
-
-**Worked out from RPM/speed/pedal (fallback, when the TCM doesn't answer).** Standard OBD2
-(SAE J1979) has no selector position, and the TCM's gear value reads the same in D and M, so
-`ManualShiftDetector` looks for what the automatic never does on its own in D (it shifts up early:
-about 2000 r/min at 110 km/h in 6th):
-
-1. **Revs held above what D allows for the pedal**, for 1 s: more than 2600 r/min with the foot
-   off, 3000 at 40 % pedal, 3800 at 70 %, 4600 at 90 %, 4800 at full throttle (straight lines in
-   between). Past 4800 r/min a moment is enough, since D shifts up before that even when floored.
-2. **A downshift with the foot off** at 25 km/h or more that lands at 1800 r/min or more (engine
-   braking). Coasting in D, the gearbox only shifts down at low revs.
-
-The gear is RPM ÷ speed matched against the gearbox ratios (3.552 / 2.022 / 1.452 / 1.000 /
-0.708 / 0.599), with 6th set from 2000 r/min at 110 km/h on the speedometer and fine-tuned while
-cruising; PID `A4` is used instead if the car has it. Manual ends once the revs have stayed at or
-below 2500 r/min for 10 s. Pedal: PID `5A`, otherwise `49`, otherwise the engine load `04`.
-
-Blind spots: on long descents the automatic can shift down by itself to brake with the engine,
-which looks like rule 2, and with the pedal floored only revs past 4800 r/min count, because D
-revs high then too.
-The D-mode limits are estimates; tune them in `AppConfig.Manual` after a drive. The dashboard shows
-RPM, gear, speed, pedal and why manual was detected, and the log lists the PIDs the car has.
+The dashboard shows the selector and speed. The live TCM gear code remains available on the M finder
+screen and is used for reverse lighting.
 
 ## Project structure
 
@@ -486,8 +501,7 @@ Autobot/
 │                WiperFinder (learns its bits, and the FBCM's wiper motor bit for AUTO)
 │                IStop (i-stop state flag + OFF-button frame, FrameDiff)
 ├── Driving/     ManualShiftDetector (manual shifting → Power Mode), MFinder (learns the M flag),
-│                EngineMonitor (RPM only),
-│                SpeedMonitor (GPS), PowerModeController (buffer zone), CarPlayMonitor,
+│                SpeedMonitor (GPS), PowerModeController (3-second transition buffer), CarPlayMonitor,
 │                IStopController (i-stop auto-off), IStopFinder (learns the state + OFF-button frame)
 ├── Climate/     ClimateTempFlash (A/C set colder / warmer → blue / red burst flash)
 ├── Voice/       AudioSessionManager, Speaker, MetallicVoiceEffect, VoiceCoordinator (queue)
@@ -499,8 +513,8 @@ Autobot/
 └── Support/     AppConfig (all phrases and tuning values), Concurrency helpers
 ```
 
-Everything you might want to tweak — the manual-shift detection limits, gear ratios, the Power
-Mode trigger, OBD2 settings, phrases, voice character, timeouts, languages, retry counts — is in
+Everything you might want to tweak — the Power Mode trigger, OBD2 settings, phrases, voice character,
+timeouts, languages, retry counts — is in
 `Support/AppConfig.swift`.
 
 ### Adding a lighting feature

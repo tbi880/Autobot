@@ -4,14 +4,14 @@
 // what it should show by then:
 //
 //   - lever in M (Power Mode)               -> red gradient breathing again
-//   - Power Mode switching (buffer zone)    -> its red burst flash, until the 3 s are over
+//   - Power Mode switching                  -> its red burst flash, until the 3-second buffer ends
 //   - lever in D                            -> purple steady
 //
 // The indicators come from the car: the indicator lamp frame 09A on HS-CAN, which OBDAdapter listens
 // for every round (TurnSignals.swift). The dashboard's Left / Hazard / Right buttons stand in for them:
 // a tap starts flashing, the same tap again stops it, and a change from the car takes over.
 //
-// The flash is a LightingArbiter request from `.turnSignal`: above Power Mode, its switch flash and the
+// The flash is a LightingArbiter request from `.turnSignal`: above Power Mode, its switch flash, and the
 // A/C flash, below the door alert. Power Mode carries on underneath and the signal colour updates when
 // its committed state changes, so whatever it wants at the moment the indicators stop comes back.
 
@@ -73,7 +73,7 @@ final class TurnSignalFlash: ObservableObject {
 
     private func updateLighting() {
         guard state.isOn else {
-            lighting.clear(.turnSignal)                 // back to Power Mode (or its switch flash)
+            lighting.clear(.turnSignal)                 // back to Power Mode or its switch flash
             return
         }
         if powerMode.committed == .redBreathing {

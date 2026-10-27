@@ -9,92 +9,25 @@ nonisolated enum AppConfig {
     
     enum TestMode {
         /// Simulates successful lamp Bluetooth and CarPlay connections at start-up.
-        static let enabled = false
+        static let enabled = true
     }
 
     enum Driver {
         static let name = "Tim"
     }
 
-    /// Power Mode: red gradient breathing when driving hard, purple steady otherwise.
+    /// Power Mode: red gradient breathing in M, purple steady otherwise.
     enum PowerMode {
         enum Trigger {
-            /// Manual shifting (M). Uses the car's real gear-selector lever when it reports it
-            /// (PCM DID 1E23, see AppConfig.OBD.readSelector and README); otherwise worked out from
-            /// RPM, speed and pedal (AppConfig.Manual). Standard OBD2 has no selector position.
+            /// Manual shifting (M), from the car's real selector or learned M flag.
             case manualShift
-            /// Engine RPM at or above a threshold (AppConfig.Engine).
-            case engineRPM
             /// GPS speed (AppConfig.Speed), the original trigger.
             case speed
         }
         static let trigger: Trigger = .manualShift
-        /// "Buffer zone" when Power Mode switches: red burst flash + announcement for this long,
-        /// then the trigger is checked again before the new lighting is applied.
+        /// Show the red burst flash and announcement for this long before applying the current
+        /// selector state. The M decision itself is made immediately from the car's selector.
         static let switchBufferDuration: Duration = .seconds(3)
-    }
-
-    /// Engine RPM trigger (EngineMonitor), used when PowerMode.trigger is .engineRPM.
-    enum Engine {
-        /// At or above this engine speed (r/min) the lamp switches to red gradient breathing.
-        static let powerModeThresholdRpm: Double = 2500
-        /// The RPM must stay at or above the threshold this long (seconds) before Power Mode
-        /// switches on, so a momentary blip doesn't count.
-        static let confirmOn: TimeInterval = 0.5
-        /// …and below it this long before Power Mode switches off. Longer, so the dip below the
-        /// threshold after each upshift doesn't end Power Mode in the middle of an acceleration.
-        /// Set it to about 1 to make it switch back as quickly as the old speed trigger did.
-        static let confirmOff: TimeInterval = 5
-    }
-
-    /// Manual-shifting detection (ManualShiftDetector), used when PowerMode.trigger is .manualShift.
-    /// Set up for a Mazda CX-5 2.2 diesel (2015) with the 6-speed automatic (SKYACTIV-Drive).
-    enum Manual {
-        /// Gearbox ratios, 1st to 6th. Only their proportions matter.
-        static let gearRatios: [Double] = [3.552, 2.022, 1.452, 1.000, 0.708, 0.599]
-        /// Top gear in engine r/min per km/h: 2000 r/min at 110 km/h on the speedometer, which reads
-        /// a few % high, so about 105 km/h as OBD2 reports it. Fine-tuned while cruising.
-        static let topGearRpmPerKmh: Double = 2000.0 / 105.0
-        /// RPM ÷ speed may be this far (fraction) from a gear's value and still count as that gear.
-        static let gearTolerance = 0.07
-        /// Below this speed (km/h) the gear isn't worked out (torque converter slip, coarse speed).
-        static let minSpeedForGear: Double = 12
-        /// A gear counts once it has been seen in this many readings in a row.
-        static let gearConfirmReadings = 2
-        /// The real selector lever (DID 1E23) must read the same this many times in a row before
-        /// Power Mode follows it, so one garbled byte can't flip the lamp.
-        static let selectorConfirmReadings = 2
-        /// A new gear seen within this many seconds of the old one is a shift.
-        static let shiftWindow: TimeInterval = 3
-        /// Fine-tune the top-gear value while cruising in top gear at this speed (km/h) or more.
-        static let learnTopGear = true
-        static let learnMinSpeed: Double = 70
-        static let learnRate = 0.02
-
-        /// Rule 1: the highest RPM D settles at for a pedal position (0–100 %); D shifts up before.
-        /// Straight lines in between. More revs than this for `revHoldTime` = the gear is held.
-        static let dModeCeiling: [(demand: Double, rpm: Double)] = [
-            (0, 2600), (40, 3000), (70, 3800), (90, 4600), (100, 4800),
-        ]
-        static let revHoldTime: TimeInterval = 1
-        /// D shifts up before this even with the pedal floored, so above it a moment is enough.
-        static let overRevRPM: Double = 4800
-        static let overRevHoldTime: TimeInterval = 0.3
-        /// No detection below this speed (km/h), e.g. revving in P or N.
-        static let minSpeed: Double = 10
-
-        /// Rule 2: a downshift with the foot off (pedal at or below this %), at this speed (km/h) or
-        /// more, landing at this RPM or more, is engine braking by hand.
-        static let footOffDemand: Double = 5
-        static let engineBrakeMinSpeed: Double = 25
-        static let engineBrakeRPM: Double = 1800
-        /// Without pedal data: losing this many km/h within `trendWindow` seconds counts as foot off.
-        static let slowingDown: Double = 1
-        static let trendWindow: TimeInterval = 2
-
-        /// Manual ends once the RPM has stayed at or below this for `calmTime` seconds.
-        static let calmRPM: Double = 2500
-        static let calmTime: TimeInterval = 10
     }
 
     /// GPS speed trigger (SpeedMonitor), used when PowerMode.trigger is .speed.
@@ -118,33 +51,34 @@ nonisolated enum AppConfig {
         /// Requests go straight to the engine ECU (7E0, it answers from 7E8) instead of to every
         /// ECU. nil = the standard broadcast address (7DF).
         static let requestHeader: String? = "7E0"
-        /// Pause between two rounds of live data. A round is 2–3 requests of roughly 50–150 ms
-        /// each, so this gives about 3 rounds a second.
+        /// Pause between live data rounds, after the speed and selector requests complete.
         static let pollInterval: Duration = .milliseconds(100)
         /// How long to wait for the ">" prompt after a command (seconds)…
         static let replyTimeout: TimeInterval = 1.5
         /// …after ATZ (the adapter restarts)…
         static let resetTimeout: TimeInterval = 3
-        /// …and for "0100", "0120"… and "01A0" (the ECU may take a moment to wake up).
+        /// …and for the ECU wake / selector probes (the ECU may take a moment to wake up).
         static let probeTimeout: TimeInterval = 5
         /// Wait between attempts while the engine ECU doesn't answer (ignition off) or the set-up failed.
         static let retryDelay: Duration = .seconds(3)
-        /// Rounds in a row without an RPM answer before the set-up starts again.
+        /// Rounds in a row without live data before the set-up starts again.
         static let maxMissedReadings = 5
         /// Read the transmission over UDS service 22 and drive Power Mode from the real lever:
         /// M = Power Mode, D/N/R/P = off. On this car (2015 CX-5 2.2D) the TCM's gear value
         /// (7E1 221E12) gives P/R/N and the gear, and D vs M comes from the M flag the M finder learns
         /// (MFinder, AppConfig.MFinder). Cars with the Ford-style selector DID (221E23) use that
-        /// instead. Until the M flag is known, M is worked out from RPM/speed/pedal (with the real
-        /// gear). Set false to force the heuristic.
+        /// instead. If neither selector is available, Power Mode stays off until MFinder learns the
+        /// M flag.
         static let readSelector = true
+        /// The TCM/PCM replies are checked against known selector codes, so one reading is enough.
+        static let selectorConfirmReadings = 1
         /// ECUs to try for the selector DID, in order: the engine/PCM (7E0, which answers 221E23 on
         /// most SkyActiv cars) first, then the transmission module (7E1, in case this car only
         /// exposes the selector there). The first that answers is used for the live reads.
         static let selectorHeaders: [String] = ["7E0", "7E1"]
         /// Diagnostics: show the raw bytes of every candidate transmission value on both ECUs on the
         /// dashboard, live, so the real M/D signal can be found by watching which one changes when the
-        /// lever moves between M and D. While on, Power Mode stays on the RPM/speed/pedal heuristic.
+        /// lever moves between M and D. While on, Power Mode stays off until a selector is found.
         /// Turn OFF once the right (header, DID, byte) is known.
         static let selectorDiagnostics = false
         /// The candidate transmission DIDs probed in diagnostics, grouped by ECU (PCM 7E0, TCM 7E1):
@@ -281,11 +215,11 @@ nonisolated enum AppConfig {
         static let enabled = true
         /// Wait this long after the engine ECU starts answering before the auto-off, well clear of the
         /// battery-management reset window (a long-press within 5 s of ignition on, engine off). The
-        /// press is short and only happens once the engine is running (minRunningRpm), never in that window.
+        /// press is short and only happens after a one-off RPM check confirms the engine is running.
         static let pressDelay: Duration = .seconds(5)
         /// Try about this many times (1 s apart) to catch the engine running, then give up for this drive.
         static let armAttempts = 20
-        /// The engine counts as running above this (r/min): press only then, never with the engine off.
+        /// The engine counts as running above this (r/min): checked only during startup safety checks.
         static let minRunningRpm: Double = 400
         /// A simulated press sends the observed frame this many times at this spacing. This is only an
         /// experimental replay, not a physical button press. Keep the sequence short to avoid the
@@ -366,7 +300,7 @@ nonisolated enum AppConfig {
     }
 
     /// Reverse (ReverseLight): yellow gradient breathing while the lever is in R, on Power Mode's level
-    /// (the turn signals, the A/C flash, Power Mode's switch flash and the door alert go above it).
+    /// (Power Mode's switch flash, the turn signals, A/C flash and the door alert go above it).
     enum Reverse {
         /// The feature on or off. Off: R shows what Power Mode shows (purple steady) and the dashboard's
         /// Reverse row is hidden.
@@ -542,23 +476,15 @@ nonisolated enum AppConfig {
     }
 
     enum Music {
-        /// The shortcuts below start QQ Music and open Google Maps. They run only when no music was
-        /// playing when the car connected; if iOS refuses to open Shortcuts, the app opens
-        /// Google Maps directly (then without music).
-        ///
-        /// Navigation (weekday commute, saved place with an exact address): the route starts by
-        /// itself, so it doesn't matter that QQ Music comes to the front afterwards.
-        /// Shortcut Input = Google Maps navigation link.
-        ///   1. Open (Shortcut Input)  -> Google Maps, starts the route
-        ///   2. QQ音乐 - 最近播放
-        static let navigateShortcutName = "最近播放的歌"
-        /// Everything else (a place to search, or no destination): you pick the result in
-        /// Google Maps, so Google Maps must end up in front. Shortcut Input = the search text
-        /// (no input when there's no destination).
-        ///   1. QQ音乐 - 继续播放
-        ///   2. If Shortcut Input has any value: Google Maps - Search (query = Shortcut Input)
-        ///      Otherwise: Open App - Google Maps
-        static let searchShortcutName = "Lamp Drive"
+        /// The shortcut that starts QQ Music. It only handles the music; Autobot opens Google
+        /// Maps itself once the shortcut comes back. Runs only when no music was playing when
+        /// the car connected; if iOS refuses to open Shortcuts, Autobot opens Google Maps directly
+        /// (then without music).
+        ///   1. QQ音乐 - 最近播放 (or 继续播放)
+        ///   2. 打开URL - autobot://maps   (back to Autobot, which then opens Google Maps)
+        static let shortcutName = "最近播放的歌"
+        /// How long to wait for the shortcut to come back (autobot://maps) before giving up on Maps.
+        static let returnTimeout: TimeInterval = 20
         /// How long to wait for the music to start before giving up on "The music is now continued".
         static let startTimeout: TimeInterval = 10
     }

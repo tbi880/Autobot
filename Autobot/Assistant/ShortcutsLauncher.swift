@@ -4,8 +4,8 @@
 //
 // Why: iOS gives apps no way to tell QQ Music to play. The Shortcuts app can, through
 // QQ Music's own actions, so the welcome flow runs a user shortcut that starts QQ Music and
-// opens Google Maps itself. (An app can only open other apps while it is in the foreground,
-// so once Shortcuts is open the app can't open Google Maps any more.)
+// then opens autobot://maps. (An app can only open other apps while it is in the foreground,
+// so the shortcut has to bring Autobot back before Autobot can open Google Maps.)
 //
 // The plain run-shortcut link is used: since iOS 26.5's security fixes, iOS refuses to open
 // the x-callback-url form (x-success / x-error / x-cancel) from another app
@@ -41,8 +41,8 @@ enum ShortcutsLauncher {
         await UIApplication.shared.open(url, options: [:])
     }
 
-    /// Encodes everything except ASCII unreserved characters, so the Google Maps link
-    /// (with its own "?", "&" and "=") arrives as one value.
+    /// Encodes everything except ASCII unreserved characters, so the name and input
+    /// arrive as one value each.
     private nonisolated static func encode(_ text: String) -> String? {
         let allowed = CharacterSet(charactersIn:
             "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~")

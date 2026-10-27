@@ -11,10 +11,9 @@
 // parse. MAXOBD identifies the car (Mazda CX-5 2.2 diesel) as ISO 15765-4 CAN with 11-bit IDs,
 // engine ECU answering from 7E8.
 //
-// Live data is standard OBD2 (SAE J1979) mode 01. "010C0D" asks for two PIDs at once and gets
-// "410C" A B "0D" C back: rpm = (256 * A + B) / 4, speed = C km/h.
-// Standard OBD2 has no gear selector position (P/R/N/D/M); ManualShiftDetector works out manual
-// shifting from these values instead.
+// The app requests OBD2 speed (PID 0D) for stationary finder checks and uses the car's service-22
+// selector signals for M/D. RPM (PID 0C) is queried only during i-stop's startup safety check; pedal,
+// engine load, and estimated gear ratios are not used.
 //
 // The turn signals aren't a value to ask for but a frame the car broadcasts: the adapter listens to the
 // bus for a moment instead ("ATMA", see Listening to the bus below and TurnSignals.swift).
@@ -41,15 +40,10 @@ enum ELM327 {
 
     static let rpmPID: UInt8 = 0x0C             // engine RPM, 2 bytes
     static let speedPID: UInt8 = 0x0D           // road speed, km/h
-    static let relativePedalPID: UInt8 = 0x5A   // relative accelerator pedal position, 0–100 %
-    static let pedalPID: UInt8 = 0x49           // accelerator pedal position D (raw sensor %)
-    static let loadPID: UInt8 = 0x04            // calculated engine load, %
-    static let gearPID: UInt8 = 0xA4            // transmission actual gear
 
-    /// Data bytes after each PID this app reads (00, 20, 40… are the "supported PIDs" bitmaps).
+    /// Data bytes after the PIDs used by wake checks and live requests.
     static let dataLength: [UInt8: Int] = [
-        0x00: 4, 0x20: 4, 0x40: 4, 0x60: 4, 0x80: 4, 0xA0: 4, 0xC0: 4,
-        0x04: 1, 0x0C: 2, 0x0D: 1, 0x49: 1, 0x5A: 1, 0xA4: 4,
+        0x00: 4, 0x0C: 2, 0x0D: 1,
     ]
 
     // MARK: Commands
@@ -77,10 +71,7 @@ enum ELM327 {
     static let broadcastHeader = "ATSH7DF"
     /// Mode 01 PID 00 (supported PIDs 01-20): any answer means the ECU is awake (ignition on).
     static let wakeCheck = "0100"
-    /// Mode 01 PID A0 (supported PIDs A1-C0): is A4, the gear, among them?
-    static let gearCheck = "01A0"
-
-    /// A mode 01 request for one or more PIDs: [0x0C, 0x0D] -> "010C0D". `replyCount` adds a "1":
+    /// A mode 01 request for one or more PIDs, e.g. [0x0D] -> "010D". `replyCount` adds a "1":
     /// one reply is enough, so the adapter answers without waiting for other ECUs.
     static func request(_ pids: [UInt8], replyCount: Bool) -> String {
         "01" + pids.map { String(format: "%02X", $0) }.joined() + (replyCount ? "1" : "")
@@ -94,10 +85,6 @@ enum ELM327 {
 
     /// Gear-selector lever position (P/R/N/D/M), one byte. The only value that tells M from D.
     static let selectorDID = "1E23"
-    /// Engaged gear 1…6 (actual gear, same in D and M), one byte. A real gear number when the
-    /// car has no standard PID A4.
-    static let engagedGearDID = "1E1F"
-
     /// The gear-selector lever. Read from the PCM with "221E23"; one byte, these raw values seen on
     /// Mazda/Ford SkyActiv PCMs: 0A manual (M), 2E drive (D), 32 neutral, 3C reverse, 46 park.
     /// Unmapped bytes stay `.unknown` so a firmware that uses other codes doesn't read as a gear.
@@ -241,17 +228,6 @@ enum ELM327 {
         Double(Int(data[0]) * 256 + Int(data[1])) / 4
     }
 
-    /// One-byte percentages (PIDs 04, 49, 5A): A * 100 / 255.
-    static func percent(_ data: [UInt8]) -> Double {
-        Double(data[0]) * 100 / 255
-    }
-
-    /// PID A4: the gear is the upper half of byte B (0 = neutral). nil unless 1…10.
-    static func gear(_ data: [UInt8]) -> Int? {
-        let gear = Int(data[1] >> 4)
-        return (1...10).contains(gear) ? gear : nil
-    }
-
     /// The data bytes after "62<DID>" in a service-22 reply, or nil if the DID isn't echoed
     /// (e.g. "NO DATA", a negative response "7F22…", or a different DID). Longer replies come as
     /// several CAN frames (ISO-TP): a length line such as "00A", then "0:…", "1:…". Those are joined
@@ -294,29 +270,9 @@ enum ELM327 {
         return Selector(byte: first)
     }
 
-    /// The engaged gear (1…8) from a "221E1F" reply; nil if not a plausible gear.
-    static func engagedGear(in reply: String) -> Int? {
-        guard let first = payload22(engagedGearDID, in: reply)?.first else { return nil }
-        let gear = Int(first)
-        return (1...8).contains(gear) ? gear : nil
-    }
-
     /// Whether a "0100" reply is a real answer from an ECU (not "NO DATA", "UNABLE TO CONNECT"…).
     static func isECUAnswer(_ reply: String) -> Bool {
         supportedPIDs(in: reply, base: 0x00) != nil
-    }
-
-    /// Whether any ECU lists PID A4 (transmission actual gear) in its "01A0" reply.
-    /// nil if no ECU answered at all.
-    static func reportsGear(_ reply: String) -> Bool? {
-        let answers = payloads(after: "41A0", in: reply, count: 4)
-        guard !answers.isEmpty else { return nil }
-        // 32 bits for PIDs A1…C0, most significant bit first: A4 is the 4th.
-        let a4: UInt32 = 1 << 28
-        return answers.contains { bytes in
-            let bits = bytes.reduce(UInt32(0)) { (result, byte) in (result << 8) | UInt32(byte) }
-            return (bits & a4) != 0
-        }
     }
 
     /// Whether the adapter answered "OK".
@@ -374,18 +330,4 @@ enum ELM327 {
             .filter { !$0.isEmpty }
     }
 
-    /// The `count` data bytes after `marker` ("41" + PID) on every line that has them.
-    private static func payloads(after marker: String, in reply: String, count: Int) -> [[UInt8]] {
-        lines(reply).compactMap { (line: String) -> [UInt8]? in
-            guard let range = line.range(of: marker) else { return nil }
-            let hex = Array(line[range.upperBound...])
-            guard hex.count >= count * 2 else { return nil }
-            var bytes: [UInt8] = []
-            for i in 0..<count {
-                guard let byte = UInt8(String(hex[(2 * i)...(2 * i + 1)]), radix: 16) else { return nil }
-                bytes.append(byte)
-            }
-            return bytes
-        }
-    }
 }
