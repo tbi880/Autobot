@@ -1,20 +1,20 @@
 // IStopController.swift
-// Turns i-stop (idling stop) off automatically at the start of each drive, by replaying the OFF
-// button the start stop unit broadcasts on the bus (learned by IStopFinder). i-stop is Mazda's
+// Attempts to turn i-stop (idling stop) off automatically at the start of each drive by replaying an
+// experimental CAN frame learned by IStopFinder. The physical OFF switch is a resistor ladder read
+// by the instrument cluster; replaying a related frame may not reproduce a real press. i-stop is Mazda's
 // engine stop-at-idle; the car has a physical OFF button for it, and this does the same thing so
 // you don't have to press it every time you get in.
 //
 //   OBDAdapter.isReady (engine ECU answering) ──▶ wait out of the battery-reset window, until the
-//   engine is really running ──▶ if i-stop is on (the learned state signal), send ONE short OFF
-//   press (OBDAdapter.injectFrame) ──▶ re-read the state to confirm. Once per drive.
+//   engine is really running ──▶ if i-stop is on (the learned state signal), send one short frame
+//   sequence (OBDAdapter.injectFrame) ──▶ re-read the state to confirm. Once per OBD session.
 //
 // Why a finder and not a fixed command: nothing about i-stop is a standard OBD2 PID, and this car
-// (2015 CX-5 2.2D) wasn't measured up front, so the state flag and the button frame are learned on
+// (2015 CX-5 2.2D) wasn't measured up front, so the state flag and a frame candidate are learned on
 // the car first (IStopFinder), exactly like the M flag and the turn-signal frame.
 //
-// Caveats (see README): the start stop unit also broadcasts that frame ~10/s, so replaying it on the
-// same id is best-effort — the PCM may ignore it. If it doesn't take, the log says so; the reliable
-// permanent route is a one-off SSU coding change with FORScan.
+// Caveats (see README): adapter acceptance does not mean the PCM accepted the frame. The cluster's
+// CAN message may contain a rolling counter/checksum; if so, replaying captured bytes is not enough.
 
 import Combine
 import Foundation
@@ -40,7 +40,9 @@ final class IStopController: ObservableObject {
 
     private let obd: OBDAdapter
     private var subscriptions = Set<AnyCancellable>()
-    private var pressedThisDrive = false
+    /// Tracks an attempted action for this OBD session. After any ambiguous send we must not send a
+    /// second toggle blindly, since the first one may have reached the PCM.
+    private var attemptedThisDrive = false
     private var armTask: Task<Void, Never>?
 
     init(obd: OBDAdapter) {
@@ -68,7 +70,7 @@ final class IStopController: ObservableObject {
         armTask?.cancel()
         armTask = nil
         guard ready else {
-            pressedThisDrive = false        // the car went away: the next connection is a new drive
+            attemptedThisDrive = false      // the car went away: the next connection is a new drive
             updateStatus()
             return
         }
@@ -90,13 +92,16 @@ final class IStopController: ObservableObject {
     }
 
     private func autoOff() async {
-        guard Tuning.enabled, !pressedThisDrive, obd.isReady else { return }
+        guard Tuning.enabled, !attemptedThisDrive, obd.isReady else { return }
         if Tuning.requireStateKnown, obd.iStopOff == nil {
-            try? await Task.sleep(for: .seconds(1))     // give the first state read a moment
-            guard obd.isReady else { return }
+            for _ in 0..<Tuning.stateWaitAttempts {
+                try? await Task.sleep(for: Tuning.stateWaitInterval)
+                guard obd.isReady else { return }
+                if obd.iStopOff != nil { break }
+            }
         }
         if obd.iStopOff == true {
-            pressedThisDrive = true
+            attemptedThisDrive = true
             log("already off at the start of the drive, nothing to do")
             return
         }
@@ -104,7 +109,7 @@ final class IStopController: ObservableObject {
             log("i-stop state not learned yet — skipping auto-off (run the i-stop finder)")
             return
         }
-        pressedThisDrive = true
+        attemptedThisDrive = true
         await press(reason: "start of drive")
     }
 
@@ -128,7 +133,7 @@ final class IStopController: ObservableObject {
             log("press didn't go out (adapter busy or disconnected)")
             return
         }
-        log("sent OFF press (\(frame.label())); checking…")
+        log("adapter accepted OFF-frame replay (\(frame.label())); checking…")
         try? await Task.sleep(for: Tuning.confirmDelay)
         switch obd.iStopOff {
         case true?:

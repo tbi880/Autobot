@@ -21,15 +21,16 @@
 //   OBDAdapter (indicator lamp frame 09A, listened for on HS-CAN) ──turnSignal──▶ TurnSignalFlash
 //     ──scene (turnSignal: yellow flash, above Power Mode)──▶ LightingArbiter
 //   OBDAdapter (learned i-stop state DID) ──iStopOff──▶ IStopController: at the start of a drive it
-//     replays the learned OFF-button frame (OBDAdapter.injectFrame) to switch i-stop off, then checks.
-//     IStopFinder learns the state DID and the OFF-button frame on the car.
+//     may replay an experimental observed frame (OBDAdapter.injectFrame), then checks PCM state.
+//     IStopFinder learns the state DID and compares CAN captures while the physical switch is held.
 //   LampController.isReady ┐
 //   CarPlayMonitor.isConnected ┼──▶ WelcomeAssistant (once per drive, via VoiceCoordinator)
 //   BootSequence finished ─────┘
 //
-// Nothing starts until the ENGINE START button is pressed (ignite): then the lamp and OBD2
-// Bluetooth searches and CarPlay detection start together, and the start screen (BootSequence)
-// follows the lamp and CarPlay. The first Welcome waits until the start screen has finished.
+// A normal launch waits for the ENGINE START button (ignite), then starts the lamp and OBD2 Bluetooth
+// searches plus CarPlay detection. A CarPlay Shortcuts automation can instead open `autobot://start`,
+// which starts the monitors directly and skips the start animation. The first Welcome waits until
+// boot has finished, or starts as soon as the car/audio connections are ready on the automation path.
 
 import AVFoundation
 import Combine
@@ -140,6 +141,14 @@ final class AppModel: ObservableObject {
     /// ENGINE START pressed: start-up effects, and everything start() connects.
     func ignite() {
         boot.ignite()
+        start()
+    }
+
+    /// Entry point for the user's CarPlay Shortcuts automation (`autobot://start`). Skips the
+    /// ignition animation and starts the vehicle monitors as soon as the URL opens the app.
+    func startFromCarPlayAutomation() {
+        guard !hasStarted else { return }
+        bootFinished = true
         start()
     }
 

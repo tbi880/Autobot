@@ -272,13 +272,12 @@ nonisolated enum AppConfig {
         static let testStartTemperature = 22.0
     }
 
-    /// i-stop (idling stop) auto-off (IStopController, IStopFinder): switch i-stop off at the start of
-    /// each drive by replaying the OFF button the start stop unit broadcasts on the bus (learned on the
-    /// car). i-stop is Mazda's engine stop-at-idle; the car has a physical OFF button for it. See
-    /// README, "i-stop auto-off".
+    /// i-stop (idling stop) auto-off (IStopController, IStopFinder): attempt to switch i-stop off at the
+    /// start of each drive by replaying an observed CAN frame (experimental). The physical button is a
+    /// resistor ladder read by the instrument cluster. See README, "i-stop auto-off".
     enum IStop {
         /// The feature on or off. On: the dashboard shows the i-stop row and auto-off runs once the
-        /// OFF-button frame is learned (i-stop finder). Nothing is sent to the car until it's learned.
+        /// i-stop state and experimental frame candidate are learned (i-stop finder).
         static let enabled = true
         /// Wait this long after the engine ECU starts answering before the auto-off, well clear of the
         /// battery-management reset window (a long-press within 5 s of ignition on, engine off). The
@@ -288,16 +287,20 @@ nonisolated enum AppConfig {
         static let armAttempts = 20
         /// The engine counts as running above this (r/min): press only then, never with the engine off.
         static let minRunningRpm: Double = 400
-        /// A simulated press sends the learned button frame this many times at this spacing (the start
-        /// stop unit sends the real one ~10/s, so one frame may be ignored). A SHORT press — never the
-        /// 3 s long-press that resets battery management.
+        /// A simulated press sends the observed frame this many times at this spacing. This is only an
+        /// experimental replay, not a physical button press. Keep the sequence short to avoid the
+        /// 3-second long-press that resets battery management.
         static let pressFrameCount = 4
         static let pressFrameInterval: Duration = .milliseconds(60)
         /// Re-read the i-stop state this long after a press to confirm it took.
         static let confirmDelay: Duration = .seconds(2)
-        /// Only auto-press when the learned state says i-stop is currently on. Off by default: without a
-        /// learned state the press still goes out once at the start of a drive (it just can't be confirmed).
-        static let requireStateKnown = false
+        /// Only auto-press when the learned state says i-stop is currently on. A blind press could toggle
+        /// i-stop back on if it was already disabled.
+        static let requireStateKnown = true
+        /// Wait for the first state poll after the engine is running before deciding whether to press.
+        /// The live loop polls the state every `pollEveryRounds`, so allow several rounds to pass.
+        static let stateWaitAttempts = 6
+        static let stateWaitInterval: Duration = .milliseconds(500)
         /// Read the learned i-stop state every this many rounds of live data.
         static let pollEveryRounds = 4
         /// The PCM that holds the i-stop state (the engine ECU, same as live data).
@@ -310,7 +313,7 @@ nonisolated enum AppConfig {
         static let scanTimeout: TimeInterval = 0.6
         static let readsPerSnapshot = 2
         static let snapshotsToConfirm = 2
-        /// Finder: how long each bus capture listens for the OFF-button frame.
+        /// Finder: how long each bus capture listens for frames that change while the OFF button is held.
         static let captureListen: TimeInterval = 2.0
         /// DIDs the state search ignores (none known yet on this car).
         static let ignoredDIDs: Set<String> = []

@@ -307,20 +307,48 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         return run?.allFrames
     }
 
-    /// Replays a CAN broadcast frame (the learned i-stop OFF button): sets the header to `id`, turns
-    /// CAN formatting and responses off, writes the bytes `count` times `interval` apart (the start
-    /// stop unit sends the real one ~10/s, so one frame may be ignored), then restores. SHORT press
+    /// Replays an observed CAN frame (an experimental i-stop button candidate): sets the header to `id`,
+    /// turns CAN formatting and responses off, writes the bytes `count` times `interval` apart, then restores. SHORT press
     /// only — never the 3 s long-press that resets battery management, and IStopController only calls
-    /// it once the engine is running. For runBetweenRounds. False if it couldn't be sent.
+    /// it once the engine is running. For runBetweenRounds. False if setup or any frame transmission
+    /// fails; this confirms only that the adapter accepted the send, not that the car acted on it.
     func injectFrame(id: String, bytes: [UInt8], count: Int, interval: Duration) async -> Bool {
-        guard jobRunning, !bytes.isEmpty, writeChar != nil else { return false }
-        _ = await send("ATSH" + id)
+        let canID = id.uppercased()
+        guard jobRunning, writeChar != nil,
+              canID.count == 3, canID.allSatisfy(\.isHexDigit),
+              let numericID = UInt16(canID, radix: 16), numericID <= 0x7FF,
+              !bytes.isEmpty, bytes.count <= 8 else {
+            logLine("i-stop: can't send frame (invalid CAN ID/data or adapter isn't ready)")
+            return false
+        }
+        guard ELM327.isOK(await send("ATSH" + canID)) else {
+            logLine("i-stop: adapter rejected CAN header \(canID)")
+            await restoreAfterInject()
+            return false
+        }
         currentHeader = nil                         // not a request header: drop the tracking
-        guard ELM327.isOK(await send(ELM327.formattingOff)) else { await restoreAfterInject(); return false }
-        _ = await send(ELM327.responsesOff)
+        guard ELM327.isOK(await send(ELM327.formattingOff)) else {
+            logLine("i-stop: adapter rejected ATCAF0 (raw CAN mode)")
+            await restoreAfterInject()
+            return false
+        }
+        guard ELM327.isOK(await send(ELM327.responsesOff)) else {
+            logLine("i-stop: adapter rejected ATR0 (responses off)")
+            await restoreAfterInject()
+            return false
+        }
         let hex = bytes.map { String(format: "%02X", $0) }.joined()
         for _ in 0..<max(count, 1) {
-            _ = await sendRaw(hex + "\r", timeout: AppConfig.OBD.replyTimeout)
+            guard let reply = await sendRaw(hex + "\r", timeout: AppConfig.OBD.replyTimeout) else {
+                logLine("i-stop: raw CAN transmit timed out; vehicle result is unknown")
+                await restoreAfterInject()
+                return false
+            }
+            if ELM327.hasCANTransmitError(reply) {
+                logLine("i-stop: adapter rejected raw CAN transmit: \(ELM327.readable(reply))")
+                await restoreAfterInject()
+                return false
+            }
             try? await Task.sleep(for: interval)
         }
         await restoreAfterInject()

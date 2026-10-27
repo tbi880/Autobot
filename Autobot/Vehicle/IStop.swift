@@ -1,6 +1,6 @@
 // IStop.swift
-// i-stop (idling stop) auto-off: the value types for reading the car's i-stop state and for the
-// i-stop OFF button the start stop unit broadcasts on the bus.
+// i-stop (idling stop) auto-off: the value types for reading the car's i-stop state and an
+// experimental CAN frame observed while the physical OFF button is held.
 //
 // Nothing about i-stop is a standard OBD2 PID, so both things are learned on this car by IStopFinder
 // (like the M flag and the turn-signal frame):
@@ -8,17 +8,16 @@
 //   - the i-stop STATE: a flag in a PCM UDS value (service 22), found by comparing snapshots with
 //     i-stop armed vs disabled — reuses BitSignal (SignalDiff.swift), where "on" means i-stop is
 //     currently OFF (disabled, the OFF switch active).
-//   - the OFF BUTTON: the cluster switch's i-stop OFF button isn't a value to ask for; the start stop
-//     unit reads it and puts it on the bus (like the indicators, TurnSignals.swift). To press it from
-//     the app that frame is replayed. FrameSignal holds the frame; FrameDiff finds it by comparing
-//     the bus with the button released and held.
+//   - the OFF BUTTON: it is a resistor-ladder switch read by the instrument cluster. FrameDiff finds
+//     CAN frames that change when it is held. Replaying one is experimental; rolling counters or
+//     checksums can make a captured frame invalid.
 //
 // Pure value code (no Bluetooth).
 
 import Foundation
 
-/// A CAN broadcast frame learned on this car: its 11-bit id and the data bytes with the OFF button
-/// released (`idle`) and held (`pressed`). Replaying `pressed` is how the app "presses" the button.
+/// A CAN frame observed while comparing the OFF button released (`idle`) and held (`pressed`). The
+/// 11-bit id and payload are a replay candidate, not proof of a valid synthetic button press.
 nonisolated struct FrameSignal: Codable, Equatable {
     /// 11-bit CAN id the frame is broadcast with, e.g. "085".
     var id: String
@@ -41,8 +40,8 @@ nonisolated struct FrameSignal: Codable, Equatable {
     var pressedHex: String { pressed.map { String(format: "%02X", $0) }.joined(separator: " ") }
 }
 
-/// Finds the OFF-button frame by comparing the whole bus with the button released and held. Same idea
-/// as SignalDiff, but over broadcast frames (by CAN id) instead of UDS reads.
+/// Finds frames that differ while the OFF button is held. Same idea as SignalDiff, but over CAN frames
+/// (by id) instead of UDS reads. A difference alone does not prove that replaying it is valid.
 nonisolated enum FrameDiff {
     /// Every frame heard in one capture window, grouped by id: "085" -> [[bytes], [bytes], …].
     typealias Capture = [String: [[UInt8]]]

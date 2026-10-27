@@ -27,6 +27,11 @@ struct ContentView: View {
                 showDashboard = true
             }
         }
+        .onOpenURL { url in
+            guard url.scheme == "autobot", url.host == "start" else { return }
+            app.startFromCarPlayAutomation()
+            showDashboard = true
+        }
     }
 }
 

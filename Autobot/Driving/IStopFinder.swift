@@ -5,9 +5,9 @@
 //   1. the i-stop STATE flag — which PCM value says i-stop is armed vs disabled. Found by comparing
 //      snapshots of the PCM's DIDs with i-stop on and off (SignalDiff, like the M flag). Read-only
 //      and reliable; this is what lets the auto-off confirm it worked.
-//   2. the OFF BUTTON frame — which frame the start stop unit broadcasts for the i-stop OFF button.
-//      Found by capturing the whole bus with the button released and held and comparing (FrameDiff,
-//      like the turn-signal frame). This is what gets replayed. Experimental (see README).
+//   2. an observed CAN frame that changes while the OFF button is held. The physical button is a
+//      resistor ladder read by the instrument cluster. A changed frame is only a replay candidate;
+//      rolling counters/checksums may make the captured bytes unusable (see README).
 //
 // Parked, engine running. Everything runs between two rounds of live data (OBDAdapter.runBetweenRounds),
 // like the M, door and wiper finders.
@@ -94,11 +94,15 @@ final class IStopFinder: ObservableObject {
         message = nextStep
     }
 
-    /// Save the best state flag and/or button frame found so far, and hand them to the adapter /
-    /// controller (each only if found; the other keeps what was saved).
+    /// Save confirmed state and frame candidates and hand them to the adapter / controller. The other
+    /// learned value is left as saved when a candidate is not confirmed.
     func use() {
         var saved: [String] = []
-        if let best = stateCandidates.first {
+        var skipped: [String] = []
+        let stateConfirmed = onShots.count >= Tuning.snapshotsToConfirm
+            && offShots.count >= Tuning.snapshotsToConfirm
+            && SignalDiff.isUnambiguous(stateCandidates)
+        if stateConfirmed, let best = stateCandidates.first {
             let signal = best.signal
             if let data = try? JSONEncoder().encode(signal) {
                 UserDefaults.standard.set(data, forKey: Self.stateKey)
@@ -106,8 +110,12 @@ final class IStopFinder: ObservableObject {
             learnedState = signal
             obd.iStopSignal = signal
             saved.append("state " + signal.label(off: "on", on: "off"))
+        } else if !stateCandidates.isEmpty {
+            skipped.append("state needs two ON and two OFF snapshots with one clear candidate")
         }
-        if let best = frameCandidates.first {
+        let frameConfirmed = idleBus.count >= 2 && pressedBus.count >= 2
+            && FrameDiff.isUnambiguous(frameCandidates)
+        if frameConfirmed, let best = frameCandidates.first {
             let frame = best.frame
             if let data = try? JSONEncoder().encode(frame) {
                 UserDefaults.standard.set(data, forKey: Self.frameKey)
@@ -115,8 +123,12 @@ final class IStopFinder: ObservableObject {
             learnedFrame = frame
             controller.buttonFrame = frame
             saved.append("button " + frame.label())
+        } else if !frameCandidates.isEmpty {
+            skipped.append("button needs two released and two held captures with one clear candidate")
         }
-        message = saved.isEmpty ? "Nothing found yet to save." : "Saved. " + nextStep
+        if !saved.isEmpty { message = "Saved. " + nextStep }
+        else if !skipped.isEmpty { message = skipped.joined(separator: "; ") }
+        else { message = "Nothing found yet to save." }
         if !saved.isEmpty { onLog?("i-stop finder: saved " + saved.joined(separator: " · ")) }
     }
 

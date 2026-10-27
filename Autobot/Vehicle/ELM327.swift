@@ -324,6 +324,16 @@ enum ELM327 {
         lines(reply ?? "").contains("OK")
     }
 
+    /// Whether the adapter explicitly rejected a raw CAN transmit. With ATR0, a successful send
+    /// normally produces only the prompt (an empty reply); ELM clones may still return one of these
+    /// diagnostics when the frame could not be sent.
+    static func hasCANTransmitError(_ reply: String) -> Bool {
+        let errors: Set<String> = [
+            "?", "ERROR", "CANERROR", "BUFFERFULL", "UNABLETOCONNECT", "BUSINIT:ERROR", "STOPPED",
+        ]
+        return lines(reply).contains { errors.contains($0) }
+    }
+
     /// The adapter didn't understand the command.
     static func isUnknownCommand(_ reply: String) -> Bool {
         lines(reply).contains("?")
