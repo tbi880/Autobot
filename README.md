@@ -56,6 +56,24 @@ assistant when the phone connects to CarPlay.
 - **Reliable commands**: one packet at a time, mode changes are read back and resent if the
   lamp disagrees, "busy" / checksum-error replies are retried.
 
+### DPF monitor
+- **Live DPF back pressure and RPM** (OBD2 adapter, see [DPF monitor](#dpf-monitor-1)): the
+  dashboard's *DPF monitor* row opens a screen that reads the engine ECU while it's open — the DPF
+  differential pressure (back pressure) and engine RPM in large type and as two live charts on one
+  time axis (1 / 3 / 10 min, touch to read a moment; regenerations shaded), plus back pressure
+  plotted against RPM
+- also shown: soot accumulated (gauge, g/L) and generated, distance since the last regeneration,
+  number of regenerations, whether one is running now (banner with a timer), DPF inlet / outlet
+  pressure and temperature, exhaust gas temperatures, coolant, and the raw PCM replies
+- **Regeneration history**, two ways: the PCM's own record of the last 10 regenerations (km driven
+  before each; found on the car with the *History finder*, since its DID isn't published), and
+  Autobot's own log from now on — every regeneration with the km before it, the soot before it,
+  how long it ran and the date, read once a minute while driving. Both as bar charts with the
+  average
+- regenerations starting and finishing go to the log. Nothing is read while the screen is closed;
+  while it's open, each read slots in between two rounds of live data, so Power Mode, reverse and
+  the turn signals keep working. Test mode shows simulated values
+
 ### i-stop auto-off
 
 Attempts to switch Mazda's **i-stop** (idling stop — the engine stopping at a standstill) off at the start of
@@ -442,6 +460,53 @@ found like the M flag: scan the climate control unit's DIDs and compare snapshot
 settings, or watch its MS-CAN frames while turning the dial (0.5 °C steps, 15.0–32.0 °C).
 The readings go to `ClimateTempFlash.setPointChanged(to:)`; the lighting part already works.
 
+### DPF monitor
+
+The diesel particulate filter values come from the engine ECU (PCM, `7E0`) over UDS service 22
+(`MazdaDPF.swift`, `DPFMonitor.swift`). Every read, while the screen is open: RPM (`010C1`) and the
+DPF pressure, plus one of the slower values in turn (`AppConfig.DPF.rotation`), giving roughly one to
+two chart points a second next to the normal live data.
+
+| Request | Value | Decoding |
+|---|---|---|
+| `22F47A` | DPF pressure (SAE PID `7A`) | A = bits (0 differential, 1 inlet, 2 outlet); differential = signed(B·256+C)/100 kPa, inlet D–E, outlet F–G the same |
+| `22042C` | soot accumulated | (A·256+B)·100/65536 g/L |
+| `22042D` | soot generated since the last regeneration | same as above |
+| `220380` | regeneration running | bit 1 of A |
+| `220432` | regenerations so far | A·256+B |
+| `220434` | distance since the last regeneration | (B·65536+C·256+D)/640 km |
+| `22F478` | exhaust gas temperatures (PID `78`) | A = sensors 1–4 present, then 2 bytes each: raw/10 − 40 °C |
+| `22F47C` | DPF inlet / outlet temperature (PID `7C`) | A bit 0 inlet, bit 1 outlet; raw/10 − 40 °C |
+| `22F405` | coolant (PID `05`) | A − 40 °C |
+
+The `04xx` / `0380` DIDs and their scaling are from community Torque PID lists for SkyActiv-D cars
+(not Mazda documentation); one list scales the soot by /628 and the distance by ·100/65536 instead.
+The screen shows the raw bytes of every reply, so the scaling can be checked against FORScan
+(`PM_ACC`, `DPF_REG_DIS`…). A value the PCM doesn't answer three times in a row shows "not
+answered" and isn't asked again until the screen is reopened.
+
+**Regeneration history.** Two sources, shown together on the DPF screen:
+
+- *Recorded by Autobot* (`DPFRegenLog`): while live data runs it reads `220432`, `220434`,
+  `22042C` and `220380` once a minute (`AppConfig.DPF.logInterval`; while the DPF screen is open its
+  own reads are used). When the count goes up — or, on a PCM without the count, the distance drops
+  back — an entry is saved with the highest distance read before it, the soot before it and, when
+  both ends were seen, how long it ran. "≥" marks an entry whose last reading before it was from an
+  earlier drive (the km in between are missing). Kept on the phone, newest first.
+- *From the PCM* (`DPFHistoryFinder`): the PCM keeps the distances of its last 10 regenerations
+  (Mazda's dealer tool shows them as DPF regeneration distance 01–10; a Torque preset for the
+  SkyActiv-D reads each as 1 byte × 2 km, and was 30 km above the dealer tool), but the DID isn't
+  published. The finder scans `7E0` `0300–04FF` (`AppConfig.DPF.historyScanPlan`) and keeps the
+  values of 10+ bytes with the regeneration count at the time. After the next regeneration (a new
+  log entry, or opening the DPF screen) they're read again: the history moves along by one entry —
+  new distance in front, oldest gone — and the candidate that does that is used from then on. One that
+  changes without a regeneration is ruled out. *Use this one* picks a candidate by hand.
+
+Reading the numbers: back pressure rises with exhaust flow, so it only means something at a given
+RPM / load — the back pressure vs RPM chart is the one to compare across days. On the SkyActiv-D a
+regeneration usually starts somewhere above 6 g/L of soot; at 10 g/L the PCM limits power and stops
+regenerating by itself (gauge thresholds in `AppConfig.DPF`).
+
 ### i-stop (idling stop)
 
 i-stop has no standard OBD2 PID. On this platform the i-stop OFF button is part of the **cluster switch** by
@@ -500,16 +565,19 @@ Autobot/
 │                when it counts as flashing), Wipers (the wiper lever in the same frame),
 │                WiperFinder (learns its bits, and the FBCM's wiper motor bit for AUTO)
 │                IStop (i-stop state flag + OFF-button frame, FrameDiff)
+│                MazdaDPF (the PCM's DPF values and their decoding)
 ├── Driving/     ManualShiftDetector (manual shifting → Power Mode), MFinder (learns the M flag),
 │                SpeedMonitor (GPS), PowerModeController (3-second transition buffer), CarPlayMonitor,
-│                IStopController (i-stop auto-off), IStopFinder (learns the state + OFF-button frame)
+│                IStopController (i-stop auto-off), IStopFinder (learns the state + OFF-button frame),
+│                DPFMonitor (DPF back pressure, soot, regeneration while its screen is open)
+│                DPFRegenLog (records each regeneration), DPFHistoryFinder (the PCM's last-10 history)
 ├── Climate/     ClimateTempFlash (A/C set colder / warmer → blue / red burst flash)
 ├── Voice/       AudioSessionManager, Speaker, MetallicVoiceEffect, VoiceCoordinator (queue)
 ├── Assistant/   WelcomeAssistant (flow), SpeechListener, DestinationParser,
 │                WeatherService, CommuteCheck, MapsLauncher, ShortcutsLauncher
 ├── Places/      SavedPlace, SavedPlacesStore
 ├── Backup/      AppBackup (JSON format), BackupManager
-├── UI/          ContentView (dashboard), SavedPlacesView
+├── UI/          ContentView (dashboard), SavedPlacesView, DPFMonitorView (live DPF charts)
 └── Support/     AppConfig (all phrases and tuning values), Concurrency helpers
 ```
 
@@ -557,4 +625,8 @@ versions ignore sections they don't know.
   (read-only) and an experimental observed frame candidate (may not replay if it requires a valid
   counter/checksum). An inline switch-harness module that simulates the resistor value is the closest match to
   automatic i-stop devices; any FORScan as-built change needs confirmation for the exact model and region.
+- DPF monitor: live back pressure + RPM charts, soot, regeneration, exhaust temperatures — **done**;
+  the community scaling of the Mazda DIDs is to be confirmed against FORScan on the car.
+- Regeneration history: Autobot's own log — **done**; the PCM's last-10 history — finder **done**, its
+  DID to be found on the car (scan, then confirmed by the next regeneration).
 - More lighting features through `LightingArbiter`

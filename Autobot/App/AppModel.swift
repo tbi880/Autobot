@@ -23,6 +23,11 @@
 //   OBDAdapter (learned i-stop state DID) ──iStopOff──▶ IStopController: at the start of a drive it
 //     may replay an experimental observed frame (OBDAdapter.injectFrame), then checks PCM state.
 //     IStopFinder learns the state DID and compares CAN captures while the physical switch is held.
+//   OBDAdapter (PCM 7E0: RPM, DPF pressure 22F47A, soot, regeneration, exhaust temperatures), only
+//     while the DPF screen is open, between live-data rounds ──▶ DPFMonitor ──▶ DPF screen (charts)
+//   OBDAdapter (220432 count, 220434 distance, once a minute; or DPFMonitor's reads) ──▶ DPFRegenLog
+//     (each regeneration with the km before it) ──new entry──▶ DPFHistoryFinder (the PCM's last-10
+//     history: finds its DID by the shift after a regeneration, then reads it)
 //   LampController.isReady ┐
 //   CarPlayMonitor.isConnected ┼──▶ WelcomeAssistant (once per drive, via VoiceCoordinator)
 //   BootSequence finished ─────┘
@@ -59,6 +64,9 @@ final class AppModel: ObservableObject {
     let wiperFinder: WiperFinder
     let iStop: IStopController
     let iStopFinder: IStopFinder
+    let dpf: DPFMonitor
+    let dpfLog: DPFRegenLog
+    let dpfHistory: DPFHistoryFinder
     private let voice: VoiceCoordinator
     private let doorAlert: DoorSafetyAlert
 
@@ -94,6 +102,19 @@ final class AppModel: ObservableObject {
         let manual = ManualShiftDetector(obd: obd)
         manual.onLog = { [weak lamp] message in lamp?.addLog(message) }
         self.obd = obd
+        let dpf = DPFMonitor(obd: obd)
+        dpf.onLog = { [weak lamp] message in lamp?.addLog(message) }
+        self.dpf = dpf
+        let dpfLog = DPFRegenLog(obd: obd)
+        dpfLog.onLog = { [weak lamp] message in lamp?.addLog(message) }
+        dpf.onValues = { [weak dpfLog] values in
+            dpfLog?.observe(count: values.regenCount, distance: values.regenDistance, soot: values.soot,
+                            regenerating: values.regenerating)
+        }
+        self.dpfLog = dpfLog
+        let dpfHistory = DPFHistoryFinder(obd: obd)
+        dpfHistory.onLog = { [weak lamp] message in lamp?.addLog(message) }
+        self.dpfHistory = dpfHistory
         let reverse = ReverseLight(obd: obd, lighting: lighting)
         reverse.onLog = { [weak lamp] message in lamp?.addLog(message) }
         self.reverse = reverse
@@ -165,6 +186,17 @@ final class AppModel: ObservableObject {
         obd.start()
         carPlay.start()
         iStop.start()
+
+        // The DPF screen's own reads feed the regeneration log while it's open; a recorded regeneration
+        // re-reads the PCM's history (and its candidates, to confirm which one it is).
+        dpf.$isRunning
+            .sink { [weak self] running in self?.dpfLog.fedByMonitor = running }
+            .store(in: &subscriptions)
+        dpfLog.$entries
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] _ in self?.dpfHistory.refresh() }
+            .store(in: &subscriptions)
 
         obd.$doorStates
             .sink { [weak self] states in self?.doorStatesChanged(states) }

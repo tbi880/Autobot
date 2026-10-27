@@ -88,6 +88,9 @@ private struct DashboardView: View {
             ConnectionStatusView(lamp: app.lamp, carPlay: app.carPlay)
             DrivingView(obd: app.obd, speed: app.speed, manual: app.manual)
             MFinderButton(finder: app.mFinder, obd: app.obd, manual: app.manual)
+            if AppConfig.DPF.enabled {
+                DPFMonitorButton(monitor: app.dpf, log: app.dpfLog, finder: app.dpfHistory)
+            }
             if AppConfig.OBD.selectorDiagnostics {
                 SelectorDiagnosticsView(obd: app.obd)
             }

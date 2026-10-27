@@ -9,7 +9,7 @@ nonisolated enum AppConfig {
     
     enum TestMode {
         /// Simulates successful lamp Bluetooth and CarPlay connections at start-up.
-        static let enabled = true
+        static let enabled = false
     }
 
     enum Driver {
@@ -251,6 +251,64 @@ nonisolated enum AppConfig {
         static let captureListen: TimeInterval = 2.0
         /// DIDs the state search ignores (none known yet on this car).
         static let ignoredDIDs: Set<String> = []
+    }
+
+    /// DPF monitor (DPFMonitor, MazdaDPF): live DPF back pressure and RPM with charts, plus soot,
+    /// regeneration and exhaust temperatures, read from the PCM only while its screen is open. Each
+    /// read runs between two rounds of live data, so Power Mode, reverse and the turn signals keep
+    /// working meanwhile. See README, "DPF monitor".
+    enum DPF {
+        /// The feature on or off. Off: the dashboard row is hidden.
+        static let enabled = true
+        /// Every read: RPM + DPF pressure, plus the next of these in turn (soot and the regeneration
+        /// status come round twice as often as the rest).
+        static let rotation: [MazdaDPF.Value] = [
+            .soot, .regenStatus, .exhaustTemps, .regenDistance,
+            .soot, .regenStatus, .dpfTemps, .sootGenerated, .regenCount, .coolant,
+        ]
+        /// At least this long from the start of one read to the next, so live data keeps its pace.
+        static let minInterval: Duration = .milliseconds(150)
+        /// Chart history kept while the screen is open (seconds).
+        static let historySeconds: TimeInterval = 600
+        /// Chart windows to choose from (seconds).
+        static let chartWindows: [TimeInterval] = [60, 180, 600]
+        /// A value the PCM doesn't answer this many times in a row isn't asked again while the screen
+        /// is open (reopen to try again).
+        static let missesBeforeSkipping = 3
+        /// Soot gauge, g/L: full scale, and where it turns orange / red. Community numbers for the
+        /// SkyActiv-D: a regeneration usually starts somewhere above 6 g/L; at 10 g/L the PCM limits
+        /// power and stops trying to regenerate by itself.
+        static let sootFullScale = 10.0
+        static let sootHigh = 6.0
+        static let sootCritical = 8.0
+        /// Test mode (AppConfig.TestMode): simulated readings this often.
+        static let simulationInterval: Duration = .milliseconds(400)
+
+        /// Regeneration log (DPFRegenLog): while driving, the regeneration count, distance since the
+        /// last one, soot and status are read this often (4 short reads, between live-data rounds), so
+        /// each regeneration is recorded with the distance driven before it. While the DPF screen is
+        /// open its own reads feed the log instead.
+        static let logInterval: Duration = .seconds(60)
+        /// The first log read after the engine ECU starts answering (after i-stop's start-up checks).
+        static let logFirstDelay: Duration = .seconds(20)
+        /// Entries kept, newest first.
+        static let logMaxEntries = 100
+        /// An entry counts as approximate when the last reading before the regeneration was longer ago
+        /// than this (seconds): the distance driven in between is missing from it.
+        static let logApproximateAfter: TimeInterval = 600
+
+        /// Regeneration history finder (DPFHistoryFinder): the PCM keeps the distances of the last 10
+        /// regenerations (what Mazda's dealer tool shows as "DPF regeneration distance 01–10"), but
+        /// its DID isn't published. The finder scans these PCM DID blocks for a reply of 10+ bytes and
+        /// confirms the one that shifts by one entry after a regeneration.
+        static let historyScanPlan: [(header: String, ranges: [ClosedRange<Int>])] = [
+            ("7E0", [0x0300...0x04FF]),
+        ]
+        static let historyScanTimeout: TimeInterval = 0.6
+        /// Entries in the PCM's history, and km per raw unit for 1-byte entries (the Torque preset for
+        /// the SkyActiv-D shows each byte doubled; it read 30 km more than the dealer tool).
+        static let historyEntries = 10
+        static let historyKmPerUnit = 2.0
     }
 
     /// Turn signals and hazard lights (TurnSignalFlash): flash in the current Power Mode colour while

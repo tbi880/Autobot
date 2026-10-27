@@ -219,6 +219,17 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         } ?? false
     }
 
+    /// For work in runBetweenRounds: engine RPM (mode 01 PID 0C) from the engine ECU; nil if it didn't
+    /// answer. Used by the DPF monitor while its screen is open.
+    func readRPM() async -> Double? {
+        guard jobRunning, await useHeader(baseHeader),
+              let reply = await request([ELM327.rpmPID]),
+              let data = ELM327.values(in: reply, first: ELM327.rpmPID)[ELM327.rpmPID] else {
+            return nil
+        }
+        return ELM327.rpm(data)
+    }
+
     /// One service-22 read for work running in runBetweenRounds: switches the request header as
     /// needed; nil if the ECU didn't answer that DID. `complete` waits for the whole reply (several
     /// frames) instead of returning after the first one.
