@@ -118,8 +118,8 @@ Runs once per drive when the lamp is connected and CarPlay audio is detected:
    - was playing → it resumes after Google Maps opens
    - nothing was playing → runs the **最近播放的歌** shortcut, which only starts QQ Music and then
      opens `autobot://maps` to come back; Autobot then opens Google Maps itself — navigation
-     with `comgooglemaps://?saddr=&daddr=<address>&directionsmode=driving` (the same link the
-     Gaspy app uses; the route starts by itself), search with `comgooglemaps://?q=…`
+     with a Google Maps URL using `dir_action=navigate` (starts turn-by-turn navigation when
+     location is available), search with `comgooglemaps://?q=…`
      - if iOS refuses to open Shortcuts, Google Maps is opened directly (no music)
 
 If the phone is locked or the app is in the background, it only says the greeting.
@@ -129,6 +129,11 @@ Name + address pairs ("home" → "6 Example Street, Suburb, City"). Say the name
 supported language) to navigate there directly. If speech recognition gets one or two
 characters wrong, the closest matching saved name or address is used. Export / import as a
 versioned JSON backup.
+
+Choose the navigation link at the top of **Saved places**: **HTTPS** uses Google's universal Maps
+URL and requests immediate navigation when the phone's location is available; **App scheme** uses
+`comgooglemaps://` directly, falling back to HTTPS if Google Maps isn't installed. This setting
+applies to exact-address navigation, including the weekday Home-to-Work commute.
 
 Swipe right on a place (or use *Use as* in the editor) to mark it as **Home** or **Work**; only
 one place can have each. Home's address is looked up on Apple Maps once and cached, for the
@@ -183,8 +188,8 @@ Starts QQ Music, then hands control back to Autobot. It does **not** open Google
   front, Autobot can't open Google Maps, so the shortcut has to bring Autobot back first.
   Autobot waits up to `AppConfig.Music.returnTimeout` (20 s) for `autobot://maps`, then opens
   Google Maps itself:
-  - saved place with an exact address → `comgooglemaps://?saddr=&daddr=<address>&directionsmode=driving`
-    (the same link the Gaspy app uses; turn-by-turn navigation starts by itself)
+  - saved place with an exact address → Google Maps directions URL with `dir_action=navigate`
+    (opens the app when installed and starts turn-by-turn navigation when location is available)
   - any other place → `comgooglemaps://?q=<place>` (search, you pick the result)
   - no destination → `comgooglemaps://`
 - **If something goes wrong:** if the shortcut never comes back, Google Maps isn't opened. If

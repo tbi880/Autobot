@@ -21,8 +21,8 @@
 //                        (if it really resumed)
 //      - was not      -> run the music shortcut (AppConfig.Music): QQ Music only, then it
 //                        opens autobot://maps to come back; Autobot then opens Google Maps
-//                        itself (navigation: comgooglemaps://?saddr=&daddr=…&directionsmode=
-//                        driving, as Gaspy does; search: comgooglemaps://?q=…).
+//                        itself (navigation: universal Maps URL with dir_action=navigate;
+//                        search: comgooglemaps://?q=…).
 //                        If iOS refuses to open Shortcuts, Google Maps is opened directly
 //                        (no music). Announce once the music is playing.
 //

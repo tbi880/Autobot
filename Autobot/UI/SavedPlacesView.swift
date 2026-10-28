@@ -9,6 +9,8 @@ struct SavedPlacesView: View {
     @ObservedObject var store: SavedPlacesStore
     let backup: BackupManager
     @Environment(\.dismiss) private var dismiss
+    @AppStorage(MapsLauncher.navigationModeStorageKey)
+    private var navigationModeRawValue = MapsNavigationMode.https.rawValue
     @State private var editing: SavedPlace?
 
     // Import flow: pick file -> choose merge/replace -> show result
@@ -20,26 +22,51 @@ struct SavedPlacesView: View {
         NavigationStack {
             List {
                 Section {
-                    ForEach(store.places) { place in
-                        Button { editing = place } label: { PlaceRow(place: place) }
-                            .foregroundStyle(.primary)
-                            .swipeActions(edge: .leading, allowsFullSwipe: false) {
-                                ForEach(SavedPlace.Role.allCases) { role in
-                                    roleButton(role, for: place)
-                                }
-                            }
-                            .swipeActions(edge: .trailing) {
-                                Button(role: .destructive) { store.delete(place) } label: {
-                                    Label("Delete", systemImage: "trash")
-                                }
-                            }
-                            .contextMenu {
-                                ForEach(SavedPlace.Role.allCases) { role in
-                                    roleButton(role, for: place)
-                                }
-                            }
+                    Picker("Mode", selection: $navigationModeRawValue) {
+                        ForEach(MapsNavigationMode.allCases) { mode in
+                            Text(mode.title).tag(mode.rawValue)
+                        }
                     }
-                    .onDelete { store.delete(at: $0) }
+                    .pickerStyle(.segmented)
+                } header: {
+                    Text("Navigation link")
+                } footer: {
+                    switch selectedNavigationMode {
+                    case .https:
+                        Text("Uses a universal Google Maps link. iOS opens the app when installed; "
+                             + "navigation can start directly when your location is available.")
+                    case .appScheme:
+                        Text("Uses comgooglemaps:// to open the Google Maps app. If the app isn't "
+                             + "installed, Autobot falls back to the HTTPS link.")
+                    }
+                }
+
+                Section {
+                    if store.places.isEmpty {
+                        ContentUnavailableView("No saved places", systemImage: "mappin.and.ellipse",
+                                               description: Text("Tap + to add one, e.g. home."))
+                    } else {
+                        ForEach(store.places) { place in
+                            Button { editing = place } label: { PlaceRow(place: place) }
+                                .foregroundStyle(.primary)
+                                .swipeActions(edge: .leading, allowsFullSwipe: false) {
+                                    ForEach(SavedPlace.Role.allCases) { role in
+                                        roleButton(role, for: place)
+                                    }
+                                }
+                                .swipeActions(edge: .trailing) {
+                                    Button(role: .destructive) { store.delete(place) } label: {
+                                        Label("Delete", systemImage: "trash")
+                                    }
+                                }
+                                .contextMenu {
+                                    ForEach(SavedPlace.Role.allCases) { role in
+                                        roleButton(role, for: place)
+                                    }
+                                }
+                        }
+                        .onDelete { store.delete(at: $0) }
+                    }
                 } footer: {
                     Text("Say the name when asked \"Where is our destination today?\". "
                          + "Exact street addresses start navigation right away; "
@@ -47,12 +74,6 @@ struct SavedPlacesView: View {
                          + "Swipe right to mark one place as Home and one as Work. "
                          + "On weekdays from 7 to 10 am, when the car connects near Home, "
                          + "navigation to Work starts without asking.")
-                }
-            }
-            .overlay {
-                if store.places.isEmpty {
-                    ContentUnavailableView("No saved places", systemImage: "mappin.and.ellipse",
-                                           description: Text("Tap + to add one, e.g. home."))
                 }
             }
             .navigationTitle("Saved places")
@@ -104,6 +125,10 @@ struct SavedPlacesView: View {
 }
 
 private extension SavedPlacesView {
+
+    var selectedNavigationMode: MapsNavigationMode {
+        MapsNavigationMode(rawValue: navigationModeRawValue) ?? .https
+    }
 
     /// "Set as Home" / "Not Home" (and the same for Work).
     func roleButton(_ role: SavedPlace.Role, for place: SavedPlace) -> some View {

@@ -3,11 +3,25 @@
 //   .none              just open the app
 //   .search(text)      search, the driver picks the result
 //   .navigate(place)   saved place with an exact address: start turn-by-turn navigation
-//                      (comgooglemaps://?saddr=&daddr=…&directionsmode=driving, as Gaspy does)
-// Falls back to Google Maps on the web if the app isn't installed.
+//                      (universal Maps URL with dir_action=navigate)
+// HTTPS navigation URLs open Google Maps when installed, or the web version otherwise.
 // Only works while this app is in the foreground (an iOS rule).
 
 import UIKit
+
+enum MapsNavigationMode: String, CaseIterable, Identifiable {
+    case https
+    case appScheme
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .https: return "HTTPS"
+        case .appScheme: return "App scheme"
+        }
+    }
+}
 
 enum MapsTarget: Equatable {
     case none
@@ -33,6 +47,7 @@ enum MapsTarget: Equatable {
 }
 
 enum MapsLauncher {
+    static let navigationModeStorageKey = "maps.navigationMode"
 
     /// Opens Google Maps. Only works while Autobot is in the foreground.
     static func open(_ target: MapsTarget) {
@@ -51,9 +66,19 @@ enum MapsLauncher {
         case .none: return searchURL(nil)
         case .search(let text): return searchURL(text)
         case .navigate(let place):
-            return isGoogleMapsInstalled ? appNavigationURL(to: place.address)
-                                         : webNavigationURL(to: place.address)
+            switch navigationMode {
+            case .https:
+                return universalNavigationURL(to: place.address)
+            case .appScheme:
+                return isGoogleMapsInstalled ? appNavigationURL(to: place.address)
+                                             : universalNavigationURL(to: place.address)
+            }
         }
+    }
+
+    private static var navigationMode: MapsNavigationMode {
+        let storedValue = UserDefaults.standard.string(forKey: navigationModeStorageKey)
+        return storedValue.flatMap(MapsNavigationMode.init(rawValue:)) ?? .https
     }
 
     // MARK: URLs
@@ -67,20 +92,19 @@ enum MapsLauncher {
                    ?? "https://www.google.com/maps")
     }
 
-    /// Same link as the Gaspy app (nz.hwem.Gaspy 3.30.12, found in its Dart code):
-    ///   comgooglemaps://?saddr=&daddr=<destination>&directionsmode=driving
-    /// Empty saddr = from the current location; with directionsmode=driving Google Maps goes
-    /// straight into turn-by-turn navigation. Opened by Autobot itself (not by Shortcuts).
-    private static func appNavigationURL(to address: String) -> URL? {
-        guard let destination = encode(address) else { return nil }
-        return URL(string: "comgooglemaps://?saddr=&daddr=\(destination)&directionsmode=driving")
-    }
-
-    /// Google Maps app not installed: the web link (opens Safari / Maps on the web).
-    private static func webNavigationURL(to address: String) -> URL? {
+    /// Universal Maps URL: iOS hands this to Google Maps when installed; otherwise it opens
+    /// in the browser. `dir_action=navigate` asks Google Maps to start turn-by-turn navigation
+    /// when the current device location is available.
+    private static func universalNavigationURL(to address: String) -> URL? {
         guard let destination = encode(address) else { return nil }
         return URL(string: "https://www.google.com/maps/dir/?api=1&destination=\(destination)"
                    + "&travelmode=driving&dir_action=navigate")
+    }
+
+    /// iOS-specific Google Maps scheme. This requests driving directions from the current location.
+    private static func appNavigationURL(to address: String) -> URL? {
+        guard let destination = encode(address) else { return nil }
+        return URL(string: "comgooglemaps://?saddr=&daddr=\(destination)&directionsmode=driving")
     }
 
     /// Needs "comgooglemaps" in LSApplicationQueriesSchemes (Autobot-Info.plist).

@@ -9,7 +9,7 @@ nonisolated enum AppConfig {
     
     enum TestMode {
         /// Simulates successful lamp Bluetooth and CarPlay connections at start-up.
-        static let enabled = true
+        static let enabled = false
     }
 
     enum Driver {
