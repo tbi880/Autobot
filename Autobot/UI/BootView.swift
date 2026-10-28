@@ -2,7 +2,8 @@
 // Start screen. A big ENGINE START STOP button in the middle of the screen; pressing it cranks the
 // engine (click, haptics, sound, screen shake), and when the engine fires there's a flash,
 // shockwaves and sparks while the button folds into a tachometer-style progress ring.
-// The ring then fills as the lamp and car audio connect (rules in BootSequence).
+// The ring then fills as the lamp, the OBD2 adapter and car audio connect: it waits at 30 / 60 / 90 %
+// for each in turn (rules in BootSequence).
 //
 // Everything is drawn from the time since the press (TimelineView), so the button → ring morph,
 // the effects and the shake are one continuous animation that stays in sync with the sound.
@@ -52,7 +53,8 @@ private struct BootFrame {
     let completedAgo: Double?
     let holding: Bool
     let lampConnected: Bool
-    let lampStatus: String
+    let obdConnected: Bool
+    let detailStatus: String
     let carAudioConnected: Bool
     let status: String
 
@@ -63,7 +65,8 @@ private struct BootFrame {
         completedAgo = boot.completedAt.map { now.timeIntervalSince($0) }
         holding = boot.isHolding
         lampConnected = boot.lampConnected
-        lampStatus = boot.lampStatus
+        obdConnected = boot.obdConnected
+        detailStatus = boot.detailStatus
         carAudioConnected = boot.carAudioConnected
         status = boot.statusText
     }
@@ -113,7 +116,7 @@ private struct BootFrame {
         return CGSize(width: x, height: y)
     }
 
-    /// Slow pulse while waiting at 50 % / 90 % (1 when not waiting).
+    /// Slow pulse while waiting at a checkpoint (1 when not waiting).
     var holdPulse: Double { holding ? 0.5 + 0.5 * sin(clock * 2 * .pi * 1.2) : 1 }
 }
 
@@ -278,7 +281,7 @@ private struct Bezel: View {
 }
 
 /// Tachometer ticks around the bezel; they light up with the progress.
-/// The 50 % and 90 % ticks (where it can wait) are longer.
+/// The checkpoint ticks (30 / 60 / 90 %, where it can wait) are longer.
 private struct TickRing: View {
     let progress: Double
     let visibility: Double
@@ -290,10 +293,12 @@ private struct TickRing: View {
             let cy = Double(size.height) / 2
             let d = Double(diameter)
             let count = 50
+            let checkpoints = [AppConfig.Boot.lampCheckpoint, AppConfig.Boot.obdCheckpoint,
+                               AppConfig.Boot.carAudioCheckpoint].map { Int(($0 / 100 * Double(count)).rounded()) }
             for i in 0..<count {
                 let fraction = Double(i) / Double(count)
                 let angle = -Double.pi / 2 + fraction * 2 * Double.pi
-                let milestone = i == 25 || i == 45
+                let milestone = checkpoints.contains(i)
                 let major = i % 5 == 0
                 let inner = d * (milestone ? 0.528 : (major ? 0.535 : 0.545))
                 let outer = d * (milestone ? 0.59 : 0.575)
@@ -325,7 +330,7 @@ private struct ProgressArc: View {
         let angle = (-90 + 360 * p) * Double.pi / 180
         let radius = Double(diameter) / 2
         ZStack {
-            // Scanning sweep while waiting at 50 % / 90 %
+            // Scanning sweep while waiting at a checkpoint (30 / 60 / 90 %)
             Circle()
                 .trim(from: 0, to: 0.16)
                 .stroke(AngularGradient(colors: [Palette.orange.opacity(0), Palette.orange.opacity(0.55)],
@@ -521,16 +526,24 @@ private struct BootFooter: View {
                 .opacity(frame.hint * (0.55 + 0.45 * frame.led))
 
             VStack(spacing: 10) {
-                HStack(spacing: 10) {
-                    StatusChip(icon: "lightbulb.fill", title: "Lamp",
-                               detail: frame.lampConnected ? "Connected" : "Searching…",
-                               connected: frame.lampConnected, clock: frame.clock)
-                    StatusChip(icon: "car.fill", title: "Car audio",
-                               detail: frame.carAudioConnected ? "Connected" : "Waiting…",
-                               connected: frame.carAudioConnected, clock: frame.clock)
+                // All three in a row when they fit, otherwise lamp + OBD2 above car audio
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 8) {
+                        lampChip
+                        obdChip
+                        carAudioChip
+                    }
+                    VStack(spacing: 8) {
+                        HStack(spacing: 8) {
+                            lampChip
+                            obdChip
+                        }
+                        carAudioChip
+                    }
                 }
-                // Lamp Bluetooth detail, so a connection problem is visible on this screen
-                Text(frame.lampStatus)
+                .padding(.horizontal, 16)
+                // What the connection being waited for is doing, so a problem is visible on this screen
+                Text(frame.detailStatus)
                     .font(.system(size: 11, weight: .medium, design: .monospaced))
                     .foregroundStyle(Color.white.opacity(0.4))
                     .lineLimit(1)
@@ -541,6 +554,24 @@ private struct BootFooter: View {
             .offset(y: 12 * (1 - frame.readout))
         }
         .allowsHitTesting(false)
+    }
+
+    private var lampChip: some View {
+        StatusChip(icon: "lightbulb.fill", title: "Lamp",
+                   detail: frame.lampConnected ? "Connected" : "Searching…",
+                   connected: frame.lampConnected, clock: frame.clock)
+    }
+
+    private var obdChip: some View {
+        StatusChip(icon: "gauge.with.dots.needle.33percent", title: "OBD2",
+                   detail: frame.obdConnected ? "Connected" : (frame.lampConnected ? "Searching…" : "Next"),
+                   connected: frame.obdConnected, clock: frame.clock)
+    }
+
+    private var carAudioChip: some View {
+        StatusChip(icon: "car.fill", title: "Car audio",
+                   detail: frame.carAudioConnected ? "Connected" : "Waiting…",
+                   connected: frame.carAudioConnected, clock: frame.clock)
     }
 }
 

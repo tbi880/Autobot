@@ -4,8 +4,8 @@
 // allowing a brief selector fluctuation to settle before committing the breathing scene.
 //
 // The trigger is the real manual selector (ManualShiftDetector) or GPS speed. Power Mode asks for
-// red breathing (`.powerMode`) while on; when off it withdraws its request so rain mode's cyan
-// breathing or the normal purple steady scene underneath can show.
+// red breathing (`.powerMode`) while on; when off it withdraws its request so the normal purple
+// steady scene underneath can show.
 
 import Combine
 import Foundation
@@ -85,7 +85,7 @@ final class PowerModeController: ObservableObject {
         lighting.clear(.powerTransition)
     }
 
-    /// Power Mode on: red breathing. Off: rain mode or the normal purple steady scene shows through.
+    /// Power Mode on: red breathing. Off: the normal purple steady scene shows through.
     private func applyPowerMode(_ state: LampState) {
         if state == .redBreathing {
             lighting.request(.redBreathing, from: .powerMode)

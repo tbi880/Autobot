@@ -13,10 +13,6 @@
 //   of the KW905's reach) ──▶ ClimateTempFlash ──scene (climateTemp: blue / red flash)──▶ LightingArbiter
 //   OBDAdapter (TCM gear 7E1 221E12: 3C = lever in R) ──sample──▶ ReverseLight
 //     ──scene (reverse: yellow breathing, Power Mode's level)──▶ LightingArbiter
-//   OBDAdapter (lights frame 09A: wiper lever, bits learned by WiperFinder) ──lightsFrame──▶ RainMode
-//     (lever in AUTO: RainMode ──wiperMotorSignals──▶ OBDAdapter reads the FBCM's wiper motor bit,
-//      also learned by WiperFinder ──wiperMotorRunning──▶ RainMode)
-//     ──scene (rain: cyan breathing, above the normal purple, below Power Mode)──▶ LightingArbiter
 //   (purple steady itself is the `.base` request, under everything else)
 //   OBDAdapter (indicator lamp frame 09A, listened for on HS-CAN) ──turnSignal──▶ TurnSignalFlash
 //     ──scene (turnSignal: current Power Mode colour flash)──▶ LightingArbiter
@@ -34,7 +30,8 @@
 //
 // A normal launch waits for the ENGINE START button (ignite), then starts the lamp and OBD2 Bluetooth
 // searches plus CarPlay detection. A CarPlay Shortcuts automation can instead open `autobot://start`,
-// which starts the monitors directly and skips the start animation. The first Welcome waits until
+// which presses the button by itself. Either way the start screen waits for the lamp (30 %), the OBD2
+// adapter (60 %) and car audio (90 %) before the dashboard. The first Welcome waits until
 // boot has finished, or starts as soon as the car/audio connections are ready on the automation path.
 
 import AVFoundation
@@ -60,8 +57,6 @@ final class AppModel: ObservableObject {
     let climate: ClimateTempFlash
     let turnSignals: TurnSignalFlash
     let reverse: ReverseLight
-    let rain: RainMode
-    let wiperFinder: WiperFinder
     let iStop: IStopController
     let iStopFinder: IStopFinder
     let dpf: DPFMonitor
@@ -118,12 +113,6 @@ final class AppModel: ObservableObject {
         let reverse = ReverseLight(obd: obd, lighting: lighting)
         reverse.onLog = { [weak lamp] message in lamp?.addLog(message) }
         self.reverse = reverse
-        let rain = RainMode(obd: obd, lighting: lighting)
-        rain.onLog = { [weak lamp] message in lamp?.addLog(message) }
-        self.rain = rain
-        let wiperFinder = WiperFinder(obd: obd, rain: rain)
-        wiperFinder.onLog = { [weak lamp] message in lamp?.addLog(message) }
-        self.wiperFinder = wiperFinder
         let iStop = IStopController(obd: obd)
         iStop.onLog = { [weak lamp] message in lamp?.addLog(message) }
         self.iStop = iStop
@@ -152,7 +141,7 @@ final class AppModel: ObservableObject {
         self.backup = BackupManager(places: places)
         self.assistant = WelcomeAssistant(audio: audio, speaker: speaker, places: places,
                                           currentLocation: { speed.lastLocation })
-        self.boot = BootSequence(lamp: lamp, carPlay: carPlay, engineSound: EngineSoundPlayer(audio: audio))
+        self.boot = BootSequence(lamp: lamp, obd: obd, carPlay: carPlay, engineSound: EngineSoundPlayer(audio: audio))
         boot.onFinished = { [weak self] in self?.bootDidFinish() }
     }
 
@@ -162,12 +151,12 @@ final class AppModel: ObservableObject {
         start()
     }
 
-    /// Entry point for the user's CarPlay Shortcuts automation (`autobot://start`). Skips the
-    /// ignition animation and starts the vehicle monitors as soon as the URL opens the app.
+    /// Entry point for the user's CarPlay Shortcuts automation (`autobot://start`): presses ENGINE START
+    /// by itself as soon as the URL opens the app — the same start-up (sound, animation, progress) and the
+    /// same checks for the lamp, the OBD2 adapter and car audio before the dashboard. Ignored once started.
     func startFromCarPlayAutomation() {
         guard !hasStarted else { return }
-        bootFinished = true
-        start()
+        ignite()
     }
 
     func start() {
@@ -239,11 +228,6 @@ final class AppModel: ObservableObject {
     /// Debug: as if the lever went into R; the same button again hands back to the car's lever.
     func testReverse() {
         reverse.simulate()
-    }
-
-    /// Debug: as if the wipers were switched on; the same button again hands back to the car.
-    func testRain() {
-        rain.simulate()
     }
 
     // MARK: Wiring

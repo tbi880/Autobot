@@ -2,14 +2,17 @@
 // State behind the start screen (BootView): the ENGINE START button, then the progress ring.
 //
 //   press       haptics + engine start-up sound (EngineSoundPlayer); AppModel.ignite() starts the
-//               lamp Bluetooth search and car-audio (CarPlay) detection at the same moment
-//   0 → 50 %    always climbs slowly, even with nothing connected; holds at 50 % until the lamp connects
-//   50 → 90 %   once the lamp is connected; holds at 90 % until car audio connects
-//   90 → 100 %  once car audio is connected, then the dashboard takes over (onFinished)
+//               lamp and OBD2 Bluetooth searches and car-audio (CarPlay) detection at the same moment
+//   0 → 30 %    always climbs, even with nothing connected; holds at 30 % until the lamp connects
+//   30 → 60 %   once the lamp is connected; holds at 60 % until the OBD2 adapter connects (Bluetooth)
+//   60 → 90 %   once the adapter is connected; holds at 90 % until car audio connects
+//   90 → 100 %  once all three are connected, then the dashboard takes over (onFinished)
 //
+// The CarPlay automation (`autobot://start`) presses the button by itself (AppModel.ignite): the same
+// start-up, sound and three checks as a tap.
 // The engine sound keeps idling until car audio is connected (after playing the full start-up).
-// This only drives the screen; lamp and CarPlay logic are unchanged.
-// Speeds and timings: AppConfig.Boot.
+// This only drives the screen; lamp, OBD2 and CarPlay logic are unchanged.
+// Speeds, checkpoints and timings: AppConfig.Boot.
 
 import Combine
 import CoreHaptics
@@ -23,6 +26,7 @@ final class BootSequence: ObservableObject {
     @Published private(set) var phase = Phase.ready
     @Published private(set) var progress = 0.0              // 0…100
     @Published private(set) var lampConnected = false       // stays true once seen during boot
+    @Published private(set) var obdConnected = false        // stays true once seen during boot
     @Published private(set) var carAudioConnected = false   // stays true once seen during boot
     @Published private(set) var ignitedAt: Date?
     @Published private(set) var completedAt: Date?
@@ -31,6 +35,7 @@ final class BootSequence: ObservableObject {
     var onFinished: (() -> Void)?
 
     private let lamp: LampController
+    private let obd: OBDAdapter
     private let carPlay: CarPlayMonitor
     private let engineSound: EngineSoundPlayer
     private let haptics = IgnitionHaptics()
@@ -38,27 +43,37 @@ final class BootSequence: ObservableObject {
     private var runTask: Task<Void, Never>?
     private var soundStop: Task<Void, Never>?
 
-    init(lamp: LampController, carPlay: CarPlayMonitor, engineSound: EngineSoundPlayer) {
+    init(lamp: LampController, obd: OBDAdapter, carPlay: CarPlayMonitor, engineSound: EngineSoundPlayer) {
         self.lamp = lamp
+        self.obd = obd
         self.carPlay = carPlay
         self.engineSound = engineSound
     }
 
-    /// Highest point the progress may reach right now.
+    /// Highest point the progress may reach right now: the first checkpoint whose connection is missing.
     var cap: Double {
-        guard lampConnected else { return 50 }
-        return carAudioConnected ? 100 : 90
+        guard lampConnected else { return AppConfig.Boot.lampCheckpoint }
+        guard obdConnected else { return AppConfig.Boot.obdCheckpoint }
+        guard carAudioConnected else { return AppConfig.Boot.carAudioCheckpoint }
+        return 100
     }
 
-    /// Waiting at 50 % or 90 % for a connection.
+    /// Waiting at a checkpoint (30 / 60 / 90 %) for a connection.
     var isHolding: Bool { phase == .booting && cap < 100 && progress >= cap - 0.01 }
 
-    /// The lamp controller's own status ("Scanning for Pocket Link…", "Bluetooth is off…").
-    var lampStatus: String { lamp.status }
+    /// The detail line under the status chips: what the connection being waited for is doing
+    /// ("Scanning for Pocket Link…", "OBD: scanning for KONNWEI…").
+    var detailStatus: String {
+        if !lampConnected { return lamp.status }
+        if !obdConnected { return obd.status }
+        if !carAudioConnected { return "Waiting for CarPlay (car audio)…" }
+        return lamp.status
+    }
 
     var statusText: String {
         if completedAt != nil { return "All systems go" }
         if !lampConnected { return "Searching for lamp" }
+        if !obdConnected { return "Connecting OBD2" }
         if !carAudioConnected { return "Waiting for car audio" }
         return "Car audio connected"
     }
@@ -83,14 +98,21 @@ final class BootSequence: ObservableObject {
         let sound = engineSound
         Task { await sound.play() }
 
+        watchConnections()
+        runTask = Task { [weak self] in await self?.run() }
+    }
+
+    /// Each connection counts once it has been seen during the boot.
+    private func watchConnections() {
         lamp.$isReady.filter { $0 }.first()
             .sink { [weak self] _ in self?.lampConnected = true }
+            .store(in: &subscriptions)
+        obd.$isConnected.filter { $0 }.first()
+            .sink { [weak self] _ in self?.obdConnected = true }
             .store(in: &subscriptions)
         carPlay.$isConnected.filter { $0 }.first()
             .sink { [weak self] _ in self?.carAudioConnected = true }
             .store(in: &subscriptions)
-
-        runTask = Task { [weak self] in await self?.run() }
     }
 
     // MARK: Progress
@@ -122,19 +144,23 @@ final class BootSequence: ObservableObject {
     private func advance(by dt: Double) {
         let cap = self.cap
         guard progress < cap else { return }
+        let boot = AppConfig.Boot.self
         let rate: Double
-        if progress < 50 {
-            rate = lampConnected ? AppConfig.Boot.rateToHalfLampReady : AppConfig.Boot.rateToHalf
-        } else if progress < 90 {
-            rate = AppConfig.Boot.rateToNinety
+        if progress < boot.lampCheckpoint {
+            rate = lampConnected ? boot.rateToLampReady : boot.rateToLamp
+        } else if progress < boot.obdCheckpoint {
+            rate = boot.rateToOBD
+        } else if progress < boot.carAudioCheckpoint {
+            rate = boot.rateToCarAudio
         } else {
-            rate = AppConfig.Boot.rateToFull
+            rate = boot.rateToFull
         }
         // Ease into a waiting point instead of stopping dead
         let ease = cap < 100 ? min(1, max(0.15, (cap - progress) / AppConfig.Boot.easeZone)) : 1
         let old = progress
         progress = min(cap, progress + rate * ease * dt)
-        if (old < 50 && progress >= 50) || (old < 90 && progress >= 90) {
+        let checkpoints = [boot.lampCheckpoint, boot.obdCheckpoint, boot.carAudioCheckpoint]
+        if checkpoints.contains(where: { old < $0 && progress >= $0 }) {
             haptics.tick()
         }
     }
@@ -155,7 +181,7 @@ private extension Duration {
 
 // MARK: - Haptics
 
-/// The press "click", the starter cranking, the engine firing, and ticks at 50 / 90 / 100 %.
+/// The press "click", the starter cranking, the engine firing, and ticks at 30 / 60 / 90 / 100 %.
 /// Follows the same timeline as the sound (AppConfig.Boot).
 final class IgnitionHaptics {
 

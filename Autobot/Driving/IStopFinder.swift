@@ -10,7 +10,7 @@
 //      rolling counters/checksums may make the captured bytes unusable (see README).
 //
 // Parked, engine running. Everything runs between two rounds of live data (OBDAdapter.runBetweenRounds),
-// like the M, door and wiper finders.
+// like the M and door finders.
 
 import Combine
 import Foundation
