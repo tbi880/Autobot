@@ -41,6 +41,13 @@ nonisolated enum AppConfig {
         static let maxSpeedAccuracy: Double = 5
     }
 
+    /// Both Bluetooth devices: the lamp (LampController) and the OBD2 adapter (OBDAdapter).
+    enum Bluetooth {
+        /// While a device isn't connected, the connection attempt is dropped and started again
+        /// this often (ReconnectTimer), until the device is back.
+        static let reconnectInterval: Duration = .seconds(60)
+    }
+
     /// OBD2 Bluetooth adapter (OBDAdapter, ELM327 protocol).
     enum OBD {
         /// Connects to the first adapter advertising service FFF0 whose name starts with this.
@@ -247,8 +254,33 @@ nonisolated enum AppConfig {
         static let scanTimeout: TimeInterval = 0.6
         static let readsPerSnapshot = 2
         static let snapshotsToConfirm = 2
-        /// Finder: how long each bus capture listens for frames that change while the OFF button is held.
-        static let captureListen: TimeInterval = 2.0
+        /// Finder, bus map: each look listens this long (s) to one block of CAN ids. A block that overflows
+        /// the adapter (BUFFER FULL), or has more frames a second than `maxGroupRate`, is split in two.
+        static let censusListen: TimeInterval = 0.6
+        static let maxGroupRate: Double = 250
+        /// Finder, guided sweep, per group: released for `sweepListen`, "Hold" + `holdLead` to press, held
+        /// for `sweepHeld`, "Release" + `releaseLead` to let go, released again for `sweepListen`. Only the
+        /// second half of the held / released-again frames counts, so a late press or release is fine. The
+        /// button is held about 3 s, with the engine running (never in the engine-off reset window).
+        static let sweepListen: TimeInterval = 1.0
+        static let holdLead: Duration = .milliseconds(1200)
+        static let sweepHeld: TimeInterval = 1.5
+        static let releaseLead: Duration = .milliseconds(1000)
+        /// Spoken during the sweep: the hand is on the button, the eyes may not be on the phone.
+        static let holdPhrase = "Hold"
+        static let releasePhrase = "Release"
+        /// Finder, module check: one harmless tester present (3E00) each — which modules this adapter
+        /// reaches. The instrument cluster reads the OFF button (workshop manual, DTC U2013:13); the start
+        /// stop unit holds the i-stop default in its as-built data (FORScan: 731-01-01 B1 bit 4).
+        static let moduleChecks: [(header: String, name: String)] = [
+            ("7E0", "PCM"),
+            ("720", "Instrument cluster"),
+            ("726", "Body control module"),
+            ("731", "Start stop unit (SSU)"),
+        ]
+        /// The start stop unit, and its as-built DIDs, read (service 22, read-only) when it answers.
+        static let ssuHeader = "731"
+        static let asBuiltDIDs = ["DE00", "DE01", "DE02"]
         /// DIDs the state search ignores (none known yet on this car).
         static let ignoredDIDs: Set<String> = []
     }
@@ -296,19 +328,46 @@ nonisolated enum AppConfig {
         /// An entry counts as approximate when the last reading before the regeneration was longer ago
         /// than this (seconds): the distance driven in between is missing from it.
         static let logApproximateAfter: TimeInterval = 600
+        /// Say "DPF regeneration started" (AppConfig.Phrases.dpfRegenStarted, the normal assistant
+        /// voice) when the regeneration status (220380) comes on. While driving the status alone is read
+        /// every `regenCheckInterval` (one short read) between the full log readings; while the DPF
+        /// screen is open its own reads are used.
+        static let announceRegeneration = true
+        static let regenCheckInterval: Duration = .seconds(15)
+        /// Not said again within this long (a status that flickers, live data dropping and coming back).
+        static let regenAnnounceCooldown: TimeInterval = 600
 
         /// Regeneration history finder (DPFHistoryFinder): the PCM keeps the distances of the last 10
         /// regenerations (what Mazda's dealer tool shows as "DPF regeneration distance 01–10"), but
-        /// its DID isn't published. The finder scans these PCM DID blocks for a reply of 10+ bytes and
-        /// confirms the one that shifts by one entry after a regeneration.
+        /// its DID isn't published. The finder scans these PCM DID blocks, in this order, for one DID
+        /// holding 10 distances or a row of 10 consecutive DIDs holding one each, and confirms the one
+        /// that shifts by one entry after a regeneration. 7E0 0300–04FF alone (the first scan, which
+        /// only looked for single 10-byte DIDs) found nothing, so: the DPF block again (0380, 042C–0434
+        /// live there; now rows of DIDs count too), the rest of Mazda's own 0000–0FFF block, then the
+        /// Ford-style PCM blocks 1000–1FFF (11xx, 16xx, 17xx, 1Exx) and D000–DFFF (DDxx). About 12 000
+        /// DIDs, roughly 20 min; it can be done in parts. Changing this starts the scan again.
         static let historyScanPlan: [(header: String, ranges: [ClosedRange<Int>])] = [
-            ("7E0", [0x0300...0x04FF]),
+            ("7E0", [0x0300...0x04FF, 0x0000...0x02FF, 0x0500...0x0FFF, 0x1000...0x1FFF, 0xD000...0xDFFF]),
         ]
+        /// Wait per DID while scanning (seconds). The PCM refuses a DID it doesn't have at once.
         static let historyScanTimeout: TimeInterval = 0.6
+        /// DIDs asked per go, between two rounds of live data (a few seconds each), so Power Mode,
+        /// reverse and the turn signals keep working during the scan.
+        static let historyScanChunk = 48
+        /// Seconds per DID for the time shown before the first scan (the scan measures the real one).
+        static let historyScanSecondsPerDID = 0.1
         /// Entries in the PCM's history, and km per raw unit for 1-byte entries (the Torque preset for
-        /// the SkyActiv-D shows each byte doubled; it read 30 km more than the dealer tool).
+        /// the SkyActiv-D shows each byte doubled; it read 30 km more than the dealer tool). 2-byte
+        /// entries are read as km, 3- and 4-byte ones in 1/640 km like 220434.
         static let historyEntries = 10
         static let historyKmPerUnit = 2.0
+        /// A candidate needs at least `historyMinPlausible` of its 10 entries in this range (km) and at
+        /// least 3 different values; the rest of what answers is only in the raw scan export.
+        static let historyPlausibleKm: ClosedRange<Double> = 20...1500
+        static let historyMinPlausible = 6
+        /// Undecided candidates kept (best first); they're re-read when the DPF screen opens and after
+        /// each regeneration, until one is confirmed.
+        static let historyMaxCandidates = 24
     }
 
     /// Turn signals and hazard lights (TurnSignalFlash): flash in the current Power Mode colour while
@@ -432,8 +491,10 @@ nonisolated enum AppConfig {
         static let minEngineSound = 3.6
         /// Fade-out when the engine sound stops (seconds).
         static let engineFadeOut = 0.8
-        /// Engine sound volume 0…1.
-        static let engineVolume: Float = 1.0
+        /// Engine sound volume 0…1, on top of the phone's / car's own volume. Kept low so the
+        /// start-up doesn't startle when the car's volume is still turned up from music
+        /// (0.15 ≈ -16 dB; 1.0 = full, 0.3 ≈ -10 dB).
+        static let engineVolume: Float = 0.15
     }
 
     enum Listening {
@@ -508,6 +569,7 @@ nonisolated enum AppConfig {
         static let powerOn = "Power Mode Activated"
         static let powerOff = "Power Mode Deactivated"
         static let doorOpen = "Door open detected"
+        static let dpfRegenStarted = "DPF regeneration started"
     }
 
     /// "Power Mode Activated": sci-fi female AI voice - clear, slightly bright, with a

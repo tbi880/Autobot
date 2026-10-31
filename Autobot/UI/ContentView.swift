@@ -872,25 +872,58 @@ private struct IStopFinderView: View {
                         }
                     }
                 }
-                Section {
-                    Button("Capture bus · nothing pressed  ·  \(finder.idleCaptures)") { finder.captureBus(pressed: false) }
-                        .disabled(finder.isBusy || !obd.isReady)
-                    Button("Capture bus · OFF button held  ·  \(finder.pressedCaptures)") { finder.captureBus(pressed: true) }
-                        .disabled(finder.isBusy || !obd.isReady)
-                } header: {
-                    Text("2 · Find the OFF button (experimental)")
-                } footer: {
-                    Text("Capture with nothing pressed, then press and HOLD the OFF button for the whole 2 s and "
-                         + "capture again. Twice each, then Use it. If no frame is found, the button may not be on "
-                         + "the bus on this car — use FORScan coding instead (see the README).")
+                if let prompt = finder.prompt {
+                    Section {
+                        Text(prompt)
+                            .font(.title2.bold())
+                            .foregroundColor(.orange)
+                    }
                 }
-                if !finder.frameCandidates.isEmpty {
-                    Section("Button candidates, best first") {
-                        ForEach(finder.frameCandidates.prefix(6)) { candidate in
-                            Text(candidate.frame.label() + "  ·  score \(candidate.score)")
+                Section {
+                    Button("Map the bus (once, about a minute)") { finder.census() }
+                        .disabled(finder.isBusy || !obd.isReady)
+                    LabeledContent("Bus map", value: mapText)
+                    Button("Guided sweep  ·  \(finder.groups.count) presses") { finder.sweep() }
+                        .disabled(finder.isBusy || !obd.isReady || finder.groups.isEmpty)
+                    if finder.sweptGroups > 0 {
+                        LabeledContent("Groups swept", value: "\(finder.sweptGroups) of \(finder.groups.count)")
+                    }
+                } header: {
+                    Text("2 · Find the OFF button on the bus (experimental)")
+                } footer: {
+                    Text("Parked, engine running. Map the bus once without touching anything (small blocks of "
+                         + "CAN ids, so the adapter doesn't overflow). Then the guided sweep: each time the phone "
+                         + "says \"Hold\", press and hold the i-stop OFF button; at \"Release\" let go. One press "
+                         + "per block; the i-stop state above is checked to make sure each press counted.")
+                }
+                if !finder.sweepCandidates.isEmpty {
+                    Section("Changed frames, best first") {
+                        ForEach(finder.sweepCandidates.prefix(8)) { candidate in
+                            Text(candidate.label)
                                 .font(.system(.caption, design: .monospaced))
+                                .foregroundColor(candidate.kind == .momentary ? .primary : .secondary)
                         }
                     }
+                }
+                Section {
+                    Button("Check modules (read-only)") { finder.checkModules() }
+                        .disabled(finder.isBusy || !obd.isReady)
+                    ForEach(finder.modules) { module in
+                        LabeledContent("\(module.header) \(module.name)", value: moduleText(module))
+                            .font(.caption)
+                    }
+                    if let setting = finder.ssuIStopDefault {
+                        LabeledContent("i-stop at start", value: setting).font(.caption)
+                    }
+                    ForEach(finder.ssuAsBuilt, id: \.self) { line in
+                        Text(line).font(.system(.caption, design: .monospaced))
+                    }
+                } header: {
+                    Text("3 · Modules this adapter reaches")
+                } footer: {
+                    Text("One harmless \"are you there?\" each. The instrument cluster reads the OFF button; the "
+                         + "start stop unit (SSU) keeps the i-stop default in its as-built data. If the SSU answers, "
+                         + "that block is read (never written) and shown the way FORScan shows it.")
                 }
                 Section {
                     Button("Use what was found") { finder.use() }
@@ -911,13 +944,13 @@ private struct IStopFinderView: View {
                 }
                 Section {
                     if let url = finder.exportURL {
-                        ShareLink("Export raw bus capture (send to me)", item: url)
+                        ShareLink("Export raw sweep (send to me)", item: url)
                     } else {
-                        Text("Export raw bus capture — take some captures first").foregroundColor(.secondary)
+                        Text("Export raw sweep — run the guided sweep first").foregroundColor(.secondary)
                     }
                 } footer: {
-                    Text("If the OFF button can't be found automatically, export the raw captures after a full "
-                         + "pass and share the file, so the frame can be worked out by hand.")
+                    Text("If the OFF button can't be found automatically, export the raw sweep and share the "
+                         + "file, so the frame can be worked out by hand.")
                 }
             }
             .navigationTitle("i-stop finder")
@@ -943,8 +976,26 @@ private struct IStopFinderView: View {
             return (total > 0 ? Double(done) / Double(total) : 0, "Scanning \(done) / \(total)")
         case .snapshot(let label, let done, let total):
             return (total > 0 ? Double(done) / Double(total) : 0, "\(label): \(done) / \(total)")
-        case .capturing(let label):
-            return (nil, "Capturing (\(label))…")
+        case .census(let looks, let groups):
+            return (nil, "Mapping the bus: \(looks) looks, \(groups) groups")
+        case .sweep(let group, let total):
+            return (total > 0 ? Double(group) / Double(total) : 0, "Sweep \(group) / \(total)")
+        case .checking:
+            return (nil, "Checking modules…")
+        }
+    }
+
+    private var mapText: String {
+        guard !finder.groups.isEmpty else { return "not mapped" }
+        let ids = finder.groups.reduce(0) { $0 + $1.ids.count }
+        return "\(ids) ids in \(finder.groups.count) groups"
+    }
+
+    private func moduleText(_ module: ModuleCheck) -> String {
+        switch module.answers {
+        case true?: return "answers"
+        case false?: return "silent"
+        case nil: return "—"
         }
     }
 }

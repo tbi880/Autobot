@@ -1,6 +1,8 @@
 // LampController.swift
 // Connects to the lamp over BLE and sends commands one at a time.
 // Packet builders live in LampProtocol.swift.
+// If the lamp disconnects, scanning starts again; while it isn't ready the attempt is started over
+// once a minute (ReconnectTimer).
 
 import Combine
 import CoreBluetooth
@@ -19,6 +21,7 @@ final class LampController: NSObject, ObservableObject, CBCentralManagerDelegate
     private var central: CBCentralManager!
     private var lamp: CBPeripheral?
     private var writeChar: CBCharacteristic?
+    private lazy var reconnectTimer = ReconnectTimer { [weak self] in self?.retryConnection() }
 
     // Current mode state from the lamp. The original app reads this and keeps
     // rhythm sensitivity / mode1 / speed when it changes the mode (copyAndUpdateModeSetup).
@@ -217,6 +220,7 @@ final class LampController: NSObject, ObservableObject, CBCentralManagerDelegate
 
     func centralManagerDidUpdateState(_ c: CBCentralManager) {
         guard c.state == .poweredOn else {
+            reconnectTimer.disarm()
             status = "Bluetooth is off or not authorized"
             return
         }
@@ -226,8 +230,18 @@ final class LampController: NSObject, ObservableObject, CBCentralManagerDelegate
     private func startScan() {
         status = "Scanning for Pocket Link…"
         isReady = false
+        reconnectTimer.arm()
         // The lamp advertises AF30 (not AE30), so match it by name
         central.scanForPeripherals(withServices: nil)
+    }
+
+    /// The lamp still isn't ready a minute after the last attempt (reconnectTimer): drop that
+    /// attempt and scan again.
+    private func retryConnection() {
+        guard central.state == .poweredOn else { return }
+        addLog("Lamp still not connected, trying again")
+        central.cancelAttempt(on: lamp)
+        startScan()
     }
 
     func centralManager(_ c: CBCentralManager, didDiscover p: CBPeripheral,
@@ -281,6 +295,7 @@ final class LampController: NSObject, ObservableObject, CBCentralManagerDelegate
             self.enqueue([LampProtocol.start(), LampProtocol.query(0x02)])
             self.status = "Connected: \(p.name ?? "lamp")"
             self.isReady = true
+            self.reconnectTimer.disarm()
             self.appliedState = nil
             self.applyIfNeeded()
         }

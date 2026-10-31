@@ -23,7 +23,8 @@
 // the adapter for longer (MFinder's / DoorFinder's / IStopFinder's scans and snapshots) runs between two
 // rounds via runBetweenRounds, so it never mixes with the live requests.
 // If the ECU stops answering (engine off) the set-up starts again; if the adapter disconnects,
-// scanning starts again, like the lamp. Close MAXOBD while driving: both apps would share the
+// scanning starts again, like the lamp, and while the link isn't up the attempt is started over once
+// a minute (ReconnectTimer). Close MAXOBD while driving: both apps would share the
 // adapter and get each other's replies.
 
 import Combine
@@ -113,6 +114,7 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     private var central: CBCentralManager!
     private var adapter: CBPeripheral?
     private var writeChar: CBCharacteristic?
+    private lazy var reconnectTimer = ReconnectTimer { [weak self] in self?.retryConnection() }
 
     private var session: Task<Void, Never>?
     private var received = ""                                        // reply so far, until ">"
@@ -230,6 +232,43 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         return reply.flatMap { ELM327.payload22(did, in: $0) }
     }
 
+    /// What a UDS request got back, for scans that care why there's no data.
+    enum UDSReply {
+        /// Positive response: the data bytes (after "62<DID>" for service 22, "50<session>" for 10).
+        case data([UInt8])
+        /// Negative response "7F <service> <code>", e.g. 31: no such DID (in this session).
+        case refused(UInt8)
+        /// No reply, or nothing readable in it.
+        case silent
+    }
+
+    /// For work in runBetweenRounds: one service-22 read that also tells a refusal ("7F22xx") from
+    /// silence. `complete` as in readDID.
+    func probeDID(_ did: String, from header: String, complete: Bool, timeout: TimeInterval) async -> UDSReply {
+        guard jobRunning, await useHeader(header),
+              let reply = await send22(did, complete: complete, timeout: timeout) else { return .silent }
+        if let bytes = ELM327.payload22(did, in: reply) { return .data(bytes) }
+        if let code = ELM327.negativeResponseCode(service: 0x22, in: reply) { return .refused(code) }
+        // Cut off after the length line of a long reply (the reply count): ask again, to the end.
+        if !complete, ELM327.startsLongReply(reply),
+           let full = await send22(did, complete: true, timeout: AppConfig.OBD.replyTimeout),
+           let bytes = ELM327.payload22(did, in: full) {
+            return .data(bytes)
+        }
+        return .silent
+    }
+
+    /// For work in runBetweenRounds: UDS diagnostic session control (service 10) on `header`: 01 the
+    /// default session, 03 the extended one (some DIDs only answer there; it only widens what can be
+    /// read). The ECU drops back to the default session by itself a few seconds after the last request.
+    func diagnosticSession(_ session: UInt8, header: String) async -> UDSReply {
+        guard jobRunning, await useHeader(header),
+              let reply = await send(String(format: "10%02X", session)) else { return .silent }
+        if let data = ELM327.positiveResponse(service: 0x10, subFunction: session, in: reply) { return .data(data) }
+        if let code = ELM327.negativeResponseCode(service: 0x10, in: reply) { return .refused(code) }
+        return .silent
+    }
+
     /// For work in runBetweenRounds: the DIDs in `plan` that answer, "726 DA10" style.
     func scanDIDs(_ plan: [(header: String, ranges: [ClosedRange<Int>])], timeout: TimeInterval,
                   progress: (Int, Int) -> Void, cancelled: () -> Bool) async -> [String] {
@@ -277,18 +316,45 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         return snapshot
     }
 
-    /// For work in runBetweenRounds: every frame heard on the whole bus during `within` seconds, as
-    /// (id, data) pairs. Used by the i-stop finder to find the OFF-button frame. Opens the acceptance
-    /// mask so every id passes, and puts it back (ATAR) afterwards. nil if the adapter can't listen.
-    func captureAllFrames(within: TimeInterval) async -> [(id: String, data: [UInt8])]? {
-        guard jobRunning, !turnListenUnsupported, !receiveFilterUnsupported else { return nil }
-        let run = await listen(to: "", showingIDs: true, within: within, captureAll: true) { _, started, now in
+    /// For work in runBetweenRounds: one look at a block of the bus — every frame whose 11-bit id is in
+    /// base..<base+size (size a power of two) for `within` seconds, with its id. Used by the i-stop
+    /// finder's bus map and sweep: the whole bus at once overflows the adapter, a block doesn't.
+    /// `overflowed` = the adapter ran out of buffer (BUFFER FULL) or the frame limit was hit: split the
+    /// block. The receive filters go back to the defaults afterwards. nil if the adapter can't listen or
+    /// filter by id.
+    func captureBlock(base: Int, size: Int, within: TimeInterval) async -> BusLook? {
+        guard jobRunning, !turnListenUnsupported, !receiveFilterUnsupported, size > 0 else { return nil }
+        let mask = 0x7FF & ~(size - 1)
+        let run = await listen(to: "", showingIDs: true, within: within, captureAll: true,
+                               block: (filter: base & mask, mask: mask)) { _, started, now in
             now.timeIntervalSince(started) < within
         }
-        _ = await send(ELM327.receiveAuto)        // undo the accept-all mask
+        await resetCaptureFilters()
+        guard let run else { return nil }
+        let bufferFull = run.notes.contains {
+            $0.uppercased().filter { !$0.isWhitespace }.contains("BUFFERFULL")
+        }
+        return BusLook(frames: run.allFrames, overflowed: bufferFull || run.allFrames.count >= Self.captureFrameLimit)
+    }
+
+    /// For work in runBetweenRounds: does the ECU behind `header` answer a harmless tester present
+    /// (3E00)? nil if the request header couldn't be set.
+    func answersTesterPresent(_ header: String) async -> Bool? {
+        guard jobRunning, await useHeader(header) else { return nil }
+        let reply = await send(ELM327.testerPresent)
+        return reply.map { ELM327.isTesterPresentAnswer($0) } ?? false
+    }
+
+    /// Most frames one bus capture keeps.
+    private static let captureFrameLimit = 6000
+
+    /// After a block capture: the receive filters back to the defaults (ATCRA without an address, and
+    /// ATAR), and the request header / receive filter set again on the next useHeader.
+    private func resetCaptureFilters() async {
+        _ = await send(ELM327.resetReceiveFilters)
+        _ = await send(ELM327.receiveAuto)
         currentHeader = nil
         currentReceive = nil
-        return run?.allFrames
     }
 
     /// Replays an observed CAN frame (an experimental i-stop button candidate): sets the header to `id`,
@@ -812,6 +878,7 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     /// receive filter stays on `id` until the next useHeader puts it back. nil if the adapter refused
     /// (listening is then off for this session, see refuseListening).
     private func listen(to id: String, showingIDs: Bool, within: TimeInterval, captureAll: Bool = false,
+                        block: (filter: Int, mask: Int)? = nil,
                         keepListening: @escaping ([CANFrame], Date, Date) -> Bool) async -> Listening? {
         guard await listenSetting(ELM327.formattingOff) else {
             if !turnListenUnsupported { await endListening(showingIDs: false) }   // no answer: make sure it's on
@@ -822,8 +889,15 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
             return nil
         }
         if captureAll {
-            _ = await send(ELM327.acceptAllMask)            // every id passes (best effort)
+            // Only the ids in the block get through (filter/mask 000/000: every id).
+            let ids = block ?? (filter: 0, mask: 0)
             currentReceive = nil
+            guard ELM327.isOK(await send(ELM327.idFilter(ids.filter))),
+                  ELM327.isOK(await send(ELM327.idMask(ids.mask))) else {
+                logLine("OBD: the adapter didn't take ATCF/ATCM, so it can't capture one block of the bus")
+                await endListening(showingIDs: true)
+                return nil
+            }
         } else {
             guard await listenSetting(ELM327.receiveFilter(id)) else {
                 await endListening(showingIDs: showingIDs)
@@ -886,7 +960,7 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         }
         guard run.ended == nil else { return }
         if run.captureAll {
-            if let id = frame.id, run.allFrames.count < 4000 { run.allFrames.append((id: id, data: frame.data)) }
+            if let id = frame.id, run.allFrames.count < Self.captureFrameLimit { run.allFrames.append((id: id, data: frame.data)) }
             return
         }
         if let id = frame.id, id != run.id {
@@ -1091,6 +1165,7 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         guard c.state == .poweredOn else {
             endSession()
             adapter = nil
+            reconnectTimer.disarm()
             status = "OBD: Bluetooth is off or not authorized"
             return
         }
@@ -1099,8 +1174,25 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
 
     private func startScan() {
         status = "OBD: scanning for \(AppConfig.OBD.deviceName)…"
+        reconnectTimer.arm()
         // Filtering by service also works while the phone is locked (a nil filter doesn't).
         central.scanForPeripherals(withServices: [ELM327.service])
+    }
+
+    /// Forgets the adapter and its session and scans for it again.
+    private func startOver() {
+        endSession()
+        adapter = nil
+        startScan()
+    }
+
+    /// The link still isn't up a minute after the last attempt (reconnectTimer): drop that attempt
+    /// and start over.
+    private func retryConnection() {
+        guard central.state == .poweredOn else { return }
+        logLine("OBD: adapter still not connected, trying again")
+        central.cancelAttempt(on: adapter)
+        startOver()
     }
 
     func centralManager(_ c: CBCentralManager, didDiscover p: CBPeripheral,
@@ -1120,15 +1212,12 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     }
 
     func centralManager(_ c: CBCentralManager, didFailToConnect p: CBPeripheral, error: Error?) {
-        adapter = nil
-        startScan()
+        startOver()
     }
 
     func centralManager(_ c: CBCentralManager, didDisconnectPeripheral p: CBPeripheral, error: Error?) {
-        endSession()
-        adapter = nil
         logLine("OBD: adapter disconnected")
-        startScan()
+        startOver()
     }
 
     // MARK: CBPeripheralDelegate
@@ -1157,6 +1246,7 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
             return
         }
         isConnected = true
+        reconnectTimer.disarm()
         guard session == nil else { return }
         logLine("OBD: connected to \(p.name ?? AppConfig.OBD.deviceName)")
         session = Task { [weak self] in await self?.runSession() }

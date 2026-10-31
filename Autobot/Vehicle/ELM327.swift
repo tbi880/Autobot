@@ -157,9 +157,13 @@ enum ELM327 {
     /// expects no reply.
     static let responsesOff = "ATR0"
     static let responsesOn = "ATR1"
-    /// CAN acceptance mask, all bits "don't care" (ATCM000): every id passes while monitoring, so the
-    /// whole bus can be captured instead of one frame. Undone with ATAR (automatic).
-    static let acceptAllMask = "ATCM000"
+    /// CAN id filter and mask while monitoring (ATCF / ATCM, 11-bit): a frame gets through when
+    /// (id AND mask) == (filter AND mask). An aligned block of ids base..<base+size (size a power of two)
+    /// is filter = base, mask = 7FF AND NOT (size − 1); mask 000 lets every id through.
+    static func idFilter(_ filter: Int) -> String { String(format: "ATCF%03X", filter & 0x7FF) }
+    static func idMask(_ mask: Int) -> String { String(format: "ATCM%03X", mask & 0x7FF) }
+    /// Receive filters back to the adapter's defaults (CRA without an address, ELM327 v1.4+).
+    static let resetReceiveFilters = "ATCRA"
     static let receiveAuto = "ATAR"
 
     /// Only frames with this 11-bit ID get through: "ATCRA09A".
@@ -293,6 +297,65 @@ enum ELM327 {
     /// The adapter didn't understand the command.
     static func isUnknownCommand(_ reply: String) -> Bool {
         lines(reply).contains("?")
+    }
+
+    // MARK: UDS responses (service 10 session control, refusals)
+
+    /// The negative response code in a reply to `service` ("7F2231" -> 0x31 for service 22); nil if
+    /// the reply holds none. 31 means "no such DID" (in the current session).
+    static func negativeResponseCode(service: UInt8, in reply: String) -> UInt8? {
+        let marker = String(format: "7F%02X", service)
+        for line in lines(reply) {
+            guard let range = line.range(of: marker) else { continue }
+            let code = line[range.upperBound...].prefix(2)
+            if code.count == 2, let value = UInt8(code, radix: 16) { return value }
+        }
+        return nil
+    }
+
+    /// The data after a positive response to `service` + `subFunction` ("1003" -> "5003…"); nil if
+    /// the reply holds none.
+    static func positiveResponse(service: UInt8, subFunction: UInt8, in reply: String) -> [UInt8]? {
+        let marker = String(format: "%02X%02X", service &+ 0x40, subFunction)
+        for line in lines(reply) where line.hasPrefix(marker) {
+            let hex = Array(line.dropFirst(marker.count))
+            var bytes: [UInt8] = []
+            var i = 0
+            while i + 1 < hex.count, let byte = UInt8(String(hex[i...(i + 1)]), radix: 16) {
+                bytes.append(byte)
+                i += 2
+            }
+            return bytes
+        }
+        return nil
+    }
+
+    /// Whether a reply is the start of a reply of several frames (ISO-TP): a length line such as "00D"
+    /// or a "0:" frame.
+    static func startsLongReply(_ reply: String) -> Bool {
+        lines(reply).contains { line in
+            (line.count == 3 && Int(line, radix: 16) != nil) || line.hasPrefix("0:")
+        }
+    }
+
+    /// What a UDS negative response code means, for the screen and the log.
+    static func negativeResponseName(_ code: UInt8) -> String {
+        switch code {
+        case 0x10: return "general reject"
+        case 0x11: return "service not supported"
+        case 0x12: return "sub-function not supported"
+        case 0x13: return "wrong message length"
+        case 0x14: return "response too long"
+        case 0x21: return "busy, ask again"
+        case 0x22: return "conditions not correct"
+        case 0x24: return "request sequence error"
+        case 0x31: return "out of range (no such DID here)"
+        case 0x33: return "security access denied"
+        case 0x78: return "response pending"
+        case 0x7E: return "sub-function not in this session"
+        case 0x7F: return "service not in this session"
+        default: return String(format: "code %02X", code)
+        }
     }
 
     /// The adapter's name from the ATZ reply ("ELM327 v1.5"), for the log.

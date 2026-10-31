@@ -8,6 +8,10 @@
 //   -> the count goes up (or, on a PCM without the count, the distance drops back to ~0)
 //   -> an entry with the highest distance seen before it
 //
+// A regeneration starting (220380 on) calls onRegenerationStarted once ("DPF regeneration started").
+// Between the full reads only the status is read, every AppConfig.DPF.regenCheckInterval, so that comes
+// within a few seconds.
+//
 // It only knows regenerations from its first reading on; the PCM's own last-10 history is
 // DPFHistoryFinder's job. In test mode (simulated DPF values) entries stay in memory only.
 
@@ -44,6 +48,9 @@ final class DPFRegenLog: ObservableObject {
     @Published private(set) var lastRead: Date?
 
     var onLog: ((String) -> Void)?
+    /// A regeneration started (or was found running): once per regeneration, not again within
+    /// AppConfig.DPF.regenAnnounceCooldown.
+    var onRegenerationStarted: (() -> Void)?
 
     /// While true (the DPF screen is open) the log doesn't poll: the monitor's reads come in through
     /// observe.
@@ -69,6 +76,9 @@ final class DPFRegenLog: ObservableObject {
     private var state = State()
     private var task: Task<Void, Never>?
     private var subscriptions = Set<AnyCancellable>()
+    /// This regeneration was announced (cleared when the status goes off or live data stops).
+    private var announcedThisOne = false
+    private var lastAnnounced: Date?
 
     private static let entriesKey = "DPFRegenLog.entries"
     private static let stateKey = "DPFRegenLog.state"
@@ -109,6 +119,11 @@ final class DPFRegenLog: ObservableObject {
     /// A reading (from the poll here or from DPFMonitor). nil values are ones not read / not answered.
     func observe(count: Int?, distance: Double?, soot: Double?, regenerating: Bool?, at date: Date = Date()) {
         guard count != nil || distance != nil || regenerating != nil else { return }
+        if regenerating == true {
+            announceStart(at: date)
+        } else if regenerating == false {
+            announcedThisOne = false
+        }
         var s = state
         let previousSeen = s.seen
 
@@ -187,14 +202,48 @@ final class DPFRegenLog: ObservableObject {
     private func liveDataChanged(_ ready: Bool) {
         task?.cancel()
         task = nil
-        guard ready else { return }
+        guard ready else {
+            announcedThisOne = false          // engine off: a regeneration carrying on next drive is said again
+            return
+        }
+        // Every regenCheckInterval: the status only; every logInterval: the full reading instead.
+        let check = max(Tuning.regenCheckInterval.components.seconds, 1)
+        let pollEvery = max(1, Int(Tuning.logInterval.components.seconds / check))
         task = Task { [weak self] in
             try? await Task.sleep(for: Tuning.logFirstDelay)
+            var tick = 0
             while !Task.isCancelled {
-                await self?.poll()
-                try? await Task.sleep(for: Tuning.logInterval)
+                if tick % pollEvery == 0 {
+                    await self?.poll()
+                } else {
+                    await self?.checkStatus()
+                }
+                tick += 1
+                try? await Task.sleep(for: Tuning.regenCheckInterval)
             }
         }
+    }
+
+    /// Between the full readings: only the regeneration status (one short read), so a regeneration
+    /// starting is announced within a few seconds.
+    private func checkStatus() async {
+        guard Tuning.announceRegeneration, !fedByMonitor, obd.isReady else { return }
+        let reply: [UInt8]?? = await obd.runBetweenRounds { adapter in
+            await adapter.readDID(MazdaDPF.Value.regenStatus.did, from: MazdaDPF.header, complete: false,
+                                  timeout: AppConfig.OBD.replyTimeout)
+        }
+        guard let data = reply ?? nil, !fedByMonitor, let regenerating = MazdaDPF.regenerating(data) else { return }
+        observe(count: nil, distance: nil, soot: nil, regenerating: regenerating)
+    }
+
+    /// The status says a regeneration is running: say so, once.
+    private func announceStart(at date: Date) {
+        guard Tuning.announceRegeneration, !announcedThisOne else { return }
+        announcedThisOne = true
+        if let lastAnnounced, date.timeIntervalSince(lastAnnounced) < Tuning.regenAnnounceCooldown { return }
+        lastAnnounced = date
+        onLog?("DPF log: regeneration started (220380 on), announcing")
+        onRegenerationStarted?()
     }
 
     private func poll() async {

@@ -48,6 +48,9 @@ assistant when the phone connects to CarPlay.
   the normal purple steady underneath everything.
 - **Reliable commands**: one packet at a time, mode changes are read back and resent if the
   lamp disagrees, "busy" / checksum-error replies are retried.
+- **Reconnecting**: if the lamp or the OBD2 adapter drops out, scanning starts again at once, and
+  while it isn't back the attempt is started over once a minute
+  (`AppConfig.Bluetooth.reconnectInterval`, `ReconnectTimer`).
 
 ### DPF monitor
 - **Live DPF back pressure and RPM** (OBD2 adapter, see [DPF monitor](#dpf-monitor-1)): the
@@ -63,7 +66,8 @@ assistant when the phone connects to CarPlay.
   Autobot's own log from now on — every regeneration with the km before it, the soot before it,
   how long it ran and the date, read once a minute while driving. Both as bar charts with the
   average
-- regenerations starting and finishing go to the log. Nothing is read while the screen is closed;
+- a regeneration starting is announced — "DPF regeneration started", in the normal assistant
+  voice (`AppConfig.DPF.announceRegeneration`) — and regenerations starting and finishing go to the log. Nothing is read while the screen is closed;
   while it's open, each read slots in between two rounds of live data, so Power Mode, reverse and
   the turn signals keep working. Test mode shows simulated values
 
@@ -80,11 +84,20 @@ Nothing about i-stop is a standard OBD2 value, so the app learns two things on t
 - **the i-stop state** (reliable): which PCM value says i-stop is armed vs disabled, found by comparing
   snapshots taken with the OFF button pressed and not (`SignalDiff`, the same way as the M flag). Read-only;
   this is what lets auto-off confirm it worked.
-- **the OFF button** (experimental): which CAN frame changes while the physical OFF button is held, found by
-  capturing the whole bus with the button released and held (`FrameDiff`). The physical button is part of the
-  cluster switch's resistor ladder; the instrument cluster reads it and sends the operation signal onward.
-  A changed frame is only a candidate: if it includes a rolling counter or checksum, replaying one captured
-  copy will not reproduce a real press.
+- **the OFF button** (experimental): which CAN frame changes while the physical OFF button is held. The
+  physical button is part of the cluster switch's resistor ladder; the instrument cluster reads it and sends
+  the operation signal to the PCM on HS-CAN. One capture of the whole bus overflows the adapter, so the finder
+  first **maps the bus** in small blocks of CAN ids, then runs a **guided sweep**: one short press per block
+  (the phone says "Hold" / "Release"), each block captured released → held → released again, with the state
+  flag read before and after to prove the press registered. A bit set only while held is the button
+  (momentary); one that stays after release is the i-stop status echo (latched). A changed frame is only a
+  candidate: if it includes a rolling counter or checksum, replaying one captured copy will not reproduce a
+  real press.
+- **which modules this adapter reaches** (read-only): one tester present each to the PCM, instrument cluster,
+  body control module and start stop unit (SSU). If the SSU answers, its as-built block is read — never written
+  — and shown FORScan style, with what `731-01-01` byte B1 bit 4 says about i-stop at start.
+
+Measured on this car: the i-stop state is **`7E0 22093C`, byte 1, bit `0x10`** (`00` armed, `10` off).
 
 The press is always short — never the 3-second long-press that resets battery management — and only happens
 once the engine is actually running, never in the engine-off window where that reset lives.
@@ -468,18 +481,31 @@ answered" and isn't asked again until the screen is reopened.
 
 - *Recorded by Autobot* (`DPFRegenLog`): while live data runs it reads `220432`, `220434`,
   `22042C` and `220380` once a minute (`AppConfig.DPF.logInterval`; while the DPF screen is open its
-  own reads are used). When the count goes up — or, on a PCM without the count, the distance drops
+  own reads are used), and in between `220380` alone every 15 s (`regenCheckInterval`): when it comes
+  on, "DPF regeneration started" is said once (not again within 10 min). When the count goes up — or, on a PCM without the count, the distance drops
   back — an entry is saved with the highest distance read before it, the soot before it and, when
   both ends were seen, how long it ran. "≥" marks an entry whose last reading before it was from an
   earlier drive (the km in between are missing). Kept on the phone, newest first.
 - *From the PCM* (`DPFHistoryFinder`): the PCM keeps the distances of its last 10 regenerations
   (Mazda's dealer tool shows them as DPF regeneration distance 01–10; a Torque preset for the
   SkyActiv-D reads each as 1 byte × 2 km, and was 30 km above the dealer tool), but the DID isn't
-  published. The finder scans `7E0` `0300–04FF` (`AppConfig.DPF.historyScanPlan`) and keeps the
-  values of 10+ bytes with the regeneration count at the time. After the next regeneration (a new
-  log entry, or opening the DPF screen) they're read again: the history moves along by one entry —
-  new distance in front, oldest gone — and the candidate that does that is used from then on. One that
-  changes without a regeneration is ruled out. *Use this one* picks a candidate by hand.
+  published. The first scan (`7E0 0300–04FF`, single DIDs of 10+ bytes only) found nothing, so the
+  finder now scans `AppConfig.DPF.historyScanPlan` — `7E0 0300–04FF` again, the rest of `0000–0FFF`,
+  then `1000–1FFF` and `D000–DFFF`, about 12 000 DIDs / ~20 min — a chunk of 48 at a time between two
+  rounds of live data, so Power Mode etc. keep working. Its progress is kept: *Pause*, driving off or a
+  lost adapter stops it, and *Scan* carries on from there. Every DID that answers is read to the end
+  twice (one that changes in between is a live value). Two shapes count as a candidate: one DID of
+  10+ bytes, or a row of 10 consecutive DIDs with the same 1–4-byte reply, one entry each — as long as
+  at least 6 of the 10 entries look like distances (20–1500 km) and they aren't all alike. DIDs the
+  PCM refuses with anything but `7F 22 31` (no such DID) are listed: they exist but can't be read like
+  this. *Extended session* runs the scan (and the re-reads) after `1003`, where some values only
+  answer; the PCM drops back by itself a few seconds after the last request, and the finder sends
+  `1001` when done. After the next regeneration (a new log entry, opening the DPF screen, or the end of
+  a scan) the candidates are read again: the history moves along by one entry — new distance in front,
+  oldest gone — and the candidate that does that is used from then on. One that changes without a
+  regeneration is ruled out; one where a single entry changed in place is flagged (a ring buffer?).
+  *Use this one* picks a candidate by hand, *Read by hand* asks typed-in DIDs (`0435`, `0435-043E`)
+  and shows the reply or the refusal code, and *Export raw scan* shares every reply as JSON.
 
 Reading the numbers: back pressure rises with exhaust flow, so it only means something at a given
 RPM / load — the back pressure vs RPM chart is the one to compare across days. On the SkyActiv-D a
@@ -498,21 +524,33 @@ Two things are learned on the car (`IStopFinder`, `IStop.swift`):
 
 - **State** — a flag in a PCM service-22 value, found by snapshot diff with i-stop armed vs disabled (reuses
   `BitSignal` / `SignalDiff`). `AppConfig.IStop.stateScanPlan` lists the PCM DID blocks to scan.
-- **Observed CAN frame** — found by monitoring the whole bus (`ATCM000` to pass every id, then `ATMA`, headers
-  on) with the button released and held, and diffing by CAN id (`FrameDiff`). It's replayed experimentally by
+- **Observed CAN frame** — the whole bus at once is well over 1000 frames a second, more than the KW905 can pass
+  on over Bluetooth (it stops with `BUFFER FULL`), which is why the first all-ids capture found nothing. So the
+  finder maps the bus first: it monitors one aligned block of ids at a time (`ATCF <base>` + `ATCM <mask>`,
+  then `ATMA`, headers on) and splits any block that overflows, or carries more than
+  `AppConfig.IStop.maxGroupRate` frames a second, in two (`ATCRA` + `ATAR` put the filters back after every
+  look). Then the guided sweep presses once per block (released → held → released again) and `ButtonSweep`
+  sorts the changes into momentary (the button) and latched (the status echo). It's replayed experimentally by
   `OBDAdapter.injectFrame`: `ATSH <id>`, `ATCAF0` (formatting off), `ATR0` (no reply expected), write the
   captured bytes a few times, then restore. Adapter acceptance does not prove that the PCM acted on it; a
   rolling counter or checksum may make a captured copy unusable.
 
 Two honest limits on the software route with the KW905:
 
-- the adapter has to monitor every id (`ATCM000`); if it won't, the capture comes back empty and only the
-  state can be learned (auto-off then has nothing to press).
+- the adapter has to take `ATCF`/`ATCM` (standard ELM327 commands); if it won't, the bus can't be mapped and
+  only the state can be learned (auto-off then has nothing to press).
+- the instrument cluster keeps sending its own copy of the switch frame, so a replay races with it; as an
+  MX-5 CAN write-up puts it, frames sent onto the bus "get overwritten almost immediately" unless the module is
+  isolated behind a bridge.
 - the switch itself is a resistor ladder, not a button CAN transmitter. The instrument cluster forwards its
   operation signal, and the PCM may reject a stale or incomplete replay (for example, if the message has a
   rolling counter/checksum). If it does, an inline switch-harness module that simulates the resistor value is
-  the closest match to automatic i-stop devices; it emulates the button instead of relying on OBD. A FORScan
-  as-built change is another vehicle-specific route to investigate with a qualified source.
+  the closest match to automatic i-stop devices; it emulates the button instead of relying on OBD.
+- the one documented OBD-side setting is in the start stop unit's as-built data: FORScan users report
+  `731-01-01` byte B1 bit 4 (1 = i-stop on at every start, stock; 0 = off at every start, the button still
+  turns it on), on SkyActiv Mazda6 / CX-5 / Mazda3 / Mazda2. Writing as-built data needs the module's security
+  access and a backup, so it's done with FORScan, not this app; the module check only reads it, and shows
+  whether the SSU is even on the bus the KW905 reaches (newer Mazdas put it on MS-CAN).
 
 ## Manual shifting detection
 
@@ -555,7 +593,8 @@ Autobot/
 ├── Places/      SavedPlace, SavedPlacesStore
 ├── Backup/      AppBackup (JSON format), BackupManager
 ├── UI/          ContentView (dashboard), SavedPlacesView, DPFMonitorView (live DPF charts)
-└── Support/     AppConfig (all phrases and tuning values), Concurrency helpers
+└── Support/     AppConfig (all phrases and tuning values), Concurrency helpers,
+                 ReconnectTimer (once-a-minute Bluetooth retry for the lamp and the OBD2 adapter)
 ```
 
 Everything you might want to tweak — the Power Mode trigger, OBD2 settings, phrases, voice character,

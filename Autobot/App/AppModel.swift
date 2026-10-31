@@ -106,6 +106,7 @@ final class AppModel: ObservableObject {
             dpfLog?.observe(count: values.regenCount, distance: values.regenDistance, soot: values.soot,
                             regenerating: values.regenerating)
         }
+        dpfLog.onRegenerationStarted = { [weak voice] in voice?.announce(AppConfig.Phrases.dpfRegenStarted) }
         self.dpfLog = dpfLog
         let dpfHistory = DPFHistoryFinder(obd: obd)
         dpfHistory.onLog = { [weak lamp] message in lamp?.addLog(message) }
@@ -116,7 +117,8 @@ final class AppModel: ObservableObject {
         let iStop = IStopController(obd: obd)
         iStop.onLog = { [weak lamp] message in lamp?.addLog(message) }
         self.iStop = iStop
-        let iStopFinder = IStopFinder(obd: obd, controller: iStop)
+        let iStopFinder = IStopFinder(obd: obd, controller: iStop,
+                                      announce: { [weak voice] text in voice?.announce(text, urgent: true) })
         iStopFinder.onLog = { [weak lamp] message in lamp?.addLog(message) }
         self.iStopFinder = iStopFinder
         self.manual = manual

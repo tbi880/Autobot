@@ -497,11 +497,12 @@ struct DPFMonitorView: View {
     }
 }
 
-/// Finds where the PCM keeps its last 10 regeneration distances (DPFHistoryFinder): scan once, then
-/// the next regeneration confirms the candidate that moved along by one entry.
+/// Finds where the PCM keeps its last 10 regeneration distances (DPFHistoryFinder): scan once (in
+/// parts if need be), then the next regeneration confirms the candidate that moved along by one entry.
 struct DPFHistoryFinderView: View {
     @ObservedObject var finder: DPFHistoryFinder
     @Environment(\.dismiss) private var dismiss
+    @State private var manualDIDs = ""
 
     var body: some View {
         NavigationStack {
@@ -510,12 +511,14 @@ struct DPFHistoryFinderView: View {
                     Text(finder.message)
                     if let progress {
                         ProgressView(value: progress.value) { Text(progress.label).font(.caption) }
-                        Button("Cancel", role: .cancel) { finder.cancel() }
+                        if isScanning {
+                            Button("Pause (keeps what's done)", role: .cancel) { finder.cancel() }
+                        }
                     }
                 }
                 if let learned = finder.learned {
                     Section("In use") {
-                        LabeledContent("\(learned.header) 22\(learned.did)",
+                        LabeledContent(DPFHistoryFinder.title(learned.header, learned.did, learned.span),
                                        value: learned.confirmed ? "confirmed" : "picked by hand")
                         if let history = finder.history {
                             Text(historyText(history))
@@ -526,25 +529,34 @@ struct DPFHistoryFinderView: View {
                     }
                 }
                 Section {
-                    Button("Scan the PCM (once, a few minutes)") { finder.scan() }
+                    Toggle("Extended session (10 03)", isOn: $finder.extendedSession)
+                        .disabled(finder.isBusy)
+                    Button(scanTitle) { finder.scan() }
                         .disabled(finder.isBusy)
                     Button("Read the candidates again now") { finder.refresh() }
                         .disabled(finder.isBusy || finder.candidates.isEmpty)
                 } header: {
                     Text("Find it")
                 } footer: {
-                    Text("Car parked, ignition on (engine running is fine). The scan reads every PCM value in "
-                         + "7E0 0300–04FF and keeps the ones 10 bytes or longer. Then just drive: after the next "
-                         + "regeneration they're read again, and the one whose entries moved along by one is "
-                         + "used automatically.")
+                    Text(scanFooter)
+                }
+                if let state = finder.scanState {
+                    scanSection(state)
                 }
                 if !finder.candidates.isEmpty {
                     Section("Candidates, best first") {
                         ForEach(finder.candidates) { candidate in
                             candidateRow(candidate)
                         }
-                        Button("Reset candidates", role: .destructive) { finder.resetCandidates() }
-                            .disabled(finder.isBusy)
+                    }
+                }
+                manualSection
+                if finder.scanState != nil || !finder.candidates.isEmpty {
+                    Section {
+                        Button("Start over (forget the scan and candidates)", role: .destructive) {
+                            finder.resetCandidates()
+                        }
+                        .disabled(finder.isBusy)
                     }
                 }
             }
@@ -557,26 +569,112 @@ struct DPFHistoryFinderView: View {
         }
     }
 
+    private var isScanning: Bool {
+        if case .scanning = finder.phase { return true }
+        return false
+    }
+
+    private var scanFooter: String {
+        let plan = "Scans \(DPFHistoryFinder.planText) (\(DPFHistoryFinder.planCount) DIDs) a chunk at a time, "
+        var text = "Car parked, engine running (ignition only drains the battery over this long). " + plan
+        text += "so live data and Power Mode keep going. Pause, driving off or losing the adapter keeps "
+        text += "what's done; Scan carries on from there. Looks for one DID holding 10 distances, or a row "
+        text += "of 10 DIDs holding one each. Then just drive: after the next regeneration the candidates "
+        text += "are read again, and the one whose entries moved along by one is used automatically.\n\n"
+        text += "Extended session: some values only answer there (dealer tools use it). Reading only; the "
+        text += "PCM drops back to normal by itself a few seconds after the last request. Switching it "
+        text += "starts the scan from the start again (what was found is kept)."
+        return text
+    }
+
+    private var scanTitle: String {
+        if finder.resumes, let state = finder.scanState {
+            return "Carry on scanning (\(state.done) / \(state.total), about \(finder.minutesLeft) min)"
+        }
+        if finder.scanState?.isComplete == true, finder.scanState?.extended == finder.extendedSession {
+            return "Scan again from the start (about \(finder.minutesLeft) min)"
+        }
+        return "Scan the PCM (about \(finder.minutesLeft) min, can be done in parts)"
+    }
+
+    private func scanSection(_ state: DPFHistoryFinder.ScanState) -> some View {
+        Section {
+            LabeledContent("Asked", value: "\(state.done) / \(state.total)")
+            LabeledContent("Session", value: state.extended ? "extended (10 03)" : "default")
+            LabeledContent("Answer", value: "\(state.answers.count)")
+            LabeledContent("Change by themselves", value: "\(state.unsteady.count)")
+            LabeledContent("Refused", value: "\(state.refused.count)")
+            if !state.refused.isEmpty {
+                DisclosureGroup("Refused DIDs (they exist, but not like this)") {
+                    ForEach(refusedLines(state), id: \.self) { line in
+                        Text(line).font(.system(.caption2, design: .monospaced))
+                    }
+                }
+            }
+            if let url = finder.exportURL {
+                ShareLink("Export raw scan (send to me)", item: url)
+            }
+        } header: {
+            Text("Scan so far")
+        } footer: {
+            Text("Refused with 7F/7E (not in this session) or 33 (security): try the extended session. "
+                 + "The export has every reply, for looking through by hand.")
+        }
+    }
+
+    private var manualSection: some View {
+        Section {
+            HStack {
+                TextField("0435 or 0435-043E", text: $manualDIDs)
+                    .textInputAutocapitalization(.characters)
+                    .autocorrectionDisabled()
+                    .font(.system(.body, design: .monospaced))
+                Button("Read") { finder.readByHand(manualDIDs) }
+                    .buttonStyle(.borderless)
+                    .disabled(finder.isBusy || manualDIDs.isEmpty)
+            }
+            ForEach(finder.manualReads) { read in
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(read.request).font(.caption.bold())
+                    Text(read.result).font(.system(.caption2, design: .monospaced))
+                }
+            }
+        } header: {
+            Text("Read by hand")
+        } footer: {
+            Text("Reads PCM (7E0) DIDs as they are — one, a range or several, up to 64 — in the extended "
+                 + "session when it's switched on above.")
+        }
+    }
+
+    private func refusedLines(_ state: DPFHistoryFinder.ScanState) -> [String] {
+        state.refused.keys.sorted().map { key in
+            let code = state.refused[key] ?? 0
+            return key + String(format: "  7F 22 %02X ", code) + ELM327.negativeResponseName(code)
+        }
+    }
+
     private func candidateRow(_ candidate: DPFHistoryFinder.Candidate) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Text("\(candidate.header) 22\(candidate.did)").font(.subheadline.bold())
+                Text(DPFHistoryFinder.title(candidate.header, candidate.did, candidate.span))
+                    .font(.subheadline.bold())
                 Spacer()
                 Text(verdictText(candidate))
                     .font(.caption)
-                    .foregroundColor(candidate.verdict == true ? .green : .secondary)
+                    .foregroundColor(candidate.verdict == true || candidate.oneEntryChanged == true
+                                     ? .green : .secondary)
             }
             Text(DPFHistoryFinder.plausibility(candidate)).font(.caption).foregroundStyle(.secondary)
-            Text(candidate.bytes.map { String(format: "%02X", $0) }.joined(separator: " "))
+            Text(DPFHistoryFinder.hex(candidate.bytes))
                 .font(.system(.caption2, design: .monospaced))
-            if candidate.bytes.count >= AppConfig.DPF.historyEntries {
-                Text("×\(Int(AppConfig.DPF.historyKmPerUnit)) km: " + kmPreview(candidate.bytes))
-                    .font(.system(.caption2, design: .monospaced))
-                    .foregroundStyle(.secondary)
-            }
-            if finder.learned?.did != candidate.did, candidate.verdict != false {
+            Text(DPFHistoryFinder.kmPreview(candidate))
+                .font(.system(.caption2, design: .monospaced))
+                .foregroundStyle(.secondary)
+            if finder.learned?.id != candidate.id, candidate.verdict != false {
                 Button("Use this one") { finder.use(candidate) }
                     .font(.caption)
+                    .buttonStyle(.borderless)
                     .disabled(finder.isBusy)
             }
         }
@@ -587,16 +685,11 @@ struct DPFHistoryFinderView: View {
         case true?: return "✓ shifted after a regeneration"
         case false?: return "ruled out"
         case nil:
+            if candidate.oneEntryChanged == true { return "one entry changed after a regeneration" }
             return candidate.unshiftedChecks > 0
                 ? "not shifted yet (\(candidate.unshiftedChecks))"
                 : "waiting for a regeneration"
         }
-    }
-
-    private func kmPreview(_ bytes: [UInt8]) -> String {
-        bytes.prefix(AppConfig.DPF.historyEntries)
-            .map { String(Int(Double($0) * AppConfig.DPF.historyKmPerUnit)) }
-            .joined(separator: " ")
     }
 
     private func historyText(_ history: [Double]) -> String {
@@ -609,10 +702,14 @@ struct DPFHistoryFinderView: View {
         switch finder.phase {
         case .idle:
             return nil
-        case .scanning(let done, let total):
-            return (total > 0 ? Double(done) / Double(total) : 0, "Scanning \(done) / \(total)")
+        case .scanning(let done, let total, let next):
+            var label = "Scanning \(done) / \(total) · next \(next)"
+            if let left = finder.timeLeft {
+                label += " · about \(max(1, Int((left / 60).rounded(.up)))) min left"
+            }
+            return (total > 0 ? Double(done) / Double(total) : 0, label)
         case .reading:
-            return (1, "Reading the candidates…")
+            return (1, "Reading the PCM…")
         }
     }
 }

@@ -6,8 +6,17 @@
 //      snapshots of the PCM's DIDs with i-stop on and off (SignalDiff, like the M flag). Read-only
 //      and reliable; this is what lets the auto-off confirm it worked.
 //   2. an observed CAN frame that changes while the OFF button is held. The physical button is a
-//      resistor ladder read by the instrument cluster. A changed frame is only a replay candidate;
-//      rolling counters/checksums may make the captured bytes unusable (see README).
+//      resistor ladder read by the instrument cluster, which reports it to the PCM on HS-CAN. A changed
+//      frame is only a replay candidate; rolling counters/checksums may make the captured bytes
+//      unusable (see README).
+//      One capture of the whole bus overflows the adapter (well over 1000 frames a second), so the bus is
+//      first MAPPED in small blocks of CAN ids (census: a block that overflows is split in two), then
+//      SWEPT one block per press: released → held → released again, with spoken "Hold" / "Release"
+//      prompts and the state flag read before and after to prove the press registered. A bit that is set
+//      only while held is the button (momentary); one that stays after release is the i-stop status echo
+//      (latched).
+//   3. which modules this adapter reaches (one harmless tester present each), and — if the start stop
+//      unit answers — its as-built block, read-only: that's where the i-stop default lives.
 //
 // Parked, engine running. Everything runs between two rounds of live data (OBDAdapter.runBetweenRounds),
 // like the M and door finders.
@@ -23,7 +32,9 @@ final class IStopFinder: ObservableObject {
         case idle
         case scanning(done: Int, total: Int)
         case snapshot(label: String, done: Int, total: Int)
-        case capturing(String)
+        case census(looks: Int, groups: Int)
+        case sweep(group: Int, of: Int)
+        case checking
     }
 
     @Published private(set) var phase: Phase = .idle
@@ -36,11 +47,23 @@ final class IStopFinder: ObservableObject {
     @Published private(set) var stateCandidates: [SignalDiff.Candidate] = []
     @Published private(set) var learnedState: BitSignal?
 
-    // Button (bus capture diff)
-    @Published private(set) var idleCaptures = 0       // nothing pressed
-    @Published private(set) var pressedCaptures = 0    // OFF button held
-    @Published private(set) var frameCandidates: [FrameDiff.Candidate] = []
+    // Button (bus map + guided sweep)
+    /// The bus map: blocks of CAN ids small enough for one look (kept on the phone).
+    @Published private(set) var groups: [SweepGroup] = []
+    /// Groups swept so far in the last sweep.
+    @Published private(set) var sweptGroups = 0
+    /// Frames that changed while the OFF button was held, best first.
+    @Published private(set) var sweepCandidates: [SweepCandidate] = []
+    /// The instruction in large type during the sweep ("HOLD the i-stop OFF button"); nil otherwise.
+    @Published private(set) var prompt: String?
     @Published private(set) var learnedFrame: FrameSignal?
+
+    // Modules (read-only)
+    @Published private(set) var modules: [ModuleCheck] = []
+    /// The start stop unit's as-built lines, FORScan style; empty while not read.
+    @Published private(set) var ssuAsBuilt: [String] = []
+    /// What 731-01-01 byte B1 bit 4 says about i-stop at start; nil while not read.
+    @Published private(set) var ssuIStopDefault: String?
 
     /// What to do next / what happened.
     @Published private(set) var message = ""
@@ -56,19 +79,23 @@ final class IStopFinder: ObservableObject {
     private let controller: IStopController
     private var onShots: [SignalDiff.Snapshot] = []
     private var offShots: [SignalDiff.Snapshot] = []
-    private var idleBus: [FrameDiff.Capture] = []
-    private var pressedBus: [FrameDiff.Capture] = []
+    private var sweepShots: [SweepShot] = []
     private var cancelRequested = false
+    /// Speaks a sweep prompt (VoiceCoordinator, set by AppModel).
+    private let announce: ((String) -> Void)?
 
     private static let supportedKey = "IStopFinder.supported"
     private static let planKey = "IStopFinder.scanPlan"
     private static let stateKey = "IStopFinder.state"
     private static let frameKey = "IStopFinder.frame"
+    private static let groupsKey = "IStopFinder.busMap"
 
-    init(obd: OBDAdapter, controller: IStopController) {
+    init(obd: OBDAdapter, controller: IStopController, announce: ((String) -> Void)? = nil) {
         self.obd = obd
         self.controller = controller
+        self.announce = announce
         supported = Self.loadSupported()
+        groups = Self.loadGroups()
         learnedState = Self.loadState()
         learnedFrame = Self.loadFrame()
         obd.iStopSignal = learnedState
@@ -80,16 +107,17 @@ final class IStopFinder: ObservableObject {
 
     func scan() { Task { await runScan() } }
     func snapshotState(off: Bool) { Task { await takeStateSnapshot(off: off) } }
-    func captureBus(pressed: Bool) { Task { await takeCapture(pressed: pressed) } }
+    func census() { Task { await runCensus() } }
+    func sweep() { Task { await runSweep() } }
+    func checkModules() { Task { await runModuleCheck() } }
     func cancel() { cancelRequested = true }
 
     /// Forget the snapshots and captures taken so far (what's saved stays).
     func resetWork() {
         onShots = []; offShots = []
-        idleBus = []; pressedBus = []
         onSnapshots = 0; offSnapshots = 0
-        idleCaptures = 0; pressedCaptures = 0
-        stateCandidates = []; frameCandidates = []
+        stateCandidates = []
+        sweepShots = []; sweepCandidates = []; sweptGroups = 0
         exportURL = nil
         message = nextStep
     }
@@ -113,9 +141,9 @@ final class IStopFinder: ObservableObject {
         } else if !stateCandidates.isEmpty {
             skipped.append("state needs two ON and two OFF snapshots with one clear candidate")
         }
-        let frameConfirmed = idleBus.count >= 2 && pressedBus.count >= 2
-            && FrameDiff.isUnambiguous(frameCandidates)
-        if frameConfirmed, let best = frameCandidates.first {
+        // The button: a bit set only while held (momentary), from a press that really registered.
+        let buttons = sweepCandidates.filter { $0.kind == .momentary && $0.toggled != false }
+        if let best = buttons.first {
             let frame = best.frame
             if let data = try? JSONEncoder().encode(frame) {
                 UserDefaults.standard.set(data, forKey: Self.frameKey)
@@ -123,8 +151,8 @@ final class IStopFinder: ObservableObject {
             learnedFrame = frame
             controller.buttonFrame = frame
             saved.append("button " + frame.label())
-        } else if !frameCandidates.isEmpty {
-            skipped.append("button needs two released and two held captures with one clear candidate")
+        } else if !sweepCandidates.isEmpty {
+            skipped.append("no frame changed only while the button was held (see the list)")
         }
         if !saved.isEmpty { message = "Saved. " + nextStep }
         else if !skipped.isEmpty { message = skipped.joined(separator: "; ") }
@@ -219,52 +247,179 @@ final class IStopFinder: ObservableObject {
         }
     }
 
-    // MARK: Bus captures (the OFF button frame)
+    // MARK: Bus map (census)
 
-    private func takeCapture(pressed: Bool) async {
-        guard canStart() else { return }
-        let label = pressed ? "OFF held" : "nothing pressed"
+    /// Maps the bus: looks at all 11-bit ids, and splits every block that overflows the adapter (or is
+    /// busier than AppConfig.IStop.maxGroupRate) in two, until each block fits one look. No buttons.
+    private func runCensus() async {
+        guard canStart(engineRunning: false) else { return }
         cancelRequested = false
-        phase = .capturing(label)
-        let captured: [(id: String, data: [UInt8])]? =
-            await obd.runBetweenRounds { adapter in await adapter.captureAllFrames(within: Tuning.captureListen) } ?? nil
+        phase = .census(looks: 0, groups: 0)
+        message = "Mapping the bus… live data pauses for about a minute. Don't touch any buttons."
+        let found: [SweepGroup]? = await obd.runBetweenRounds { [self] (adapter: OBDAdapter) -> [SweepGroup]? in
+            var queue: [(base: Int, size: Int)] = [(base: 0, size: 0x800)]
+            var mapped: [SweepGroup] = []
+            var looks = 0
+            while !queue.isEmpty, !cancelRequested {
+                let block = queue.removeFirst()
+                guard let look = await adapter.captureBlock(base: block.base, size: block.size,
+                                                            within: Tuning.censusListen) else { return nil }
+                looks += 1
+                let rate = Double(look.frames.count) / Tuning.censusListen
+                if look.overflowed || rate > Tuning.maxGroupRate, block.size > 1 {
+                    let half = block.size / 2
+                    queue.insert(contentsOf: [(base: block.base, size: half),
+                                              (base: block.base + half, size: half)], at: 0)
+                } else if !look.frames.isEmpty {
+                    let ids = Array(Set(look.frames.map { $0.id })).sorted()
+                    mapped.append(SweepGroup(base: block.base, size: block.size, ids: ids, rate: rate))
+                }
+                phase = .census(looks: looks, groups: mapped.count)
+            }
+            return mapped.sorted { $0.base < $1.base }
+        } ?? nil
         phase = .idle
-        if cancelRequested { message = "Capture cancelled"; return }
-        guard let captured, !captured.isEmpty else {
-            message = "Nothing captured on the bus — the adapter may not monitor all frames (see the log). "
-                + "The state flag still works without this; the button can't be replayed."
+        if cancelRequested { message = "Mapping cancelled"; return }
+        guard let found else {
+            message = "The adapter couldn't capture one block of ids (ATCF/ATCM refused, or live data "
+                + "stopped) — see the log."
             return
         }
-        let group = grouped(captured)
-        if pressed { pressedBus.append(group); pressedCaptures = pressedBus.count }
-        else { idleBus.append(group); idleCaptures = idleBus.count }
-        exportURL = writeExport()
-        onLog?("i-stop finder: captured \(label): \(captured.count) frames, \(group.count) ids")
-        compareFrame()
+        groups = found
+        if let data = try? JSONEncoder().encode(found) { UserDefaults.standard.set(data, forKey: Self.groupsKey) }
+        let ids = found.reduce(0) { $0 + $1.ids.count }
+        onLog?("i-stop finder: bus map: \(ids) ids in \(found.count) groups: "
+               + found.map { $0.label }.joined(separator: ", "))
+        sweepShots = []; sweepCandidates = []; sweptGroups = 0
+        message = found.isEmpty ? "Nothing heard on the bus — see the log." : nextStep
     }
 
-    private func compareFrame() {
-        guard !idleBus.isEmpty, !pressedBus.isEmpty else { message = nextStep; return }
-        let ignored: Set<String> = [AppConfig.TurnSignals.frameID.uppercased()]
-        frameCandidates = FrameDiff.candidates(idleCaptures: idleBus, pressedCaptures: pressedBus, ignoredIDs: ignored)
-        guard let best = frameCandidates.first else {
-            message = "No frame changed between released and held. Capture both again (hold the OFF button the "
-                + "whole 2 s), or the button may not be on the bus — use FORScan coding instead (README)."
+    // MARK: Guided sweep (the OFF button)
+
+    /// One press per group: released → "Hold" → held → "Release" → released again, the state flag read
+    /// before and after. Engine running (a held OFF button with the engine off right after ignition
+    /// starts the battery-management reset), parked.
+    private func runSweep() async {
+        guard canStart(engineRunning: true) else { return }
+        guard !groups.isEmpty else { message = "Map the bus first"; return }
+        // The OFF button is only held with the engine running: held with the engine off right after
+        // ignition, it starts the battery-management reset.
+        guard await obd.isEngineRunningForIStop() else {
+            message = "Start the engine first (the OFF button is only held with the engine running)"
             return
         }
-        let enough = idleBus.count >= 2 && pressedBus.count >= 2
-        if enough, FrameDiff.isUnambiguous(frameCandidates) {
-            let frame = best.frame
-            if let data = try? JSONEncoder().encode(frame) {
-                UserDefaults.standard.set(data, forKey: Self.frameKey)
+        let plan = groups
+        let state = learnedState
+        cancelRequested = false
+        sweepShots = []; sweepCandidates = []; sweptGroups = 0
+        phase = .sweep(group: 0, of: plan.count)
+        let shots: [SweepShot]? = await obd.runBetweenRounds { [self] (adapter: OBDAdapter) -> [SweepShot]? in
+            var taken: [SweepShot] = []
+            for (index, group) in plan.enumerated() {
+                if cancelRequested { break }
+                let step = "\(index + 1) of \(plan.count)"
+                phase = .sweep(group: index + 1, of: plan.count)
+                let before = await readState(adapter, state)
+                prompt = "\(step): hands off the buttons…"
+                guard let released = await adapter.captureBlock(base: group.base, size: group.size,
+                                                                within: Tuning.sweepListen) else { return nil }
+                prompt = "\(step): HOLD the i-stop OFF button"
+                announce?(Tuning.holdPhrase)
+                try? await Task.sleep(for: Tuning.holdLead)
+                guard let held = await adapter.captureBlock(base: group.base, size: group.size,
+                                                            within: Tuning.sweepHeld) else { return nil }
+                prompt = "\(step): RELEASE the button"
+                announce?(Tuning.releasePhrase)
+                try? await Task.sleep(for: Tuning.releaseLead)
+                guard let after = await adapter.captureBlock(base: group.base, size: group.size,
+                                                             within: Tuning.sweepListen) else { return nil }
+                let afterState = await readState(adapter, state)
+                var toggled: Bool?
+                if let before, let afterState { toggled = before != afterState }
+                taken.append(SweepShot(group: group, before: grouped(released.frames), held: grouped(held.frames),
+                                       after: grouped(after.frames), toggled: toggled))
+                sweptGroups = taken.count
             }
-            learnedFrame = frame
-            controller.buttonFrame = frame
-            message = "Found the OFF button: \(frame.label()). " + nextStep
-            onLog?("i-stop finder: button frame in use: \(frame.label())")
+            return taken
+        } ?? nil
+        prompt = nil
+        phase = .idle
+        guard let shots else {
+            message = "Live data stopped during the sweep — check the adapter and try again"
+            return
+        }
+        sweepShots = shots
+        exportURL = writeExport()
+        sweepCandidates = ButtonSweep.analyse(shots)
+        let missed = shots.filter { $0.toggled == false }.map { $0.group.label }
+        onLog?("i-stop finder: swept \(shots.count) groups, \(sweepCandidates.count) changed frame(s)"
+               + (missed.isEmpty ? "" : "; press not registered in " + missed.joined(separator: ", ")))
+        for candidate in sweepCandidates.prefix(5) { onLog?("i-stop finder: " + candidate.label) }
+        if let best = sweepCandidates.first(where: { $0.kind == .momentary && $0.toggled != false }) {
+            message = "Button candidate: \(best.label). Tap Use what was found, then Press OFF now — the "
+                + "state above shows whether the car took it."
+        } else if sweepCandidates.contains(where: { $0.kind == .latched }) {
+            message = "Only the i-stop status echo changed (it stays after release), not the button itself. "
+                + (missed.isEmpty ? "" : "The press didn't register in \(missed.count) group(s): sweep again. ")
+                + "Export the raw sweep and send it to me."
         } else {
-            message = "\(frameCandidates.count) button candidate(s), best: \(best.frame.label()). "
-                + "Capture released and held once more to confirm, then Use it."
+            message = "No frame changed while the button was held"
+                + (missed.isEmpty ? "." : " (the press didn't register in \(missed.count) group(s) — sweep again).")
+                + " Export the raw sweep and send it to me."
+        }
+    }
+
+    /// The learned state flag, read inside a job: true = i-stop off. nil without a learned flag.
+    private func readState(_ adapter: OBDAdapter, _ signal: BitSignal?) async -> Bool? {
+        guard let signal else { return nil }
+        let data = await adapter.readDID(signal.did, from: signal.header, complete: false,
+                                         timeout: AppConfig.OBD.replyTimeout)
+        return signal.isOn(data)
+    }
+
+    // MARK: Modules (read-only)
+
+    /// One tester present (3E00) to each module in AppConfig.IStop.moduleChecks; if the start stop unit
+    /// answers, its as-built DIDs are read (service 22, read-only) and shown FORScan style.
+    private func runModuleCheck() async {
+        guard canStart(engineRunning: false) else { return }
+        phase = .checking
+        let list = Tuning.moduleChecks
+        let result: (checks: [ModuleCheck], asBuilt: [String: [UInt8]])? = await obd.runBetweenRounds { adapter in
+            var checks: [ModuleCheck] = []
+            for module in list {
+                let answers = await adapter.answersTesterPresent(module.header)
+                checks.append(ModuleCheck(header: module.header, name: module.name, answers: answers))
+            }
+            var asBuilt: [String: [UInt8]] = [:]
+            if checks.contains(where: { $0.header == Tuning.ssuHeader && $0.answers == true }) {
+                for did in Tuning.asBuiltDIDs {
+                    if let data = await adapter.readDID(did, from: Tuning.ssuHeader, complete: true,
+                                                        timeout: AppConfig.OBD.probeTimeout), !data.isEmpty {
+                        asBuilt[did] = data
+                    }
+                }
+            }
+            return (checks: checks, asBuilt: asBuilt)
+        }
+        phase = .idle
+        guard let result else { message = "Live data stopped during the check — try again"; return }
+        modules = result.checks
+        ssuAsBuilt = AsBuilt.lines(module: Tuning.ssuHeader, blocks: result.asBuilt)
+        ssuIStopDefault = AsBuilt.iStopDefault(result.asBuilt["DE00"])
+        let summary = result.checks.map { "\($0.header) " + ($0.answers == true ? "answers" : "silent") }
+        onLog?("i-stop finder: modules: " + summary.joined(separator: ", "))
+        if !ssuAsBuilt.isEmpty { onLog?("i-stop finder: SSU as-built: " + ssuAsBuilt.joined(separator: " | ")) }
+        let ssuAnswers = result.checks.contains { $0.header == Tuning.ssuHeader && $0.answers == true }
+        if !ssuAnswers {
+            message = "The start stop unit (731) doesn't answer through this adapter: on this car it isn't on "
+                + "the bus the KW905 reaches, so its i-stop setting needs an MS-CAN capable adapter."
+        } else if ssuAsBuilt.isEmpty {
+            message = "The start stop unit answers, but won't hand out its as-built data without a diagnostic "
+                + "session (FORScan opens one)."
+        } else {
+            message = "Start stop unit answers and its as-built block was read (read-only): i-stop "
+                + (ssuIStopDefault ?? "default unknown") + "."
         }
     }
 
@@ -276,9 +431,13 @@ final class IStopFinder: ObservableObject {
         return out
     }
 
-    private func canStart() -> Bool {
+    private func canStart(engineRunning: Bool = false) -> Bool {
         guard !isBusy else { return false }
         guard obd.isReady else { message = "Connect the adapter and start the engine first"; return false }
+        if engineRunning, let speed = obd.sample?.speed, speed >= 1 {
+            message = "Stop the car first"
+            return false
+        }
         return true
     }
 
@@ -296,23 +455,32 @@ final class IStopFinder: ObservableObject {
             return "State: press the real OFF button so i-stop shows OFF → Snapshot i-stop OFF, press again so "
                 + "it shows ON → Snapshot i-stop ON. Repeat once. (\(state), \(button))"
         }
-        return "Button: Capture (nothing pressed), then hold the OFF button and Capture (OFF held). Twice each, "
-            + "then Use it. (\(state), \(button))"
+        if groups.isEmpty {
+            return "Button: Map the bus (once, no buttons), then the Guided sweep: hold the OFF button each time "
+                + "the phone says \"Hold\", let go at \"Release\". (\(state), \(button))"
+        }
+        return "Button: Guided sweep — \(groups.count) short presses; hold at \"Hold\", let go at \"Release\". "
+            + "(\(state), \(button))"
     }
 
+    /// The raw sweep (every group: released / held / released again) as a JSON file to share.
     private func writeExport() -> URL? {
-        guard !idleBus.isEmpty || !pressedBus.isEmpty else { return nil }
-        func shots(_ captures: [FrameDiff.Capture], _ scene: String) -> [DoorExport.Shot] {
-            captures.enumerated().map { (index, capture) -> DoorExport.Shot in
-                let reads = capture.mapValues { frames in frames.map { $0.map { String(format: "%02X", $0) }.joined(separator: " ") } }
-                return DoorExport.Shot(scene: "\(scene) #\(index + 1)", reads: reads)
-            }
+        guard !sweepShots.isEmpty else { return nil }
+        func reads(_ capture: FrameDiff.Capture) -> [String: [String]] {
+            capture.mapValues { frames in frames.map { $0.map { String(format: "%02X", $0) }.joined(separator: " ") } }
+        }
+        var shots: [DoorExport.Shot] = []
+        for shot in sweepShots {
+            let flipped = shot.toggled.map { $0 ? "state flipped" : "state NOT flipped" } ?? "state unknown"
+            let name = "ids " + shot.group.label + " · " + flipped
+            shots.append(DoorExport.Shot(scene: name + " · released", reads: reads(shot.before)))
+            shots.append(DoorExport.Shot(scene: name + " · held", reads: reads(shot.held)))
+            shots.append(DoorExport.Shot(scene: name + " · released again", reads: reads(shot.after)))
         }
         let export = DoorExport(car: "Mazda CX-5 2.2D 2015",
-                                takenAt: ISO8601DateFormatter().string(from: Date()),
-                                shots: shots(idleBus, "i-stop released") + shots(pressedBus, "i-stop held"))
+                                takenAt: ISO8601DateFormatter().string(from: Date()), shots: shots)
         guard let data = try? JSONEncoder.pretty.encode(export) else { return nil }
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("autobot-istop-scan.json")
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("autobot-istop-sweep.json")
         do { try data.write(to: url); return url } catch { return nil }
     }
 
@@ -324,6 +492,11 @@ final class IStopFinder: ObservableObject {
     private static func loadFrame() -> FrameSignal? {
         guard let data = UserDefaults.standard.data(forKey: frameKey) else { return nil }
         return try? JSONDecoder().decode(FrameSignal.self, from: data)
+    }
+
+    private static func loadGroups() -> [SweepGroup] {
+        guard let data = UserDefaults.standard.data(forKey: groupsKey) else { return [] }
+        return (try? JSONDecoder().decode([SweepGroup].self, from: data)) ?? []
     }
 
     private static func loadSupported() -> [String] {
