@@ -88,7 +88,7 @@ private struct DashboardView: View {
             DrivingView(obd: app.obd, speed: app.speed, manual: app.manual)
             MFinderButton(finder: app.mFinder, obd: app.obd, manual: app.manual)
             if AppConfig.DPF.enabled {
-                DPFMonitorButton(monitor: app.dpf, log: app.dpfLog, finder: app.dpfHistory)
+                DPFMonitorButton(monitor: app.dpf, log: app.dpfLog, finder: app.dpfHistory, recorder: app.dpfRecorder)
             }
             if AppConfig.OBD.selectorDiagnostics {
                 SelectorDiagnosticsView(obd: app.obd)
@@ -107,8 +107,8 @@ private struct DashboardView: View {
             if AppConfig.TurnSignals.enabled {
                 TurnSignalTestView(flash: app.turnSignals, obd: app.obd, onTest: app.testTurnSignal)
             }
-            if AppConfig.IStop.enabled {
-                IStopView(controller: app.iStop, finder: app.iStopFinder, obd: app.obd)
+            if AppConfig.Rain.enabled {
+                RainModeView(rain: app.rain, finder: app.wiperFinder, obd: app.obd, onTest: app.testRain)
             }
             if AppConfig.Climate.enabled {        // hidden until there's an MS-CAN adapter
                 ClimateTestView(climate: app.climate, obd: app.obd, onTest: app.testClimate)
@@ -232,6 +232,7 @@ private struct SceneIndicator: View {
         case .purpleBurstFlash: return Color(red: 0.5, green: 0, blue: 1)
         case .blueBurstFlash: return .blue
         case .yellowBreathing: return .yellow
+        case .cyanBreathing: return .cyan
         case .redBreathing, .redBurstFlash: return .red
         }
     }
@@ -240,7 +241,7 @@ private struct SceneIndicator: View {
         let t = date.timeIntervalSinceReferenceDate
         switch scene {
         case .purpleSteady: return 1
-        case .redBreathing, .yellowBreathing:
+        case .redBreathing, .yellowBreathing, .cyanBreathing:
             return 0.25 + 0.75 * (0.5 + 0.5 * sin(t * 2 * .pi / 2.5))                   // ~2.5 s breath
         case .redBurstFlash, .blueBurstFlash, .purpleBurstFlash: return Int(t * 8) % 2 == 0 ? 1 : 0.1   // fast flash
         }
@@ -399,6 +400,245 @@ private struct TurnSignalTestView: View {
         case true?: return now + "  ·  from the car, \(frame): \(obd.lightsFrame.map { TurnSignals.hex($0) } ?? "--")"
         case false?: return now + "  ·  frame \(frame) not heard on the bus: test buttons only (see the log)"
         case nil: return now + "  ·  listened for once live data runs"
+        }
+    }
+}
+
+/// Rain mode (RainMode): cyan gradient breathing while it rains as far as the wipers say — LO / HI at
+/// once, AUTO / INT once they really wipe. The lever comes from frame 09A, the wiping in AUTO / INT from
+/// the front body control module; Rain stands in for both, Wiper finder finds this car's bits.
+private struct RainModeView: View {
+    @ObservedObject var rain: RainMode
+    @ObservedObject var finder: WiperFinder
+    @ObservedObject var obd: OBDAdapter
+    let onTest: () -> Void
+    @State private var showingFinder = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text("Rain mode").font(.headline)
+                Spacer()
+                Button("Wiper finder") { showingFinder = true }
+                Button("Rain") { onTest() }
+                    .tint(rain.simulated ? .cyan : .gray)
+            }
+            .font(.caption)
+            .buttonStyle(.bordered)
+            Text(statusText)
+                .font(.caption2)
+                .foregroundColor(rain.isOn ? .cyan : .secondary)
+        }
+        .sheet(isPresented: $showingFinder) {
+            WiperFinderView(finder: finder, rain: rain, obd: obd)
+        }
+    }
+
+    /// Now, the lever (in AUTO / INT: the wiper motor), and where the bits come from.
+    private var statusText: String {
+        let now = rain.isOn ? "Raining → cyan breathing" : "Dry"
+        if rain.simulated { return now + " (simulated)" }
+        var parts = [now, "wipers " + (rain.confirmed?.label ?? "--") + (rain.washing ? " + washer" : "")]
+        if rain.confirmed == .auto { parts.append(rain.autoStatus) }
+        parts.append(finder.learnedLever != nil ? "lever bits checked" : "lever bits built in")
+        if obd.hearsLightsFrame == false { parts.append("frame \(AppConfig.TurnSignals.frameID) not heard") }
+        return parts.joined(separator: "  ·  ")
+    }
+}
+
+/// Finds this car's wiper bits (WiperFinder): the lever check (frame 09A in each position) and the wiper
+/// motor (front body control module: parked, wiping, then traces of one wipe).
+private struct WiperFinderView: View {
+    @ObservedObject var finder: WiperFinder
+    @ObservedObject var rain: RainMode
+    @ObservedObject var obd: OBDAdapter
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("Status") {
+                    if !finder.message.isEmpty {
+                        Text(finder.message)
+                    }
+                    if let progress {
+                        if let value = progress.value {
+                            ProgressView(value: value) { Text(progress.label).font(.caption) }
+                        } else {
+                            ProgressView { Text(progress.label).font(.caption) }
+                        }
+                        Button("Cancel", role: .cancel) { finder.cancel() }
+                    }
+                    if let until = traceEnds {
+                        TimelineView(.periodic(from: .now, by: 0.25)) { context in
+                            Text("NOW: lever → AUTO / INT and hold it · "
+                                 + "\(max(0, Int(until.timeIntervalSince(context.date).rounded(.up)))) s")
+                                .font(.headline)
+                                .foregroundColor(.orange)
+                        }
+                    }
+                }
+                Section("Live from the car") {
+                    LabeledContent("Frame \(AppConfig.TurnSignals.frameID)",
+                                   value: obd.lightsFrame.map { Wipers.hex($0) } ?? "--")
+                        .font(.system(.caption, design: .monospaced))
+                    LabeledContent("Lever bits (\(finder.leverInUse.placeLabel))",
+                                   value: obd.lightsFrame.map { finder.leverInUse.codeText($0) } ?? "--")
+                        .font(.system(.caption, design: .monospaced))
+                    LabeledContent("Wiper lever", value: (rain.lever?.label ?? "--") + (rain.washing ? " + washer" : ""))
+                    LabeledContent("Wiper motor", value: motorText)
+                    LabeledContent("Rain mode", value: rain.isOn ? "on" : "off")
+                }
+                leverSection
+                motorSection
+                Section {
+                    if let url = finder.exportURL {
+                        ShareLink("Export raw data (send to me)", item: url)
+                    } else {
+                        Text("Export raw data — take some steps first")
+                            .foregroundColor(.secondary)
+                    }
+                } footer: {
+                    Text("Every frame, snapshot and trace taken so far, as a JSON file, so the bits can be set by "
+                         + "hand if the finder can't.")
+                }
+            }
+            .navigationTitle("Wiper finder")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+    }
+
+    private var leverSection: some View {
+        Section {
+            Text(finder.leverHint).font(.caption)
+            ForEach(WiperLeverLayout.Step.allCases) { step in
+                Button("\(step.label)  ·  \(finder.leverTakes[step] ?? 0) taken") { finder.checkLever(step) }
+                    .disabled(finder.isBusy || !obd.isReady)
+            }
+            if let layout = finder.leverResult.layout {
+                ForEach(layout.descriptions, id: \.self) { line in
+                    Text(line).font(.system(.caption, design: .monospaced))
+                }
+                Text(finder.leverResult.matchesBuiltIn ? "Same as the built-in layout." : "Not the built-in layout.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                Button("Use it for rain mode") { finder.useLever() }
+                    .disabled(finder.isBusy || finder.learnedLever == layout)
+            }
+            notes(finder.leverResult.notes)
+            if !finder.leverTakes.isEmpty {
+                Button("Reset lever takes", role: .destructive) { finder.resetLever() }
+                    .disabled(finder.isBusy)
+            }
+            ForEach(finder.leverInUse.descriptions, id: \.self) { line in
+                Text("In use: " + line)
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundColor(.secondary)
+            }
+            if finder.learnedLever != nil {
+                Button("Forget (back to the built-in layout)", role: .destructive) { finder.forgetLever() }
+                    .disabled(finder.isBusy)
+            }
+        } header: {
+            Text("1 · Lever (frame 09A)")
+        } footer: {
+            Text("Parked, engine running; each tap listens to the frame for 1.5 s, nothing else is read. Until "
+                 + "it's saved: byte 4, 02 = LO contact, 04 = INT contact (AUTO / INT 04, LO 02, HI 06).")
+        }
+    }
+
+    private var motorSection: some View {
+        Section {
+            Text(finder.motorHint).font(.caption)
+            Button("Scan the front body control module (once, a few min)") { finder.scan() }
+                .disabled(finder.isBusy || !obd.isReady)
+            LabeledContent("FBCM DIDs answering", value: finder.scanned ? "\(finder.motorDIDs.count)" : "not scanned")
+            Button("Parked (lever OFF)  ·  \(finder.parkedCount) taken") { finder.snapshotParked() }
+                .disabled(finder.isBusy || !obd.isReady || !finder.scanned)
+            Button("Wiping (lever LO)  ·  \(finder.wipingCount) taken") { finder.snapshotWiping() }
+                .disabled(finder.isBusy || !obd.isReady || !finder.scanned)
+            LabeledContent("Differ parked / wiping", value: candidatesText)
+            Button("Trace a wipe (OFF → AUTO)  ·  \(finder.traceCount) taken") { finder.traceWipe() }
+                .disabled(finder.isBusy || !obd.isReady || finder.candidates.isEmpty)
+            if let signal = finder.motorResult.signal {
+                Text("Wiping: " + signal.label).font(.system(.caption, design: .monospaced))
+                if !finder.motorResult.alternatives.isEmpty {
+                    Text("The same in " + finder.motorResult.alternatives.joined(separator: ", ") + " (not needed)")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+                Button("Use it for rain mode") { finder.useMotor() }
+                    .disabled(finder.isBusy || finder.learnedMotor == signal)
+            }
+            notes(finder.motorResult.notes)
+            if finder.parkedCount + finder.wipingCount + finder.traceCount > 0 {
+                Button("Reset motor snapshots and traces", role: .destructive) { finder.resetMotor() }
+                    .disabled(finder.isBusy)
+            }
+            Text(finder.learnedMotor.map { "In use: wiping = " + $0.label } ?? "In use: none, AUTO / INT doesn't count")
+                .font(.system(.caption2, design: .monospaced))
+                .foregroundColor(.secondary)
+            if finder.learnedMotor != nil {
+                Button("Forget the motor bit", role: .destructive) { finder.forgetMotor() }
+                    .disabled(finder.isBusy)
+            }
+        } header: {
+            Text("2 · Wiper motor (FBCM 726, for AUTO / INT)")
+        } footer: {
+            Text("Parked, engine running. Scan once, then Parked, then Wiping (a quick spray first so the blades "
+                 + "don't run dry), then Trace twice: lever OFF and wipers parked, tap Trace, and as soon as it says "
+                 + "NOW move the lever to AUTO and hold it there until the trace ends. Only bits that come and go "
+                 + "with that one wipe are kept, so there's one answer.")
+        }
+    }
+
+    private func notes(_ lines: [String]) -> some View {
+        ForEach(lines, id: \.self) { line in
+            Text(line).font(.caption2).foregroundColor(.orange)
+        }
+    }
+
+    private var candidatesText: String {
+        guard finder.parkedCount > 0, finder.wipingCount > 0 else { return "--" }
+        let dids = Set(finder.candidates.map(\.key)).count
+        return "\(finder.candidates.count) bits in \(dids) DIDs"
+    }
+
+    /// When the running trace ends; nil while none runs.
+    private var traceEnds: Date? {
+        if case .tracing(let until) = finder.phase { return until }
+        return nil
+    }
+
+    /// The wiper motor as read now (only while the lever is in AUTO / INT).
+    private var motorText: String {
+        guard finder.learnedMotor != nil else { return "not found yet" }
+        if rain.motorPaused { return "not read in M / R" }
+        switch obd.wiperMotorRunning {
+        case true?: return "wiping"
+        case false?: return "parked"
+        case nil: return rain.confirmed == .auto ? "--" : "read in AUTO / INT only"
+        }
+    }
+
+    private var progress: (value: Double?, label: String)? {
+        switch finder.phase {
+        case .idle:
+            return nil
+        case .listening(let label):
+            return (nil, "\(label): listening to frame \(AppConfig.TurnSignals.frameID)…")
+        case .scanning(let done, let total):
+            return (total > 0 ? Double(done) / Double(total) : 0, "Scanning \(done) / \(total)")
+        case .reading(let label, let done, let total):
+            return (total > 0 ? Double(done) / Double(total) : 0, "\(label): FBCM \(done) / \(total)")
+        case .waitingForTrace:
+            return (nil, "Trace: waiting for the end of the live-data round…")
+        case .tracing:
+            return (nil, "Tracing the FBCM…")
         }
     }
 }
@@ -774,229 +1014,6 @@ private struct SelectorDiagnosticsView: View {
         .padding(8)
         .background(Color.secondary.opacity(0.1))
         .cornerRadius(10)
-    }
-}
-
-/// i-stop (idling stop) auto-off (IStopController): replays the OFF button at the start of a drive so
-/// i-stop is off without pressing it. "Test off" presses now; "i-stop finder" learns this car's bits.
-private struct IStopView: View {
-    @ObservedObject var controller: IStopController
-    @ObservedObject var finder: IStopFinder
-    @ObservedObject var obd: OBDAdapter
-    @State private var showingFinder = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            HStack {
-                Text("i-stop").font(.headline)
-                Spacer()
-                Button("i-stop finder") { showingFinder = true }
-                Button("Test off") { controller.test() }
-                    .tint(.indigo)
-                    .disabled(controller.busy || finder.learnedFrame == nil || !obd.isReady)
-            }
-            .font(.caption)
-            .buttonStyle(.bordered)
-            Text(statusText)
-                .font(.caption2)
-                .foregroundColor(obd.iStopOff == true ? .green : .secondary)
-        }
-        .sheet(isPresented: $showingFinder) {
-            IStopFinderView(finder: finder, controller: controller, obd: obd)
-        }
-    }
-
-    /// i-stop now, whether the button is learned, and what the last press did.
-    private var statusText: String {
-        var parts: [String] = []
-        switch obd.iStopOff {
-        case true?: parts.append("now off")
-        case false?: parts.append("now on")
-        case nil: parts.append(finder.learnedState == nil ? "state not learned" : "state --")
-        }
-        parts.append(finder.learnedFrame == nil ? "OFF button not learned: open the i-stop finder"
-                     : "auto-off at the start of each drive")
-        if let action = controller.lastAction { parts.append(action) }
-        return parts.joined(separator: "  ·  ")
-    }
-}
-
-/// Learns this car's i-stop bits (IStopFinder): the PCM state flag (i-stop on vs off, read-only) and
-/// the OFF-button frame on the bus (released vs held, experimental — see the README).
-private struct IStopFinderView: View {
-    @ObservedObject var finder: IStopFinder
-    @ObservedObject var controller: IStopController
-    @ObservedObject var obd: OBDAdapter
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        NavigationStack {
-            List {
-                Section("Status") {
-                    Text(finder.message)
-                    if let progress {
-                        if let value = progress.value {
-                            ProgressView(value: value) { Text(progress.label).font(.caption) }
-                        } else {
-                            ProgressView { Text(progress.label).font(.caption) }
-                        }
-                        Button("Cancel", role: .cancel) { finder.cancel() }
-                    }
-                }
-                Section("Live from the car") {
-                    LabeledContent("i-stop now", value: stateText)
-                    Button("Press OFF now") { controller.test() }
-                        .disabled(controller.busy || finder.learnedFrame == nil || !obd.isReady)
-                }
-                Section {
-                    Button("Scan the PCM (once, 1–2 min)") { finder.scan() }
-                        .disabled(finder.isBusy || !obd.isReady)
-                    LabeledContent("PCM DIDs answering",
-                                   value: finder.supported.isEmpty ? "not scanned" : "\(finder.supported.count)")
-                    Button("Snapshot i-stop OFF  ·  \(finder.offSnapshots) taken") { finder.snapshotState(off: true) }
-                        .disabled(finder.isBusy || finder.supported.isEmpty)
-                    Button("Snapshot i-stop ON  ·  \(finder.onSnapshots) taken") { finder.snapshotState(off: false) }
-                        .disabled(finder.isBusy || finder.supported.isEmpty)
-                } header: {
-                    Text("1 · Find the i-stop state (read-only)")
-                } footer: {
-                    Text("Parked, engine running. Scan once. Press the real OFF button so i-stop shows OFF → "
-                         + "Snapshot i-stop OFF; press again so it shows ON → Snapshot i-stop ON. Repeat once. "
-                         + "This is what lets auto-off confirm it worked.")
-                }
-                if !finder.stateCandidates.isEmpty {
-                    Section("State candidates, best first") {
-                        ForEach(finder.stateCandidates.prefix(6)) { candidate in
-                            Text(candidate.signal.label(off: "on", on: "off") + "  ·  score \(candidate.score)")
-                                .font(.system(.caption, design: .monospaced))
-                        }
-                    }
-                }
-                if let prompt = finder.prompt {
-                    Section {
-                        Text(prompt)
-                            .font(.title2.bold())
-                            .foregroundColor(.orange)
-                    }
-                }
-                Section {
-                    Button("Map the bus (once, about a minute)") { finder.census() }
-                        .disabled(finder.isBusy || !obd.isReady)
-                    LabeledContent("Bus map", value: mapText)
-                    Button("Guided sweep  ·  \(finder.groups.count) presses") { finder.sweep() }
-                        .disabled(finder.isBusy || !obd.isReady || finder.groups.isEmpty)
-                    if finder.sweptGroups > 0 {
-                        LabeledContent("Groups swept", value: "\(finder.sweptGroups) of \(finder.groups.count)")
-                    }
-                } header: {
-                    Text("2 · Find the OFF button on the bus (experimental)")
-                } footer: {
-                    Text("Parked, engine running. Map the bus once without touching anything (small blocks of "
-                         + "CAN ids, so the adapter doesn't overflow). Then the guided sweep: each time the phone "
-                         + "says \"Hold\", press and hold the i-stop OFF button; at \"Release\" let go. One press "
-                         + "per block; the i-stop state above is checked to make sure each press counted.")
-                }
-                if !finder.sweepCandidates.isEmpty {
-                    Section("Changed frames, best first") {
-                        ForEach(finder.sweepCandidates.prefix(8)) { candidate in
-                            Text(candidate.label)
-                                .font(.system(.caption, design: .monospaced))
-                                .foregroundColor(candidate.kind == .momentary ? .primary : .secondary)
-                        }
-                    }
-                }
-                Section {
-                    Button("Check modules (read-only)") { finder.checkModules() }
-                        .disabled(finder.isBusy || !obd.isReady)
-                    ForEach(finder.modules) { module in
-                        LabeledContent("\(module.header) \(module.name)", value: moduleText(module))
-                            .font(.caption)
-                    }
-                    if let setting = finder.ssuIStopDefault {
-                        LabeledContent("i-stop at start", value: setting).font(.caption)
-                    }
-                    ForEach(finder.ssuAsBuilt, id: \.self) { line in
-                        Text(line).font(.system(.caption, design: .monospaced))
-                    }
-                } header: {
-                    Text("3 · Modules this adapter reaches")
-                } footer: {
-                    Text("One harmless \"are you there?\" each. The instrument cluster reads the OFF button; the "
-                         + "start stop unit (SSU) keeps the i-stop default in its as-built data. If the SSU answers, "
-                         + "that block is read (never written) and shown the way FORScan shows it.")
-                }
-                Section {
-                    Button("Use what was found") { finder.use() }
-                        .disabled(finder.isBusy)
-                    Button("Reset snapshots & captures", role: .destructive) { finder.resetWork() }
-                        .disabled(finder.isBusy)
-                }
-                Section("In use") {
-                    LabeledContent("State",
-                                   value: finder.learnedState.map { $0.label(off: "on", on: "off") } ?? "not learned")
-                        .font(.system(.caption, design: .monospaced))
-                    LabeledContent("OFF button", value: finder.learnedFrame.map { $0.label() } ?? "not learned")
-                        .font(.system(.caption, design: .monospaced))
-                    if finder.learnedState != nil || finder.learnedFrame != nil {
-                        Button("Forget (state and button)", role: .destructive) { finder.forget() }
-                            .disabled(finder.isBusy)
-                    }
-                }
-                Section {
-                    if let url = finder.exportURL {
-                        ShareLink("Export raw sweep (send to me)", item: url)
-                    } else {
-                        Text("Export raw sweep — run the guided sweep first").foregroundColor(.secondary)
-                    }
-                } footer: {
-                    Text("If the OFF button can't be found automatically, export the raw sweep and share the "
-                         + "file, so the frame can be worked out by hand.")
-                }
-            }
-            .navigationTitle("i-stop finder")
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
-            }
-        }
-    }
-
-    private var stateText: String {
-        switch obd.iStopOff {
-        case true?: return "OFF (disabled)"
-        case false?: return "ON (armed)"
-        case nil: return finder.learnedState == nil ? "state not learned" : "--"
-        }
-    }
-
-    private var progress: (value: Double?, label: String)? {
-        switch finder.phase {
-        case .idle:
-            return nil
-        case .scanning(let done, let total):
-            return (total > 0 ? Double(done) / Double(total) : 0, "Scanning \(done) / \(total)")
-        case .snapshot(let label, let done, let total):
-            return (total > 0 ? Double(done) / Double(total) : 0, "\(label): \(done) / \(total)")
-        case .census(let looks, let groups):
-            return (nil, "Mapping the bus: \(looks) looks, \(groups) groups")
-        case .sweep(let group, let total):
-            return (total > 0 ? Double(group) / Double(total) : 0, "Sweep \(group) / \(total)")
-        case .checking:
-            return (nil, "Checking modules…")
-        }
-    }
-
-    private var mapText: String {
-        guard !finder.groups.isEmpty else { return "not mapped" }
-        let ids = finder.groups.reduce(0) { $0 + $1.ids.count }
-        return "\(ids) ids in \(finder.groups.count) groups"
-    }
-
-    private func moduleText(_ module: ModuleCheck) -> String {
-        switch module.answers {
-        case true?: return "answers"
-        case false?: return "silent"
-        case nil: return "—"
-        }
     }
 }
 

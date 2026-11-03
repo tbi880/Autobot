@@ -13,7 +13,8 @@ assistant when the phone connects to CarPlay.
 ### Ambient lighting
 - **Power Mode when shifting by hand** (M; OBD2 Bluetooth adapter, see
   [Manual shifting detection](#manual-shifting-detection))
-  - driving in D: steady purple (zone 1 at 50 %, zone 2 at 100 %)
+  - driving in D: steady purple (zone 1 at 50 %, zone 2 at 100 %), or cyan breathing while it
+    rains (rain mode, below)
   - the M/D decision follows the car's selector after one reading. A change starts the original
     3-second red burst and voice announcement; after the flash, the current selector is checked and
     red breathing is applied if it is still in M
@@ -24,6 +25,14 @@ assistant when the phone connects to CarPlay.
   still go above it. Out of R it's Power Mode again (purple steady, red breathing
   in M). The lever is the TCM's `7E1 221E12` (`3C` in R), read every round;
   the dashboard's *R* button stands in for it.
+- **Rain mode → cyan breathing**: while it rains as far as the windshield wipers say, the lamp does
+  the firmware's *Cyan Gradient* breathing — wiper lever in **LO or HI**: at once; in **AUTO / INT**:
+  once the wipers really wipe (not the one wipe moving the lever into AUTO makes, not the washer's),
+  until 90 s after the last wipe; **OFF**: never, washer or not. Above the normal purple steady, below
+  Power Mode and reverse. The lever comes from the same CAN frame as the turn signals (no extra adapter
+  time), the wiping in AUTO / INT from one bit of the front body control module, read only while the
+  lever is there (see [Wipers](#wipers-rain-mode)); the dashboard's *Rain* button stands in for both,
+  and its *Wiper finder* finds this car's bits.
 - **Turn signals and hazard lights → current mode colour flash** (OBD2 adapter, see
   [Turn signals](#turn-signals)): while the indicators or hazard lights flash, the lamp does a purple
   burst flash in normal driving mode or a red burst flash in Power Mode. It follows mode changes while
@@ -44,8 +53,8 @@ assistant when the phone connects to CarPlay.
   door the [door finder](#doors-which-one-is-open) learned (test buttons while neither is read).
 - **Priority arbiter**: every lighting feature requests a scene with a priority, the highest
   one wins, and withdrawing a request restores the next one. From the top: door alert, turn
-  signals, A/C flash, Power Mode switch flash, then reverse / Power Mode (R and M never meet), and
-  the normal purple steady underneath everything.
+  signals, A/C flash, Power Mode switch flash, then reverse / Power Mode (R and M never meet), rain
+  mode, and the normal purple steady underneath everything.
 - **Reliable commands**: one packet at a time, mode changes are read back and resent if the
   lamp disagrees, "busy" / checksum-error replies are retried.
 - **Reconnecting**: if the lamp or the OBD2 adapter drops out, scanning starts again at once, and
@@ -58,9 +67,12 @@ assistant when the phone connects to CarPlay.
   differential pressure (back pressure) and engine RPM in large type and as two live charts on one
   time axis (1 / 3 / 10 min, touch to read a moment; regenerations shaded), plus back pressure
   plotted against RPM
-- also shown: soot accumulated (gauge, g/L) and generated, distance since the last regeneration,
-  number of regenerations, whether one is running now (banner with a timer), DPF inlet / outlet
-  pressure and temperature, exhaust gas temperatures, coolant, and the raw PCM replies
+- also shown: the soot load the PCM regenerates on (PM_ACC_DSD gauge with Mazda's 5.5 / 8 / 10 g/L
+  marks), soot accumulated and generated, distance since the last regeneration, number of
+  regenerations, whether one is running now (banner with a timer, soot at start and peak exhaust
+  temperature), DPF inlet / outlet pressure and temperature, exhaust pressure and temperatures, EGR,
+  intake shutter, boost, air flow, charge air, oil and coolant temperature, oil dilution, odometer,
+  PID 8B aftertreatment status (if answered), *Worth a look* health notes, and the raw PCM replies
 - **Regeneration history**, two ways: the PCM's own record of the last 10 regenerations (km driven
   before each; found on the car with the *History finder*, since its DID isn't published), and
   Autobot's own log from now on — every regeneration with the km before it, the soot before it,
@@ -70,42 +82,14 @@ assistant when the phone connects to CarPlay.
   voice (`AppConfig.DPF.announceRegeneration`) — and regenerations starting and finishing go to the log. Nothing is read while the screen is closed;
   while it's open, each read slots in between two rounds of live data, so Power Mode, reverse and
   the turn signals keep working. Test mode shows simulated values
-
-### i-stop auto-off
-
-Attempts to switch Mazda's **i-stop** (idling stop — the engine stopping at a standstill) off at the start of
-each drive. A few seconds after the engine is running, if the learned state says i-stop is on, it sends a
-short experimental CAN-frame replay and checks the PCM state afterward. This only runs while Autobot is
-running and connected to the OBD adapter. Tuning in `AppConfig.IStop`.
-
-Nothing about i-stop is a standard OBD2 value, so the app learns two things on the car first, with the
-**i-stop finder** (dashboard → *i-stop finder*), parked with the engine running:
-
-- **the i-stop state** (reliable): which PCM value says i-stop is armed vs disabled, found by comparing
-  snapshots taken with the OFF button pressed and not (`SignalDiff`, the same way as the M flag). Read-only;
-  this is what lets auto-off confirm it worked.
-- **the OFF button** (experimental): which CAN frame changes while the physical OFF button is held. The
-  physical button is part of the cluster switch's resistor ladder; the instrument cluster reads it and sends
-  the operation signal to the PCM on HS-CAN. One capture of the whole bus overflows the adapter, so the finder
-  first **maps the bus** in small blocks of CAN ids, then runs a **guided sweep**: one short press per block
-  (the phone says "Hold" / "Release"), each block captured released → held → released again, with the state
-  flag read before and after to prove the press registered. A bit set only while held is the button
-  (momentary); one that stays after release is the i-stop status echo (latched). A changed frame is only a
-  candidate: if it includes a rolling counter or checksum, replaying one captured copy will not reproduce a
-  real press.
-- **which modules this adapter reaches** (read-only): one tester present each to the PCM, instrument cluster,
-  body control module and start stop unit (SSU). If the SSU answers, its as-built block is read — never written
-  — and shown FORScan style, with what `731-01-01` byte B1 bit 4 says about i-stop at start.
-
-Measured on this car: the i-stop state is **`7E0 22093C`, byte 1, bit `0x10`** (`00` armed, `10` off).
-
-The press is always short — never the 3-second long-press that resets battery management — and only happens
-once the engine is actually running, never in the engine-off window where that reset lives.
-
-**Currently on** (`AppConfig.IStop.enabled = true`), but auto-off requires both a learned state and a confirmed
-frame candidate. Autobot will not press if the state is unknown, because a blind toggle could turn i-stop back
-on. Adapter acceptance is not confirmation that the PCM acted on the frame. If replay does not work, an
-inline module that simulates the switch's resistor value is a closer match to automatic i-stop devices.
+- **PM_GEN growth**: how fast the PCM's soot model (PM_GEN) fills up — g/L per 100 km since the last
+  regeneration and over the last 10 km, per hour, km left to the ~5.6 g/L that starts a regeneration —
+  against a healthy engine's 1.5–2.5 g/L per 100 km
+- **Data recorder** (see [DPF data recorder](#dpf-data-recorder)): every 30 s while live data runs, screen
+  open or not (every 10 s around a regeneration), a CSV row with the soot model, the regeneration flag,
+  count and distance, and what feeds the model — air flow, EGR, intake shutter, boost, fuel rate,
+  temperatures, pressures — plus every raw PCM reply and a slow sweep through the PCM's DIDs. *Export
+  data* shares it all (CSV + JSON)
 
 ### Voice
 - "Power Mode Activated" / "Power Mode Deactivated" in the assistant's female voice, spoken navigation-style: other audio is ducked,
@@ -175,7 +159,7 @@ weekday commute check. Hours, days and radius are in `AppConfig.Commute`.
    premium English (US) female voice (e.g. Zoe or Ava) for clearer voices.
 
 The dashboard has test buttons for the welcome flow, both Power Mode voices, every door, reverse,
-and the turn signals.
+the turn signals and rain mode.
 
 ## Shortcuts
 
@@ -219,8 +203,7 @@ along with any automation that still runs it.
 
 This opens Autobot and presses ENGINE START by itself: the same start-up sound and animation, then
 the progress ring, which only opens the dashboard once all three connections are there (see
-[Start screen](#start-screen)). The app still needs to be installed and the OBD adapter available. The i-stop frame replay remains
-experimental, as described below.
+[Start screen](#start-screen)). The app still needs to be installed and the OBD adapter available.
 
 ### Start screen
 
@@ -299,8 +282,7 @@ second when the adapter responds promptly:
 | `010D1` | `41 0D C` | road speed = C km/h |
 
 The trailing `1` tells the adapter one reply is enough; it is dropped if the adapter answers `?`.
-RPM is queried separately at most once per second during i-stop's startup safety check; it is not
-part of live driving updates.
+RPM is only read by the DPF monitor while its screen is open; it is not part of live driving updates.
 Protocol, request header and timings are in `AppConfig.OBD`.
 
 ### Transmission: P / R / N, the gear, and M vs D
@@ -377,6 +359,77 @@ the frame live: switch each indicator on once to check. Listening makes each rou
 few hundred ms longer; `AppConfig.TurnSignals` can make it less frequent (`everyRounds`) or switch
 it off.
 
+### Wipers (rain mode)
+
+| Wiper lever | Rain mode |
+|---|---|
+| OFF | off (the washer running the wipers with the lever OFF isn't rain) |
+| LO, HI | on, once two readings in a row agree (a MIST flick doesn't count) |
+| AUTO / INT | on once the wipers really wipe, until 90 s after the last wipe (`AppConfig.Rain.autoHold`). Not counted: the one wipe moving the lever OFF → AUTO makes (`autoSettle`) and the washer's wipes (`washerHold`). From LO / HI into AUTO it stays on |
+
+**The lever comes from frame `0x09A`**, the turn signals' frame, heard every round anyway — so it
+costs no adapter time. In the CX-5 the start stop unit reads the steering-column switches and sends the
+"windshield wiper switch position signal … to the front body control module (FBCM) as a CAN signal"
+(workshop manual); the FBCM runs the wipers, in AUTO together with the rain sensor over LIN. The start
+stop unit's own PIDs show the switch is two contacts — `WIP_F_INT` on in AUTO / INT and HI, `WIP_F_LOW`
+on in MIST, LO and HI — and openpilot's `mazda_2017.dbc` (CX-5 2017+) has two wiper bits in byte 4 of
+`0x09A`, `WIPER_LO` (`0x02`) and `WIPER_HI` (`0x04`). Together that's the built-in layout:
+
+| Lever | `09A` byte 4 & `06` |
+|---|---|
+| OFF | `00` |
+| AUTO / INT | `04` (the INT contact; openpilot only saw it together with HI) |
+| LO, MIST | `02` |
+| HI | `06` |
+
+It isn't confirmed on this car yet: the wiper finder's *lever check* (below) does that in a minute.
+
+**Whether the wipers really wipe** only matters in AUTO / INT, where the rain sensor (or the INT timer)
+decides, and the lever frame only says "AUTO". The FBCM drives the wiper relays and reads the motor's
+auto-stop switch (workshop manual PIDs `WIP_F_RY_LO`, `WIP_F_RY_HI`, `WIP_F_MST`), but no public source
+has their DIDs, so the wiper finder finds the bit on the car. Autobot reads it **only while the lever is
+in AUTO / INT**, every 2nd round (`motorPollEveryRounds`: `ATSH726`, `ATCRA72E`, the DID — about 0.15 s),
+and not at all while the gear lever is in M or R (`pauseMotorInPowerModeAndReverse`; the lamp shows
+Power Mode / reverse then anyway, and rain mode keeps its state until D). In OFF, LO and HI nothing is
+read. Without a found motor bit AUTO / INT doesn't count (`autoCountsWithoutMotor = false`).
+
+What the OBD2 port can't give: the rain sensor's own reading (rain amount, AUTO sensitivity) travels
+over LIN between the sensor and the FBCM, never over CAN.
+
+**The wiper finder** (dashboard → *Rain mode* → *Wiper finder*; `WiperFinder`, `Wipers.swift`), parked
+with the engine running:
+
+1. **Lever** (frame only, 1.5 s per tap): OFF → AUTO / INT on dry glass (it wipes once; let it park) →
+   LO → HI → *Washer* (lever OFF, pulled towards you and held; optional) → OFF once more. It keeps the
+   **smallest** set of frame bits that tells OFF, AUTO / INT, LO and HI apart, byte 4's two bits first;
+   anything else that happened to differ (a light, a checksum) is left out, so the lever stays readable
+   whatever else changes. *Use it* saves it.
+2. **Wiper motor**: *Scan* the FBCM once (`AppConfig.Rain.motorScanPlan`: `726` `C100`–`C1FF`,
+   `DA00`–`DAFF`; a few minutes, kept on the phone — the earlier finder's scan is reused) → *Parked*
+   (lever OFF) → *Wiping* (a quick spray, lever in LO) → *Trace a wipe*, twice: lever OFF, tap, and as
+   soon as it says **NOW** move the lever to AUTO and hold it there for the 8 s.
+
+Why the trace: parked vs wiping alone is where the earlier finder stopped, and it always left 9–10
+equally good candidates — with the lever in LO everything wiper-related changes at once (the FBCM's
+copy of the lever, "LO requested", both relays, the auto-stop switch, some of them in more than one
+DID), so more snapshots could never split them. OFF → AUTO wipes exactly once while the lever *stays*
+in AUTO. The trace reads the candidates' DIDs over and over meanwhile (`traceDIDs`, about 0.07 s a
+read): the motor and relay bits leave their parked value with that wipe and come back; the FBCM's copy
+of the lever changes and stays; "LO requested" and the washer never move. Only a bit that is parked at
+NOW, leaves within 5 s, is back within 2 s and stays parked to the end counts
+(`AppConfig.Rain.traceTiming`) — a slow counter bit or a drifting value comes and goes at other times.
+Best first: in the most traces, then together with the most other bits (everything one wipe moves goes
+at the same moment), then away the longest (the auto-stop switch covers the whole wipe, a relay may only
+click for a moment). Bits of the same byte that did the same are read together, other DIDs that did the
+same are only listed. So there is always one answer; the second trace reads only the DIDs that came and
+went, more often, and confirms it. *Use it* saves it; *Export raw data* writes every frame, snapshot
+and trace to a JSON file. (Tested against a simulated FBCM with a 20 Hz counter, a slow square wave, a
+drifting value and a flaky bit among the candidates: the auto-stop switch or a relay bit in 100 % of
+runs at 0.07–0.10 s a read.)
+
+The log shows every lever change (`Wipers: lever AUTO / INT · 09A byte 4 & 06 = 04`), a lever code the
+layout doesn't know, the first wipe in AUTO, and rain mode turning on and off with the reason.
+
 ### Doors: which one is open
 
 > **Currently off** (`AppConfig.Doors.enabled = false`; the door rows are hidden from the dashboard
@@ -438,7 +491,7 @@ and drowned the door bits before that. All of them are ignored (`AppConfig.Doors
 > CX-5 workshop manual puts that unit (full-auto air conditioner) on the **MS-CAN** bus, with the
 > rear body control module, BSM and audio unit; the instrument cluster is the gateway to HS-CAN. The
 > KW905 only connects to HS-CAN (OBD pins 6/14). What the cluster passes on to HS-CAN for the engine
-> is the A/C request, the blower speed and the i-stop requests (frame `0x436` in the Mazda3 SkyActiv
+> is the A/C request and the blower speed (frame `0x436` in the Mazda3 SkyActiv
 > CAN database), not the set temperature.
 
 At every connection Autobot sends the climate control unit (`733`, Ford/Mazda layout, replies from
@@ -459,33 +512,56 @@ The diesel particulate filter values come from the engine ECU (PCM, `7E0`) over 
 DPF pressure, plus one of the slower values in turn (`AppConfig.DPF.rotation`), giving roughly one to
 two chart points a second next to the normal live data.
 
-| Request | Value | Decoding |
+| Request | Value (Mazda / FORScan name) | Decoding |
 |---|---|---|
-| `22F47A` | DPF pressure (SAE PID `7A`) | A = bits (0 differential, 1 inlet, 2 outlet); differential = signed(B·256+C)/100 kPa, inlet D–E, outlet F–G the same |
-| `22042C` | soot accumulated | (A·256+B)·100/65536 g/L |
-| `22042D` | soot generated since the last regeneration | same as above |
-| `220380` | regeneration running | bit 1 of A |
-| `220432` | regenerations so far | A·256+B |
-| `220434` | distance since the last regeneration | (B·65536+C·256+D)/640 km |
+| `22042B` | soot load the PCM regenerates on (`PM_ACC_DSD`) — the main gauge | (A·256+B)·100/65536 g/L |
+| `22042C` | soot accumulated, from the differential pressure (`PM_ACC`) | same |
+| `22042D` | soot generated since the last regeneration, modelled (`PM_GEN`) | same |
+| `220380` | regeneration request / active (`REG_REQ_A`) | A bit 0 (`MazdaDPF.regenStatusMask`) |
+| `220432` | regenerations so far (`REG_CNT`) | A·256+B |
+| `220434` | distance since the last completed regeneration (`REG_DIS`) | (B·65536+C·256+D)·100/65536 km |
+| `22F47A` | DPF pressure (PID `7A`) | A = bits (0 differential, 1 inlet, 2 outlet); differential = signed(B·256+C)/100 kPa, inlet D–E, outlet F–G |
 | `22F478` | exhaust gas temperatures (PID `78`) | A = sensors 1–4 present, then 2 bytes each: raw/10 − 40 °C |
 | `22F47C` | DPF inlet / outlet temperature (PID `7C`) | A bit 0 inlet, bit 1 outlet; raw/10 − 40 °C |
-| `22F405` | coolant (PID `05`) | A − 40 °C |
+| `22F473` | exhaust pressure, upstream (PID `73`) | (B·256+C)/100 kPa |
+| `22F469` | EGR A (hot) / B (cooled) target and actual (PID `69`) | B, C / E, F ·100/255 % — 0 % during a regeneration |
+| `22F411` | intake shutter valve (PID `11`) | A·100/255 % |
+| `22F470` | boost target / actual (PID `70`) | (B·256+C)/32, (D·256+E)/32 kPa abs |
+| `22F477` | charge air temperatures (PID `77`) | B, C − 40 °C |
+| `22F466` | mass air flow (PID `66`) | (B·256+C)/32 g/s |
+| `22F45C` / `22F405` | oil / coolant temperature | A − 40 °C |
+| `22F48B` | diesel aftertreatment status (PID `8B`) | regeneration running / active-passive, trigger %, average min / km between — unconfirmed on the 2015 KE |
+| `2203E1` | fuel in the oil (`OIL_DIL`?) | A·256+B, shown raw (unit unproven) |
+| `220435` | oil-dilution events | A (low confidence) |
+| `22DD01` | odometer (`TOTAL_DIST`) | A·65536+B·256+C km |
 
-The `04xx` / `0380` DIDs and their scaling are from community Torque PID lists for SkyActiv-D cars
-(not Mazda documentation); one list scales the soot by /628 and the distance by ·100/65536 instead.
-The screen shows the raw bytes of every reply, so the scaling can be checked against FORScan
-(`PM_ACC`, `DPF_REG_DIS`…). A value the PCM doesn't answer three times in a row shows "not
-answered" and isn't asked again until the screen is reopened.
+The Mazda DIDs and their scaling are community reverse engineering (the Torque plugin for SKYACTIV-D,
+FORScan forum users on CX-5 / Mazda6 2.2), not Mazda documentation; nothing was published for a
+NZ-market 2015 KE specifically. The screen shows the raw bytes of every reply, so the scaling can be
+checked against FORScan. A value the PCM doesn't answer three times in a row shows "not answered" and
+isn't asked again until the screen is reopened.
+
+Soot thresholds (Mazda workshop manual, SKYACTIV-D 2.2, plus owner logs): a regeneration usually
+starts from about 5.5–6 g/L; the DPF light comes on at 8 g/L; at 10 g/L it flashes and automatic
+regeneration stops (dealer); 13 g/L sets P2463, 17 g/L means a new DPF (P242F). A healthy 2.2
+regenerates about every 250–400 km; after a completed regeneration `PM_ACC_DSD` should be near 0–0.3
+g/L (1.5+ that stays suggests ash or clogging). The screen's *Worth a look* card shows these.
 
 **Regeneration history.** Two sources, shown together on the DPF screen:
 
-- *Recorded by Autobot* (`DPFRegenLog`): while live data runs it reads `220432`, `220434`,
-  `22042C` and `220380` once a minute (`AppConfig.DPF.logInterval`; while the DPF screen is open its
-  own reads are used), and in between `220380` alone every 15 s (`regenCheckInterval`): when it comes
-  on, "DPF regeneration started" is said once (not again within 10 min). When the count goes up — or, on a PCM without the count, the distance drops
-  back — an entry is saved with the highest distance read before it, the soot before it and, when
-  both ends were seen, how long it ran. "≥" marks an entry whose last reading before it was from an
-  earlier drive (the km in between are missing). Kept on the phone, newest first.
+- *Recorded by Autobot* (`DPFRegenLog`): each regeneration is followed from start to end. While live
+  data runs it reads the flag `220380` every 15 s (`regenCheckInterval`) and the count, distance and
+  soot once a minute (`logInterval`); while the DPF screen is open its own reads are used. When the
+  flag comes on, "DPF regeneration started" is said once (not again within 10 min) and the start is
+  noted (soot load, distance since the last one, odometer, oil dilution); while it runs the soot and
+  the exhaust / DPF temperatures are read every check for the peaks. It is *completed* when the count
+  `220432` goes up (or, on a PCM without the count, the distance drops back), and *interrupted* when
+  the engine is switched off first, or the flag stays off for 2 min while moving — it drops while
+  stopped although the regeneration carries on, so that alone isn't an end. Each entry keeps: start
+  and end, duration, km since the one before, soot load before / after, peak exhaust and DPF inlet
+  temperature, mean exhaust temperature, km driven and average speed during it, odometer, and the
+  oil-dilution value before / after. "≥" marks a distance whose last reading before it was from an
+  earlier drive. Kept on the phone, newest first.
 - *From the PCM* (`DPFHistoryFinder`): the PCM keeps the distances of its last 10 regenerations
   (Mazda's dealer tool shows them as DPF regeneration distance 01–10; a Torque preset for the
   SkyActiv-D reads each as 1 byte × 2 km, and was 30 km above the dealer tool), but the DID isn't
@@ -512,45 +588,58 @@ RPM / load — the back pressure vs RPM chart is the one to compare across days.
 regeneration usually starts somewhere above 6 g/L of soot; at 10 g/L the PCM limits power and stops
 regenerating by itself (gauge thresholds in `AppConfig.DPF`).
 
-### i-stop (idling stop)
+### DPF data recorder
 
-i-stop has no standard OBD2 PID. On this platform the i-stop OFF button is part of the **cluster switch** by
-the driver's knee — a resistor ladder (about 84 Ω between its B and C pins while the OFF button is held).
-The instrument cluster reads that switch and sends the operation signal to the PCM over CAN. The PCM exposes
-a read-only `I-Stop_OFF` state (Mazda's PID table lists `I-Stop_OFF`, `I-Stop_TRD`, `I-Stop_VSP`, `I-Stop_VST`).
-Changing it requires reproducing the instrument cluster's switch operation; there is no standard OBD2 command.
+`DPFRecorder` records what's needed to find out why the DPF regenerates every ~100 km instead of every
+250–400. What the research found (Mazda workshop manual pages, FORScan forum logs, Nov 2026): PM_GEN — the
+soot the PCM's model says the engine has made since the last regeneration, worked out from engine speed,
+intake air and injected fuel — was 1.45 g/L 21 km after a regeneration, about four times Mazda's
+reference, while PM_ACC_DSD was 0.45. A regeneration starts when PM_GEN or PM_ACC_DSD reaches about
+5.6 g/L with the oil warm (owner logs), so the soot model's inputs — injected fuel, air flow, EGR — are
+what to watch, more than the filter or its pressure sensor.
 
-Two things are learned on the car (`IStopFinder`, `IStop.swift`):
+While live data runs (DPF screen open or not) it takes a sample every `recordInterval` (30 s), and every
+`recordIntervalDuringRegen` (10 s) while `220380` bit 0 is on and for 20 min after the count `220432`
+goes up. The reads go a few at a time between live-data rounds (`recordJobBudget`: a single-frame read
+counts 1, a reply of several frames 3), so Power Mode, reverse and the turn signals keep working.
 
-- **State** — a flag in a PCM service-22 value, found by snapshot diff with i-stop armed vs disabled (reuses
-  `BitSignal` / `SignalDiff`). `AppConfig.IStop.stateScanPlan` lists the PCM DID blocks to scan.
-- **Observed CAN frame** — the whole bus at once is well over 1000 frames a second, more than the KW905 can pass
-  on over Bluetooth (it stops with `BUFFER FULL`), which is why the first all-ids capture found nothing. So the
-  finder maps the bus first: it monitors one aligned block of ids at a time (`ATCF <base>` + `ATCM <mask>`,
-  then `ATMA`, headers on) and splits any block that overflows, or carries more than
-  `AppConfig.IStop.maxGroupRate` frames a second, in two (`ATCRA` + `ATAR` put the filters back after every
-  look). Then the guided sweep presses once per block (released → held → released again) and `ButtonSweep`
-  sorts the changes into momentary (the button) and latched (the status echo). It's replayed experimentally by
-  `OBDAdapter.injectFrame`: `ATSH <id>`, `ATCAF0` (formatting off), `ATR0` (no reply expected), write the
-  captured bytes a few times, then restore. Adapter acceptance does not prove that the PCM acted on it; a
-  rolling counter or checksum may make a captured copy unusable.
+| When | What |
+|---|---|
+| every sample | RPM (`010C`), `042D` PM_GEN, `042B` PM_ACC_DSD, `042C` PM_ACC, `0380` request flag, `0432` count, `0434` distance; load `F404`, MAF `F410` / `F466`, fuel rate `F45E` / `F49D`, exhaust flow `F49E`, EGR `F469`, exhaust temperatures `F478`, DPF temperatures `F47C`, DPF pressure `F47A` |
+| every 30 s | coolant `F405`, oil `F45C`, MAP `F40B`, boost `F470`, intake shutter `F411` / `F46A` (commanded vs position), commanded EGR / EGR error `F42C` / `F42D`, exhaust pressure `F473`, injection timing `F45D`, torque `F461` / `F462`, rail pressure `F423` / `F46D`, pedal `F449`, VGT / wastegate `F471` / `F472`; and the next 24 DIDs of the sweep |
+| every 2 min | odometer `DD01`, intake / outside air `F40F` / `F446`, barometer `F433`, fuel level `F42F`, run time `F41F`, charge air `F477`, turbo `F474`–`F476`, EGR temperature `F46B`, `F46F`, `F48B`, oil dilution `03E1` / `0435`, community candidates `044B` `03DB` `03FB` `03DF` `0301` `1305` `DAAE` (raw only) |
+| once a drive | supported-PID bitmaps `F400`…`F4C0` (standard PIDs the PCM leaves out aren't asked), software / calibration IDs `F188` `F187` `F804` `F806`, reference torque `F463` |
 
-Two honest limits on the software route with the KW905:
+A value the PCM refuses (`7F 22 xx`) or doesn't answer three times in a row isn't asked again that
+drive; why is kept with the drive. **The sweep** goes through `7E0 0300–04FF` and `DA00–DAFF`
+(`recordSweepRanges`), 24 DIDs per 30 s sample, raw only. The first pass (~15 min of driving) finds which
+DIDs exist; after that only those are read. The Mazda DIDs of the exhaust temperatures (EXHTEMP1/2), the
+DPF differential pressure (EXHPRESS_DIF), the exhaust gas amount (EXH_FL) and the injected fuel aren't
+published; comparing the sweep with RPM, load and the regenerations shows which DID is which.
 
-- the adapter has to take `ATCF`/`ATCM` (standard ELM327 commands); if it won't, the bus can't be mapped and
-  only the state can be learned (auto-off then has nothing to press).
-- the instrument cluster keeps sending its own copy of the switch frame, so a replay races with it; as an
-  MX-5 CAN write-up puts it, frames sent onto the bus "get overwritten almost immediately" unless the module is
-  isolated behind a bridge.
-- the switch itself is a resistor ladder, not a button CAN transmitter. The instrument cluster forwards its
-  operation signal, and the PCM may reject a stale or incomplete replay (for example, if the message has a
-  rolling counter/checksum). If it does, an inline switch-harness module that simulates the resistor value is
-  the closest match to automatic i-stop devices; it emulates the button instead of relying on OBD.
-- the one documented OBD-side setting is in the start stop unit's as-built data: FORScan users report
-  `731-01-01` byte B1 bit 4 (1 = i-stop on at every start, stock; 0 = off at every start, the button still
-  turns it on), on SkyActiv Mazda6 / CX-5 / Mazda3 / Mazda2. Writing as-built data needs the module's security
-  access and a backup, so it's done with FORScan, not this app; the module check only reads it, and shows
-  whether the SSU is even on the bus the KW905 reaches (newer Mazdas put it on MS-CAN).
+**PM_GEN growth** (on the DPF screen and in the CSV): PM_GEN ÷ the distance since the last regeneration;
+the growth over the last ~10 km of this regeneration cycle (and PM_ACC_DSD's over the same stretch); per
+hour over the last ~10 min of the drive; km left to 5.6 g/L at that pace; and, when the PCM answers the
+fuel rate and the whole cycle was recorded, the fuel used and PM_GEN per litre. A cycle starts when the
+distance `0434` or PM_GEN goes back down. Above 3.5 g/L per 100 km (healthy: about 1.5–2.5) the screen
+says so.
+
+**Events** (the CSV's `events` column, the export, the dashboard log): the request flag changing, the
+count going up, the distance resetting, PM_GEN dropping, PM_ACC_DSD jumping by 3 g/L or more. The
+research says `0380` is a *request* (it drops while stopped) and the count goes up as a regeneration
+*starts*. The regeneration log above still takes the count going up as the end, which is probably why
+its "after" soot read 16–23 g/L; the events show the real order on this car before that's changed.
+
+**Files.** `Application Support/DPFRecorder/autobot-dpf-samples.csv`: a header row, then one row per
+sample — `time` (local, ISO 8601), `unix`, `drive`, `sample`, `kind` (`normal` / `regen`), `speed_kmh`,
+`rpm`, the rates, one column per decoded value, `events`, and `raw` (every reply of the sample as
+`DID:HEX`, the data after `62 DID`, the sweep's too). A new file is started past 20 MB, or when a new
+version has other columns (the old file is kept and exported). `state.json` keeps the drives, events, the
+current cycle and the sweep between launches. **Export data (send to me)** on the DPF screen shares the
+CSV file(s), `autobot-dpf-info.json` (column dictionary with DIDs and formulas; drives with their
+supported PIDs, IDs and unanswered values; events; what the sweep found; the regeneration log; the PCM
+history finder) and the history finder's raw scan if there is one. *Clear recorded data* deletes the
+samples, drives and events; what the sweep found stays. Nothing is recorded in test mode.
 
 ## Manual shifting detection
 
@@ -574,18 +663,19 @@ Autobot/
 ├── App/         AppModel (wiring), AutobotApp
 ├── Lamp/        LampProtocol (packets), LampController (BLE), LampState (scenes)
 ├── Lighting/    LightingArbiter (priority between lighting features), TurnSignalFlash (mode-coloured flash
-│                while the indicators flash), ReverseLight (yellow breathing in R)
+│                while the indicators flash), ReverseLight (yellow breathing in R), RainMode (cyan
+│                breathing while it rains, from the wipers)
 ├── Vehicle/     OBDAdapter (OBD2 Bluetooth), ELM327 (adapter protocol), MazdaTCM (gearbox values),
 │                SignalDiff (finding on/off bits by comparison), DoorFinder (learns a door's switch),
 │                DoorMonitor (door state), DoorSafetyAlert, TurnSignals (the indicator lamp frame and
-│                when it counts as flashing),
-│                IStop (i-stop state flag + OFF-button frame, FrameDiff)
+│                when it counts as flashing), Wipers (the wiper lever in the same frame, the FBCM's
+│                wiper motor bit, and how both are found), WiperFinder (the lever check and the traces),
 │                MazdaDPF (the PCM's DPF values and their decoding)
 ├── Driving/     ManualShiftDetector (manual shifting → Power Mode), MFinder (learns the M flag),
 │                SpeedMonitor (GPS), PowerModeController (3-second transition buffer), CarPlayMonitor,
-│                IStopController (i-stop auto-off), IStopFinder (learns the state + OFF-button frame),
 │                DPFMonitor (DPF back pressure, soot, regeneration while its screen is open)
-│                DPFRegenLog (records each regeneration), DPFHistoryFinder (the PCM's last-10 history)
+│                DPFRegenLog (records each regeneration), DPFHistoryFinder (the PCM's last-10 history),
+│                DPFRecorder (30 s samples of the soot model and its inputs, PM_GEN growth, export)
 ├── Climate/     ClimateTempFlash (A/C set colder / warmer → blue / red burst flash)
 ├── Voice/       AudioSessionManager, Speaker, MetallicVoiceEffect, VoiceCoordinator (queue)
 ├── Assistant/   WelcomeAssistant (flow), SpeechListener, DestinationParser,
@@ -626,9 +716,11 @@ versions ignore sections they don't know.
 
 - Real lever over OBD2: P/R/N + gear from the TCM (`7E1 221E12`), M vs D from `7E1 221E03` bit
   `0x10` — **done**. R → yellow breathing (reverse lighting) — **done**.
-- Rain mode (cyan breathing while the wipers are on) — **removed**: reading the wipers (the lever
-  in the lights frame, the FBCM's wiper motor bit in AUTO) took too much of the OBD2 adapter's
-  bandwidth.
+- Rain mode (cyan breathing while the wipers are on: LO / HI at once, AUTO / INT once the wipers
+  really wipe) — **back, rewritten**: the lever rides on the turn signals' frame (no extra adapter
+  time); the FBCM's wiper motor bit is read only in AUTO / INT, every 2nd round, not in M / R, and is
+  found by tracing one wipe instead of comparing snapshots (which never got below 9–10 candidates).
+  To do in the car: the wiper finder's lever check and two traces.
 - Turn signals / hazard lights → purple / red flash by Power Mode — **done**: heard on HS-CAN (frame `0x09A`, see
   [Turn signals](#turn-signals)); the first drive shows which of its bits this car uses.
 - Real door / boot state — **parked**: not reachable on this car's HS-CAN; needs an MS-CAN capable
@@ -636,12 +728,10 @@ versions ignore sections they don't know.
 - A/C set temperature → blue / red flash — **parked**: lighting done, switched off
   (`AppConfig.Climate.enabled`); reading the set temperature needs an MS-CAN capable adapter
   (climate control unit `733`, pins 3/11).
-- i-stop auto-off: attempt to replay an observed frame at the start of a drive — **experimental**, through
-  the OBD2 adapter (`AppConfig.IStop`, see [i-stop](#i-stop-idling-stop)). Learns the PCM i-stop state
-  (read-only) and an experimental observed frame candidate (may not replay if it requires a valid
-  counter/checksum). An inline switch-harness module that simulates the resistor value is the closest match to
-  automatic i-stop devices; any FORScan as-built change needs confirmation for the exact model and region.
-- DPF monitor: live back pressure + RPM charts, soot, regeneration, exhaust temperatures — **done**;
+- i-stop auto-off — **dropped**: no documented way to switch i-stop off through the KW905 (HS-CAN only) on
+  this CX-5; the code was removed.
+- DPF monitor: live back pressure + RPM charts, soot load (PM_ACC_DSD / PM_ACC / PM_GEN), regeneration,
+  temperatures, EGR / boost / air flow / oil, regeneration log from start to end — **done**;
   the community scaling of the Mazda DIDs is to be confirmed against FORScan on the car.
 - Regeneration history: Autobot's own log — **done**; the PCM's last-10 history — finder **done**, its
   DID to be found on the car (scan, then confirmed by the next regeneration).

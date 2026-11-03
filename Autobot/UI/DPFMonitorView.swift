@@ -1,7 +1,7 @@
 // DPFMonitorView.swift
 // The DPF monitor (DPFMonitor): live DPF back pressure and engine RPM in large type and as charts on
-// one shared time axis, back pressure against RPM, soot and regeneration, exhaust temperatures, and the
-// raw PCM replies. Reading runs only while this screen is open.
+// one shared time axis, back pressure against RPM, soot load and regeneration, the regeneration log,
+// temperatures, EGR / boost / air flow / oil, and the raw PCM replies. Reading runs only while this screen is open.
 
 import Charts
 import SwiftUI
@@ -13,6 +13,7 @@ struct DPFMonitorButton: View {
     @ObservedObject var monitor: DPFMonitor
     @ObservedObject var log: DPFRegenLog
     @ObservedObject var finder: DPFHistoryFinder
+    @ObservedObject var recorder: DPFRecorder
     @State private var showing = false
 
     var body: some View {
@@ -22,20 +23,25 @@ struct DPFMonitorButton: View {
                 Spacer()
                 Text(summary)
                     .font(.subheadline)
-                    .foregroundColor(monitor.reading.regenerating == true ? .orange : .secondary)
+                    .foregroundColor(regenerating ? .orange : .secondary)
                 Image(systemName: "chevron.right").foregroundStyle(.secondary)
             }
             .font(.headline)
         }
         .buttonStyle(.plain)
         .sheet(isPresented: $showing) {
-            DPFMonitorView(monitor: monitor, log: log, finder: finder)
+            DPFMonitorView(monitor: monitor, log: log, finder: finder, recorder: recorder)
         }
     }
 
+    private var regenerating: Bool { monitor.reading.regenerating == true || log.active != nil }
+
     private var summary: String {
-        if monitor.reading.regenerating == true { return "Regenerating" }
-        if let soot = monitor.reading.soot { return String(format: "Soot %.1f g/L", soot) }
+        if regenerating { return "Regenerating" }
+        if let rate = recorder.rate.sinceRegen, (recorder.rate.regenKm ?? 0) >= Tuning.pmGenVerdictMinKm {
+            return String(format: "PM_GEN %.1f g/L/100 km", rate)
+        }
+        if let soot = monitor.reading.sootLoad { return String(format: "Soot %.1f g/L", soot) }
         return "Back pressure · soot"
     }
 }
@@ -44,8 +50,10 @@ struct DPFMonitorView: View {
     @ObservedObject var monitor: DPFMonitor
     @ObservedObject var log: DPFRegenLog
     @ObservedObject var finder: DPFHistoryFinder
+    @ObservedObject var recorder: DPFRecorder
     @Environment(\.dismiss) private var dismiss
     @State private var showingFinder = false
+    @State private var confirmingClear = false
     @State private var window: TimeInterval = Tuning.chartWindows.first ?? 60
     @State private var selected: Date?
 
@@ -57,12 +65,16 @@ struct DPFMonitorView: View {
             ScrollView {
                 VStack(spacing: 16) {
                     headline
-                    if monitor.reading.regenerating == true { regenBanner }
+                    if regenerating { regenBanner }
+                    if !healthNotes.isEmpty { healthCard }
                     liveCharts
                     pressureVersusRPM
                     dpfCard
+                    pmGenCard
+                    recorderCard
                     historyCard
                     temperatureCard
+                    engineCard
                     rawCard
                 }
                 .padding()
@@ -78,8 +90,12 @@ struct DPFMonitorView: View {
         .onAppear {
             monitor.start()
             finder.refresh()
+            recorder.screenOpened()
         }
-        .onDisappear { monitor.stop() }
+        .onDisappear {
+            monitor.stop()
+            recorder.screenClosed()
+        }
         .sheet(isPresented: $showingFinder) {
             DPFHistoryFinderView(finder: finder)
         }
@@ -93,7 +109,7 @@ struct DPFMonitorView: View {
                 tile("DPF back pressure", value: number(monitor.reading.pressure?.differential, "%.2f"),
                      unit: "kPa", caption: monitor.peakPressure.map { String(format: "peak %.2f kPa", $0) })
                 tile("Engine speed", value: number(monitor.reading.rpm, "%.0f"), unit: "rpm",
-                     caption: monitor.reading.soot.map { String(format: "soot %.2f g/L", $0) })
+                     caption: monitor.reading.sootLoad.map { String(format: "soot load %.2f g/L", $0) })
             }
             Text(monitor.status)
                 .font(.caption)
@@ -122,17 +138,23 @@ struct DPFMonitorView: View {
         .cornerRadius(12)
     }
 
+    private var regenerating: Bool { monitor.reading.regenerating == true || log.active != nil }
+
     private var regenBanner: some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: "flame.fill").font(.title2).foregroundColor(.orange)
             VStack(alignment: .leading, spacing: 2) {
                 HStack {
                     Text("Regenerating").font(.headline)
-                    if let started = monitor.regenStartedAt {
+                    if let started = log.active?.start ?? monitor.regenStartedAt {
                         Text(started, style: .timer).font(.headline).monospacedDigit().foregroundStyle(.secondary)
                     }
                 }
-                Text("The DPF is burning off soot. Keep driving if you can rather than switching off.")
+                if let line = activeText { Text(line).font(.caption.monospacedDigit()) }
+                Text(monitor.reading.regenerating == false
+                     ? "The flag is off while stopped; the regeneration carries on once you drive again."
+                     : "The DPF is burning off soot. Keep driving if you can rather than switching off: an "
+                       + "interrupted regeneration adds fuel to the oil.")
                     .font(.caption)
             }
             Spacer(minLength: 0)
@@ -140,6 +162,40 @@ struct DPFMonitorView: View {
         .padding(12)
         .background(Color.orange.opacity(0.15))
         .cornerRadius(12)
+    }
+
+    /// "soot 6.12 g/L at start · now 2.40 · peak EGT 612 °C · after 287 km"
+    private var activeText: String? {
+        guard let a = log.active else { return nil }
+        var parts: [String] = []
+        if let soot = a.sootDesiredBefore ?? a.sootBefore { parts.append(String(format: "soot %.2f g/L at start", soot)) }
+        if let now = monitor.reading.sootLoad { parts.append(String(format: "now %.2f", now)) }
+        if let peak = a.peakExhaustTemp { parts.append(String(format: "peak EGT %.0f °C", peak)) }
+        if let km = a.distanceBefore { parts.append(String(format: "after %.0f km", km)) }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    private var healthNotes: [String] {
+        var notes = log.healthNotes()
+        if let soot = monitor.reading.sootLoad, soot >= Tuning.sootWarning {
+            notes.insert(soot >= Tuning.sootCritical
+                         ? String(format: "Soot load %.1f g/L: at 10 g/L or more the PCM stops regenerating by "
+                                  + "itself — see a dealer.", soot)
+                         : String(format: "Soot load %.1f g/L: the DPF light comes on from 8 g/L. A long drive at "
+                                  + "steady speed lets it regenerate.", soot), at: 0)
+        }
+        if let now = sinceRegenNow, now.km >= Tuning.pmGenVerdictMinKm, now.rate >= Tuning.pmGenRateHigh {
+            notes.append(pmGenNote(rate: now.rate))
+        }
+        return notes
+    }
+
+    private var healthCard: some View {
+        card("Worth a look") {
+            ForEach(healthNotes, id: \.self) { note in
+                Label(note, systemImage: "exclamationmark.triangle").font(.caption)
+            }
+        }
     }
 
     // MARK: Charts
@@ -296,10 +352,11 @@ struct DPFMonitorView: View {
     private var dpfCard: some View {
         card("DPF") {
             sootGauge
-            row("Soot generated", number(monitor.reading.sootGenerated, "%.2f", " g/L"), value: .sootGenerated)
-            row("Since last regeneration", number(monitor.reading.regenDistance, "%.0f", " km"), value: .regenDistance)
+            row("Soot accumulated (PM_ACC)", number(monitor.reading.soot, "%.2f", " g/L"), value: .soot)
+            row("Soot generated (PM_GEN)", number(monitor.reading.sootGenerated, "%.2f", " g/L"), value: .sootGenerated)
+            row("Since last regeneration", number(monitor.reading.regenDistance, "%.1f", " km"), value: .regenDistance)
             row("Regenerations", monitor.reading.regenCount.map { "\($0)" } ?? "--", value: .regenCount)
-            row("Regeneration", regenText, value: .regenStatus)
+            row("Regeneration flag", regenText, value: .regenStatus)
             if let inlet = monitor.reading.pressure?.inlet {
                 row("Inlet pressure", String(format: "%.2f kPa", inlet), value: nil)
             }
@@ -307,16 +364,37 @@ struct DPFMonitorView: View {
                 row("Outlet pressure", String(format: "%.2f kPa", outlet), value: nil)
             }
             row("Peak back pressure (this session)", number(monitor.peakPressure, "%.2f", " kPa"), value: nil)
+            row("Exhaust pressure (upstream)", number(monitor.reading.exhaustPressure, "%.2f", " kPa"), value: .exhaustPressure)
+            row("Odometer", number(monitor.reading.odometer, "%.0f", " km"), value: .odometer)
+            aftertreatmentRows
+        }
+    }
+
+    /// PID 8B, if this PCM answers it.
+    @ViewBuilder
+    private var aftertreatmentRows: some View {
+        if let status = monitor.reading.aftertreatment {
+            if let running = status.regenerating {
+                row("PID 8B regeneration", (running ? "running" : "not running")
+                    + (status.active.map { $0 ? " · active" : " · passive" } ?? ""), value: nil)
+            }
+            if let trigger = status.triggerPercent { row("PID 8B trigger", String(format: "%.0f %%", trigger), value: nil) }
+            if let km = status.averageKm { row("PID 8B average interval", String(format: "%.0f km", km), value: nil) }
+            if let minutes = status.averageMinutes {
+                row("PID 8B average time between", String(format: "%.0f min", minutes), value: nil)
+            }
+        } else {
+            row("Aftertreatment status (PID 8B)", "--", value: .aftertreatment)
         }
     }
 
     @ViewBuilder
     private var sootGauge: some View {
-        if let soot = monitor.reading.soot {
+        if let soot = monitor.reading.sootLoad {
             let level = sootLevel(soot)
             Gauge(value: min(max(soot, 0), Tuning.sootFullScale), in: 0...Tuning.sootFullScale) {
                 HStack {
-                    Text("Soot accumulated")
+                    Text(monitor.reading.sootDesired != nil ? "Soot load (PM_ACC_DSD)" : "Soot accumulated")
                     Spacer()
                     Text(String(format: "%.2f g/L", soot)).monospacedDigit()
                 }
@@ -327,22 +405,150 @@ struct DPFMonitorView: View {
             .gaugeStyle(.linearCapacity)
             .tint(level.color)
         } else {
-            row("Soot accumulated", "--", value: .soot)
+            row("Soot load (PM_ACC_DSD)", "--", value: .sootDesired)
         }
     }
 
     private func sootLevel(_ soot: Double) -> (text: String, icon: String, color: Color) {
         if soot >= Tuning.sootCritical {
-            return ("Very high: give it a long drive at steady speed", "exclamationmark.octagon", .red)
+            return ("10+ g/L: no more automatic regeneration — dealer", "exclamationmark.octagon", .red)
         }
-        if soot >= Tuning.sootHigh { return ("High: a regeneration is due", "exclamationmark.triangle", .orange) }
+        if soot >= Tuning.sootWarning {
+            return ("DPF light range: a long steady drive", "exclamationmark.triangle", .red)
+        }
+        if soot >= Tuning.sootHigh { return ("A regeneration is due", "flame", .orange) }
         return ("OK", "checkmark.circle", .green)
     }
 
     private var regenText: String {
         guard let running = monitor.reading.regenerating else { return "--" }
         let raw = monitor.reading.raw[MazdaDPF.Value.regenStatus.did]?.first.map { String(format: " (%02X)", $0) } ?? ""
-        return (running ? "Running" : "Not running") + raw
+        return (running ? "On" : "Off") + raw
+    }
+
+    // MARK: PM_GEN growth and the data recorder
+
+    /// PM_GEN per 100 km since the last regeneration and the distance it's over: from this screen's own
+    /// latest reads, else the recorder's.
+    private var sinceRegenNow: (rate: Double, km: Double)? {
+        let r = monitor.reading
+        if let generated = r.sootGenerated, let km = r.regenDistance, km >= Tuning.rateMinSinceRegenKm {
+            return (generated / km * 100, km)
+        }
+        if let rate = recorder.rate.sinceRegen, let km = recorder.rate.regenKm { return (rate, km) }
+        return nil
+    }
+
+    private var pmGenCard: some View {
+        card("PM_GEN growth") {
+            let rate = recorder.rate
+            row("Since the last regeneration", perHundred(sinceRegenNow?.rate), value: nil)
+            row(String(format: "Last %.0f km", Tuning.rateWindowKm), recentText(rate), value: nil)
+            row(String(format: "Per hour (last %.0f min)", Tuning.rateWindowMinutes),
+                number(rate.perHour, "%.2f", " g/L/h"), value: nil)
+            row("PM_ACC_DSD, same stretch", perHundred(rate.dsdRecent), value: nil)
+            row(String(format: "%.1f g/L in about", Tuning.pmGenTrigger), number(rate.kmToTrigger, "%.0f", " km"),
+                value: nil)
+            if let fuel = rate.fuelSinceRegen {
+                row("Fuel since the last regeneration", String(format: "%.1f L", fuel), value: nil)
+            }
+            if let perLitre = rate.perLitre {
+                row("PM_GEN per litre of fuel", String(format: "%.3f g/L per L", perLitre), value: nil)
+            }
+            if let verdict = pmGenVerdict {
+                Label(verdict.text, systemImage: verdict.icon)
+                    .font(.caption)
+                    .foregroundColor(verdict.color)
+            }
+            Text(pmGenExplanation)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func pmGenNote(rate: Double) -> String {
+        String(format: """
+            PM_GEN is growing %.1f g/L per 100 km (a healthy 2.2: about %.1f–%.1f), so the PCM's soot model \
+            reaches the ~%.1f g/L that starts a regeneration after about %.0f km. The model works from engine \
+            speed, intake air and injected fuel: look at those (injectors, air flow, EGR) more than at the filter.
+            """, rate, Tuning.pmGenHealthyRate.lowerBound, Tuning.pmGenHealthyRate.upperBound,
+            Tuning.pmGenTrigger, Tuning.pmGenTrigger / rate * 100)
+    }
+
+    private var pmGenExplanation: String {
+        String(format: """
+            PM_GEN is the soot the PCM's model says the engine has made since the last regeneration, worked \
+            out from engine speed, intake air and injected fuel (Mazda workshop manual). A regeneration starts \
+            when it, or PM_ACC_DSD, reaches about %.1f g/L with the oil warm (owner logs). A healthy 2.2 grows \
+            about %.1f–%.1f g/L per 100 km: a regeneration every 250–400 km. The data recorder works it out \
+            every %.0f s.
+            """, Tuning.pmGenTrigger, Tuning.pmGenHealthyRate.lowerBound, Tuning.pmGenHealthyRate.upperBound,
+            Tuning.recordInterval)
+    }
+
+    private var recorderExplanation: String {
+        String(format: """
+            Every %.0f s while live data runs, screen open or not (every %.0f s around a regeneration): \
+            PM_GEN, PM_ACC_DSD, PM_ACC, the regeneration flag, count and distance, exhaust and DPF temperatures \
+            and pressure, air flow, EGR, intake shutter, boost, fuel rate, torque, rail pressure and more \
+            (whatever this PCM answers), with every raw reply. A slow sweep through the PCM's 0300–04FF and \
+            DA00–DAFF DIDs looks for where it keeps the exhaust temperatures, the DPF pressure and the injected \
+            fuel. Export shares the CSV and a JSON with the drives, events and regeneration log.
+            """, Tuning.recordInterval, Tuning.recordIntervalDuringRegen)
+    }
+
+    private func perHundred(_ value: Double?) -> String {
+        number(value, "%.2f", " g/L/100 km")
+    }
+
+    private func recentText(_ rate: DPFRecorder.Rate) -> String {
+        guard let recent = rate.recent else { return "--" }
+        return perHundred(recent) + (rate.recentKm.map { String(format: " (%.0f km)", $0) } ?? "")
+    }
+
+    private var pmGenVerdict: (text: String, icon: String, color: Color)? {
+        guard let now = sinceRegenNow, now.km >= Tuning.pmGenVerdictMinKm, now.rate > 0 else { return nil }
+        let healthy = Tuning.pmGenHealthyRate
+        if now.rate >= Tuning.pmGenRateHigh {
+            return (String(format: "About %.1f× a healthy engine: at this pace a regeneration every ~%.0f km.",
+                           now.rate / healthy.upperBound, Tuning.pmGenTrigger / now.rate * 100),
+                    "exclamationmark.triangle", .orange)
+        }
+        if now.rate > healthy.upperBound {
+            return ("A little faster than a healthy engine.", "exclamationmark.circle", .yellow)
+        }
+        return ("In the healthy range.", "checkmark.circle", .green)
+    }
+
+    private var recorderCard: some View {
+        card("Data recorder") {
+            Text(recorder.status)
+                .font(.caption)
+                .foregroundColor(recorder.isRecording ? .green : .secondary)
+            row("Samples", "\(recorder.sampleCount) · this drive \(recorder.driveSamples)", value: nil)
+            row("Last sample", recorder.lastSample.map { $0.formatted(date: .omitted, time: .standard) } ?? "--",
+                value: nil)
+            row("Recorded", ByteCountFormatter.string(fromByteCount: Int64(recorder.fileBytes), countStyle: .file),
+                value: nil)
+            row("PCM DID sweep", recorder.sweepSummary, value: nil)
+            ShareLink(items: shareItems) {
+                Label("Export data (send to me)", systemImage: "square.and.arrow.up")
+            }
+            .disabled(shareItems.isEmpty)
+            Button("Clear recorded data", role: .destructive) { confirmingClear = true }
+                .font(.caption)
+            Text(recorderExplanation)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .confirmationDialog("Delete all recorded samples?", isPresented: $confirmingClear, titleVisibility: .visible) {
+            Button("Delete", role: .destructive) { recorder.clear() }
+        }
+    }
+
+    /// The recorder's files, plus the history finder's raw scan when there is one.
+    private var shareItems: [URL] {
+        recorder.exportFiles + [finder.exportURL].compactMap { $0 }
     }
 
     // MARK: Regeneration history
@@ -377,16 +583,24 @@ struct DPFMonitorView: View {
             }
             if !known.isEmpty { intervalChart(known) }
             if log.entries.isEmpty {
-                Text("Nothing yet. From now on every regeneration is recorded with the distance driven before "
-                     + "it (read once a minute while driving).")
+                Text("Nothing yet. From now on every regeneration is recorded from start to end: the distance "
+                     + "before it, soot before and after, peak temperatures, how long it took, and whether it "
+                     + "completed or was interrupted.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
             ForEach(log.entries.prefix(20)) { entry in
-                HStack(alignment: .firstTextBaseline) {
-                    Text(entry.date.formatted(.dateTime.day().month().hour().minute()))
-                    Spacer()
-                    Text(DPFRegenLog.describe(entry)).monospacedDigit()
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(alignment: .firstTextBaseline) {
+                        Image(systemName: entry.outcome == .interrupted ? "xmark.circle" : "checkmark.circle")
+                            .foregroundColor(entry.outcome == .interrupted ? .orange : .green)
+                        Text(entry.date.formatted(.dateTime.day().month().hour().minute()))
+                        Spacer()
+                        Text(DPFRegenLog.describe(entry)).monospacedDigit()
+                    }
+                    if let details = DPFRegenLog.details(entry) {
+                        Text(details).foregroundStyle(.secondary).monospacedDigit()
+                    }
                 }
                 .font(.caption)
             }
@@ -447,6 +661,34 @@ struct DPFMonitorView: View {
         }
     }
 
+    private var engineCard: some View {
+        card("Engine, EGR and oil") {
+            let r = monitor.reading
+            row("EGR A (hot) target / actual", pair(r.egr?.commandedA, r.egr?.actualA, "%.0f", " %"), value: .egr)
+            row("EGR B (cooled) target / actual", pair(r.egr?.commandedB, r.egr?.actualB, "%.0f", " %"), value: .egr)
+            row("Intake shutter", number(r.intakeShutter, "%.0f", " %"), value: .intakeShutter)
+            row("Boost target / actual", pair(r.boostTarget, r.boost, "%.0f", " kPa"), value: .boost)
+            row("Air flow", number(r.airFlow, "%.1f", " g/s"), value: .airFlow)
+            ForEach(r.chargeAirTemps.sorted { $0.key < $1.key }, id: \.key) { entry in
+                row("Charge air \(entry.key)", String(format: "%.0f °C", entry.value), value: nil)
+            }
+            if r.chargeAirTemps.isEmpty { row("Charge air", "--", value: .chargeAir) }
+            row("Oil temperature", number(r.oilTemp, "%.0f", " °C"), value: .oilTemp)
+            row("Oil dilution (raw)", number(r.oilDilution, "%.0f"), value: .oilDilution)
+            row("Oil dilution events", r.oilDilutionEvents.map { "\($0)" } ?? "--", value: .oilDilutionEvents)
+            Text("EGR closes to 0 % during a regeneration. The oil-dilution values (220 3E1, 220435) are "
+                 + "community finds with an unproven unit: watch how they move, e.g. up after an interrupted "
+                 + "regeneration.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func pair(_ a: Double?, _ b: Double?, _ format: String, _ unit: String) -> String {
+        guard a != nil || b != nil else { return "--" }
+        return number(a, format) + " / " + number(b, format) + unit
+    }
+
     private var rawCard: some View {
         card("Raw PCM replies") {
             ForEach(MazdaDPF.Value.allCases) { value in
@@ -455,8 +697,9 @@ struct DPFMonitorView: View {
                 }
                 .font(.caption)
             }
-            Text("The Mazda DPF values (04xx, 0380) and their scaling come from community PID lists for "
-                 + "SkyActiv-D cars. If a value looks off, compare it with FORScan; the raw bytes are here "
+            Text("The Mazda values (04xx, 0380, 03E1, DD01) and their scaling come from community PID lists "
+                 + "for SkyActiv-D cars (Torque plugin, FORScan forum), not Mazda documents. The F4xx ones are "
+                 + "standard OBD2 PIDs. If a value looks off, compare it with FORScan; the raw bytes are here "
                  + "for that. RPM is the standard PID 01 0C.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)

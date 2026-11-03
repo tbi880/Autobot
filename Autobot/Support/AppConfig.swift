@@ -213,78 +213,6 @@ nonisolated enum AppConfig {
         static let testStartTemperature = 22.0
     }
 
-    /// i-stop (idling stop) auto-off (IStopController, IStopFinder): attempt to switch i-stop off at the
-    /// start of each drive by replaying an observed CAN frame (experimental). The physical button is a
-    /// resistor ladder read by the instrument cluster. See README, "i-stop auto-off".
-    enum IStop {
-        /// The feature on or off. On: the dashboard shows the i-stop row and auto-off runs once the
-        /// i-stop state and experimental frame candidate are learned (i-stop finder).
-        static let enabled = true
-        /// Wait this long after the engine ECU starts answering before the auto-off, well clear of the
-        /// battery-management reset window (a long-press within 5 s of ignition on, engine off). The
-        /// press is short and only happens after a one-off RPM check confirms the engine is running.
-        static let pressDelay: Duration = .seconds(5)
-        /// Try about this many times (1 s apart) to catch the engine running, then give up for this drive.
-        static let armAttempts = 20
-        /// The engine counts as running above this (r/min): checked only during startup safety checks.
-        static let minRunningRpm: Double = 400
-        /// A simulated press sends the observed frame this many times at this spacing. This is only an
-        /// experimental replay, not a physical button press. Keep the sequence short to avoid the
-        /// 3-second long-press that resets battery management.
-        static let pressFrameCount = 4
-        static let pressFrameInterval: Duration = .milliseconds(60)
-        /// Re-read the i-stop state this long after a press to confirm it took.
-        static let confirmDelay: Duration = .seconds(2)
-        /// Only auto-press when the learned state says i-stop is currently on. A blind press could toggle
-        /// i-stop back on if it was already disabled.
-        static let requireStateKnown = true
-        /// Wait for the first state poll after the engine is running before deciding whether to press.
-        /// The live loop polls the state every `pollEveryRounds`, so allow several rounds to pass.
-        static let stateWaitAttempts = 6
-        static let stateWaitInterval: Duration = .milliseconds(500)
-        /// Read the learned i-stop state every this many rounds of live data.
-        static let pollEveryRounds = 4
-        /// The PCM that holds the i-stop state (the engine ECU, same as live data).
-        static let stateHeader = "7E0"
-        /// Finder: PCM DID blocks scanned to find the i-stop state flag. These are where Mazda/Ford
-        /// SkyActiv switch and i-stop values tend to live; widen it if nothing differs on the car.
-        static let stateScanPlan: [(header: String, ranges: [ClosedRange<Int>])] = [
-            ("7E0", [0x0900...0x09FF, 0x1100...0x11FF, 0xA200...0xA2FF]),
-        ]
-        static let scanTimeout: TimeInterval = 0.6
-        static let readsPerSnapshot = 2
-        static let snapshotsToConfirm = 2
-        /// Finder, bus map: each look listens this long (s) to one block of CAN ids. A block that overflows
-        /// the adapter (BUFFER FULL), or has more frames a second than `maxGroupRate`, is split in two.
-        static let censusListen: TimeInterval = 0.6
-        static let maxGroupRate: Double = 250
-        /// Finder, guided sweep, per group: released for `sweepListen`, "Hold" + `holdLead` to press, held
-        /// for `sweepHeld`, "Release" + `releaseLead` to let go, released again for `sweepListen`. Only the
-        /// second half of the held / released-again frames counts, so a late press or release is fine. The
-        /// button is held about 3 s, with the engine running (never in the engine-off reset window).
-        static let sweepListen: TimeInterval = 1.0
-        static let holdLead: Duration = .milliseconds(1200)
-        static let sweepHeld: TimeInterval = 1.5
-        static let releaseLead: Duration = .milliseconds(1000)
-        /// Spoken during the sweep: the hand is on the button, the eyes may not be on the phone.
-        static let holdPhrase = "Hold"
-        static let releasePhrase = "Release"
-        /// Finder, module check: one harmless tester present (3E00) each — which modules this adapter
-        /// reaches. The instrument cluster reads the OFF button (workshop manual, DTC U2013:13); the start
-        /// stop unit holds the i-stop default in its as-built data (FORScan: 731-01-01 B1 bit 4).
-        static let moduleChecks: [(header: String, name: String)] = [
-            ("7E0", "PCM"),
-            ("720", "Instrument cluster"),
-            ("726", "Body control module"),
-            ("731", "Start stop unit (SSU)"),
-        ]
-        /// The start stop unit, and its as-built DIDs, read (service 22, read-only) when it answers.
-        static let ssuHeader = "731"
-        static let asBuiltDIDs = ["DE00", "DE01", "DE02"]
-        /// DIDs the state search ignores (none known yet on this car).
-        static let ignoredDIDs: Set<String> = []
-    }
-
     /// DPF monitor (DPFMonitor, MazdaDPF): live DPF back pressure and RPM with charts, plus soot,
     /// regeneration and exhaust temperatures, read from the PCM only while its screen is open. Each
     /// read runs between two rounds of live data, so Power Mode, reverse and the turn signals keep
@@ -292,11 +220,14 @@ nonisolated enum AppConfig {
     enum DPF {
         /// The feature on or off. Off: the dashboard row is hidden.
         static let enabled = true
-        /// Every read: RPM + DPF pressure, plus the next of these in turn (soot and the regeneration
-        /// status come round twice as often as the rest).
+        /// Every read: RPM + DPF pressure, plus the next of these in turn. The soot load (PM_ACC_DSD)
+        /// and the regeneration flag come round three times per cycle, the rest once; a value the PCM
+        /// doesn't answer drops out until the screen is opened again.
         static let rotation: [MazdaDPF.Value] = [
-            .soot, .regenStatus, .exhaustTemps, .regenDistance,
-            .soot, .regenStatus, .dpfTemps, .sootGenerated, .regenCount, .coolant,
+            .sootDesired, .regenStatus, .soot, .exhaustTemps, .egr,
+            .sootDesired, .regenStatus, .dpfTemps, .sootGenerated, .boost, .exhaustPressure,
+            .sootDesired, .regenStatus, .airFlow, .intakeShutter, .chargeAir, .oilTemp, .coolant,
+            .regenCount, .regenDistance, .aftertreatment, .oilDilution, .oilDilutionEvents, .odometer,
         ]
         /// At least this long from the start of one read to the next, so live data keeps its pace.
         static let minInterval: Duration = .milliseconds(150)
@@ -305,23 +236,27 @@ nonisolated enum AppConfig {
         /// Chart windows to choose from (seconds).
         static let chartWindows: [TimeInterval] = [60, 180, 600]
         /// A value the PCM doesn't answer this many times in a row isn't asked again while the screen
-        /// is open (reopen to try again).
+        /// is open (reopen to try again), or for the rest of the drive by the regeneration log.
         static let missesBeforeSkipping = 3
-        /// Soot gauge, g/L: full scale, and where it turns orange / red. Community numbers for the
-        /// SkyActiv-D: a regeneration usually starts somewhere above 6 g/L; at 10 g/L the PCM limits
-        /// power and stops trying to regenerate by itself.
-        static let sootFullScale = 10.0
-        static let sootHigh = 6.0
-        static let sootCritical = 8.0
+
+        /// Soot load gauge (PM_ACC_DSD, g/L), from Mazda's SKYACTIV-D 2.2 workshop manual and owner logs:
+        /// a regeneration is usually triggered from about 5.5–6; the DPF light comes on at 8; at 10 it
+        /// flashes and the PCM stops regenerating by itself (dealer); 13 sets the check-engine light
+        /// (P2463); 17 means a new DPF (P242F).
+        static let sootFullScale = 12.0
+        static let sootHigh = 5.5
+        static let sootWarning = 8.0
+        static let sootCritical = 10.0
         /// Test mode (AppConfig.TestMode): simulated readings this often.
         static let simulationInterval: Duration = .milliseconds(400)
 
-        /// Regeneration log (DPFRegenLog): while driving, the regeneration count, distance since the
-        /// last one, soot and status are read this often (4 short reads, between live-data rounds), so
-        /// each regeneration is recorded with the distance driven before it. While the DPF screen is
-        /// open its own reads feed the log instead.
+        /// Regeneration log (DPFRegenLog). While live data runs (screen closed): the flag (220380)
+        /// every `regenCheckInterval`, plus the count, distance and soot every `logInterval`. Once a
+        /// regeneration is running, every check also reads the soot, the exhaust / DPF temperatures and
+        /// the count, so the start, peaks and end are recorded. While the DPF screen is open its own
+        /// reads feed the log instead.
         static let logInterval: Duration = .seconds(60)
-        /// The first log read after the engine ECU starts answering (after i-stop's start-up checks).
+        /// The first log read after the engine ECU starts answering.
         static let logFirstDelay: Duration = .seconds(20)
         /// Entries kept, newest first.
         static let logMaxEntries = 100
@@ -329,13 +264,23 @@ nonisolated enum AppConfig {
         /// than this (seconds): the distance driven in between is missing from it.
         static let logApproximateAfter: TimeInterval = 600
         /// Say "DPF regeneration started" (AppConfig.Phrases.dpfRegenStarted, the normal assistant
-        /// voice) when the regeneration status (220380) comes on. While driving the status alone is read
-        /// every `regenCheckInterval` (one short read) between the full log readings; while the DPF
-        /// screen is open its own reads are used.
+        /// voice) when the regeneration flag (220380) comes on.
         static let announceRegeneration = true
         static let regenCheckInterval: Duration = .seconds(15)
         /// Not said again within this long (a status that flickers, live data dropping and coming back).
         static let regenAnnounceCooldown: TimeInterval = 600
+        /// The flag drops while the car is stopped although the regeneration carries on, so it only
+        /// counts as ended without the count going up (interrupted) once it has been off this long while
+        /// moving (above `movingSpeed` km/h) — or when the engine was switched off.
+        static let regenOffConfirm: TimeInterval = 120
+        static let movingSpeed = 5.0
+        /// Health notes on the DPF screen: soot still at or above this after a completed regeneration
+        /// (ash / clogging?), regenerations closer together than `shortIntervalKm` this many times in a
+        /// row, and this many interrupted regenerations in a row (fuel in the oil).
+        static let postRegenSootHigh = 1.5
+        static let shortIntervalKm = 150.0
+        static let shortIntervalsInARow = 3
+        static let interruptedInARow = 2
 
         /// Regeneration history finder (DPFHistoryFinder): the PCM keeps the distances of the last 10
         /// regenerations (what Mazda's dealer tool shows as "DPF regeneration distance 01–10"), but
@@ -358,7 +303,7 @@ nonisolated enum AppConfig {
         static let historyScanSecondsPerDID = 0.1
         /// Entries in the PCM's history, and km per raw unit for 1-byte entries (the Torque preset for
         /// the SkyActiv-D shows each byte doubled; it read 30 km more than the dealer tool). 2-byte
-        /// entries are read as km, 3- and 4-byte ones in 1/640 km like 220434.
+        /// entries are read as km, 3- and 4-byte ones in 100/65536 km like 220434.
         static let historyEntries = 10
         static let historyKmPerUnit = 2.0
         /// A candidate needs at least `historyMinPlausible` of its 10 entries in this range (km) and at
@@ -368,6 +313,59 @@ nonisolated enum AppConfig {
         /// Undecided candidates kept (best first); they're re-read when the DPF screen opens and after
         /// each regeneration, until one is confirmed.
         static let historyMaxCandidates = 24
+
+        /// Data recorder (DPFRecorder, README "DPF data recorder"): while live data runs, screen open or not,
+        /// a snapshot of the PCM's soot model and what feeds it every `recordInterval` seconds — every
+        /// `recordIntervalDuringRegen` while the request flag (220380 bit 0) is on and for
+        /// `recordFastAfterCountUp` after the count (220432) goes up — as one CSV row, exportable from the
+        /// DPF screen. Off: nothing is read or recorded.
+        static let recordEnabled = true
+        static let recordInterval: TimeInterval = 30
+        static let recordIntervalDuringRegen: TimeInterval = 10
+        static let recordFastAfterCountUp: TimeInterval = 1200
+        /// The slow values (odometer, outside air, fuel level, oil dilution, community candidates…).
+        static let recordSlowInterval: TimeInterval = 120
+        /// The first sample after the engine ECU starts answering (seconds).
+        static let recordFirstDelay: TimeInterval = 15
+        /// How much is read per go between two live-data rounds, so Power Mode, reverse and the turn signals
+        /// keep their pace: a single-frame read counts 1 (~50–100 ms), a reply of several frames 3.
+        static let recordJobBudget = 4
+        /// The DID sweep (raw only): DIDs per 30 s sample, the PCM blocks it goes through, the wait per DID.
+        /// The first pass finds which DIDs exist (~15 min of driving); after that only those are read.
+        static let recordSweepPerSample = 24
+        static let recordSweepRanges: [ClosedRange<Int>] = [0x0300...0x04FF, 0xDA00...0xDAFF]
+        static let recordSweepTimeout: TimeInterval = 0.6
+        /// A new CSV file past this size (bytes); the oldest ones go once all of them are over the total.
+        static let recordMaxFileBytes = 20_000_000
+        static let recordMaxTotalBytes = 60_000_000
+        /// Kept for the export: events and drives; points of the current regeneration cycle for the rates.
+        static let recordMaxEvents = 5000
+        static let recordMaxDrives = 500
+        static let recordCycleMaxPoints = 3000
+        /// Events: PM_GEN falling by more than this (g/L) between two samples starts a new cycle;
+        /// PM_ACC_DSD moving by this much (g/L) is noted.
+        static let recordGenDrop = 1.0
+        static let recordDsdJump = 3.0
+        /// Fuel used (PID 5E) is only added up between samples at most this far apart (seconds).
+        static let recordFuelGap: TimeInterval = 120
+
+        /// PM_GEN growth (g/L): per 100 km over the last `rateWindowKm` of the cycle (at least `rateMinKm`),
+        /// since the last regeneration once it's `rateMinSinceRegenKm` back, per hour over the last
+        /// `rateWindowMinutes` of the drive (at least `rateMinMinutes`), per litre after `rateMinFuel` L.
+        static let rateWindowKm = 10.0
+        static let rateMinKm = 2.0
+        static let rateMinSinceRegenKm = 3.0
+        static let rateWindowMinutes = 10.0
+        static let rateMinMinutes = 3.0
+        static let rateMinFuel = 1.0
+        /// A regeneration starts when PM_GEN (or PM_ACC_DSD) reaches about this with the oil warm (owner
+        /// logs on the FORScan forum; 6+ with the oil at 40–80 °C). A healthy 2.2 (a regeneration every
+        /// 250–400 km) grows about `pmGenHealthyRate` g/L per 100 km; from `pmGenRateHigh` the DPF screen
+        /// flags it, once the last regeneration is at least `pmGenVerdictMinKm` back.
+        static let pmGenTrigger = 5.6
+        static let pmGenHealthyRate: ClosedRange<Double> = 1.5...2.5
+        static let pmGenRateHigh = 3.5
+        static let pmGenVerdictMinKm = 15.0
     }
 
     /// Turn signals and hazard lights (TurnSignalFlash): flash in the current Power Mode colour while
@@ -414,6 +412,80 @@ nonisolated enum AppConfig {
         /// only every `retryRounds` rounds.
         static let missLimit = 5
         static let retryRounds = 30
+    }
+
+    /// Rain mode (RainMode): cyan gradient breathing while it rains as far as the windshield wipers say.
+    /// Above the normal purple steady, below Power Mode and reverse.
+    ///   lever OFF          -> off (the washer running the wipers with the lever OFF isn't rain)
+    ///   lever LO or HI     -> on
+    ///   lever AUTO / INT   -> on once the wipers really wipe, until `autoHold` after the last wipe
+    /// The lever comes from the lights frame (AppConfig.TurnSignals.frameID, Wipers.swift), which is heard
+    /// every round for the turn signals anyway: no extra adapter time. The wiping in AUTO / INT comes from
+    /// the front body control module's wiper motor bit (found by the wiper finder), read only while the
+    /// lever is in AUTO / INT.
+    enum Rain {
+        /// The feature on or off. Off: the wipers don't change the lighting, the motor is never read and
+        /// the dashboard row is hidden.
+        static let enabled = true
+        /// A lever reading counts once it has held for this many readings in a row (one a round), so a
+        /// quick MIST flick, or passing a position on the way to another, doesn't count.
+        static let confirmReadings = 2
+        /// Lever in AUTO / INT: rain mode stays on this long after the last wipe seen. Long enough to bridge
+        /// the pauses of intermittent wiping in light rain and a wipe a reading misses (the motor is read
+        /// every `motorPollEveryRounds` rounds, a wipe takes about a second); when the rain stops, rain mode
+        /// ends this long after the last wipe. Coming from LO or HI into AUTO counts as a wipe.
+        static let autoHold: TimeInterval = 90
+        /// Lever in AUTO / INT: wipes within this long after the lever got there don't count. Moving the
+        /// lever from OFF to AUTO wipes once (owner's manual), rain or not.
+        static let autoSettle: TimeInterval = 5
+        /// Lever in AUTO / INT: wipes within this long after the washer was last seen in use don't count.
+        /// The washer wipes too (and a few more times after letting go), and the rain sensor may take the
+        /// fluid on the glass for rain for a moment. Needs the washer's bit (lever check).
+        static let washerHold: TimeInterval = 10
+        /// Read the wiper motor bit every this many rounds while the lever is in AUTO / INT (a round with the
+        /// turn-signal look takes about a second). Each read is three short adapter commands (ATSH726,
+        /// ATCRA72E, the DID). 1 = every round: wipes are caught a little sooner, M / D a little later.
+        static let motorPollEveryRounds = 2
+        /// Don't read the wiper motor while the gear lever is in M (Power Mode shows red breathing instead)
+        /// or R (reverse shows yellow): live data then stays as fast as without rain mode, and rain mode
+        /// keeps its state until the lever is back in D.
+        static let pauseMotorInPowerModeAndReverse = true
+        /// Without a found wiper motor bit: false = AUTO / INT never counts as rain, true = it counts as rain
+        /// as soon as the lever is there (like LO).
+        static let autoCountsWithoutMotor = false
+
+        /// Wiper finder, lever check: how long each step listens to the frame (about 15 frames).
+        static let leverCheckListen: TimeInterval = 1.5
+        /// Wiper finder, motor: where to look for the wiper motor bit. The front body control module (726,
+        /// replies from 72E) drives the wiper LO and HI relays and reads the motor's auto-stop switch.
+        /// C100–C1FF (the body status block on other Mazdas) and DA00–DAFF (58 DIDs answer on this car, live
+        /// inputs among them: DA05 is the brake switch). The earlier wiper finder's scan of the same plan is
+        /// reused; widen it if nothing is found (4000–40FF, DD00–DD0F…), the scan then runs again.
+        static let motorScanPlan: [(header: String, ranges: [ClosedRange<Int>])] = [
+            ("726", [0xC100...0xC1FF, 0xDA00...0xDAFF]),
+        ]
+        /// Wait per DID while scanning (seconds).
+        static let motorScanTimeout: TimeInterval = 0.6
+        /// Parked and Wiping read every scanned DID this many times (in separate passes), so values that
+        /// change by themselves show up as unsteady.
+        static let motorReadsPerSnapshot = 2
+        /// Never the wiper motor, even if they slip into the scan: values that drift or count by themselves
+        /// (Doors.ignoredDIDs: 12V battery, brake switch, a counter, the battery voltage — which sags while
+        /// the motor runs, so it would look like a wiper bit).
+        static let motorIgnoredDIDs: Set<String> = AppConfig.Doors.ignoredDIDs
+        /// A trace reads the candidates' DIDs over and over for this long: lever OFF -> AUTO right at the
+        /// start, one wipe of about a second, then parked again well before the end.
+        static let traceDuration: TimeInterval = 8
+        /// At most this many DIDs are traced (best first): each is read once per pass, so fewer DIDs time the
+        /// wipe more finely (about 0.07 s per read).
+        static let traceMaxDIDs = 10
+        /// How a trace is judged: a wiper bit leaves its parked value within `moveWindow` s of "NOW" (the lever
+        /// goes to AUTO right then), is back within `maxWipe` s (one wipe takes about a second), and stays
+        /// parked for the last `settle` s. A slow counter bit or a drifting value comes and goes at other
+        /// times, so it doesn't count.
+        static let traceTiming = WiperMotorAnalysis.TraceTiming(settle: 1.0, moveWindow: 5.0, maxWipe: 2.0)
+        /// Traces that should agree before the motor bit is taken as confirmed.
+        static let tracesToConfirm = 2
     }
 
     /// Reverse (ReverseLight): yellow gradient breathing while the lever is in R, on Power Mode's level

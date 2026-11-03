@@ -22,7 +22,7 @@
 //   shares every reply as JSON, for working it out by hand.
 //
 // Entries: 1 byte × AppConfig.DPF.historyKmPerUnit km (as the Torque preset for the SkyActiv-D shows
-// them), 2 bytes in km, 3 or 4 bytes in 1/640 km like 220434.
+// them), 2 bytes in km, 3 or 4 bytes in 100/65536 km like 220434.
 
 import Combine
 import Foundation
@@ -782,7 +782,7 @@ final class DPFHistoryFinder: ObservableObject {
     }
 
     /// The first 10 entries in km, as they are stored: 1 byte × historyKmPerUnit, 2 bytes as km, 3 or 4
-    /// bytes (the low 3) / 640 like 220434.
+    /// bytes (the low 3) · 100 / 65536 like 220434.
     static func decodeEntries(_ bytes: [UInt8], width: Int) -> [Double] {
         let w = min(max(width, 1), 4)
         var values: [Double] = []
@@ -792,7 +792,7 @@ final class DPFHistoryFinder: ObservableObject {
             switch w {
             case 1: values.append(Double(raw) * Tuning.historyKmPerUnit)
             case 2: values.append(Double(raw))
-            default: values.append(Double(raw & 0xFF_FFFF) / 640)
+            default: values.append(Double(raw & 0xFF_FFFF) * 100 / 65536)
             }
             i += w
         }
@@ -862,7 +862,7 @@ final class DPFHistoryFinder: ObservableObject {
     /// The entries as km, with how they were scaled: "×2 km: 312 288 …".
     static func kmPreview(_ candidate: Candidate) -> String {
         let width = entryWidth(candidate)
-        let scale = width == 1 ? "×\(Int(Tuning.historyKmPerUnit)) km" : width == 2 ? "km" : "/640 km"
+        let scale = width == 1 ? "×\(Int(Tuning.historyKmPerUnit)) km" : width == 2 ? "km" : "×100/65536 km"
         return scale + ": " + entries(candidate).map { String(format: "%.0f", $0) }.joined(separator: " ")
     }
 

@@ -1,8 +1,8 @@
 // DPFMonitor.swift
 // Live DPF (diesel particulate filter) monitoring while the DPF screen is open: engine RPM and the
-// DPF back pressure (differential pressure) on every read, for the charts, plus soot, regeneration
-// and exhaust temperatures one at a time in turn (AppConfig.DPF.rotation). Values and scaling:
-// MazdaDPF.swift.
+// DPF back pressure (differential pressure) on every read, for the charts, plus the soot load,
+// regeneration, temperatures, EGR, boost, air flow, oil and the counters one at a time in turn
+// (AppConfig.DPF.rotation). Values and scaling: MazdaDPF.swift.
 //
 //   screen opens -> start() -> while open:
 //     OBDAdapter.runBetweenRounds { RPM (01 0C) + 7E0 22F47A + the next slow value }
@@ -95,7 +95,7 @@ final class DPFMonitor: ObservableObject {
         status = "Not monitoring"
         var line = "DPF monitor: stopped"
         if let peakPressure { line += String(format: " · peak back pressure %.2f kPa", peakPressure) }
-        if let soot = reading.soot { line += String(format: " · soot %.2f g/L", soot) }
+        if let soot = reading.sootLoad { line += String(format: " · soot %.2f g/L", soot) }
         logLine(line)
     }
 
@@ -223,14 +223,14 @@ final class DPFMonitor: ObservableObject {
         if now {
             regenStartedAt = Date()
             var line = before == nil ? "DPF: regeneration in progress" : "DPF: regeneration started"
-            if let soot = reading.soot { line += String(format: " · soot %.2f g/L", soot) }
+            if let soot = reading.sootLoad { line += String(format: " · soot %.2f g/L", soot) }
             if let distance = reading.regenDistance { line += String(format: " · %.0f km since the last one", distance) }
             logLine(line)
         } else {
             if let started = regenStartedAt {
                 let minutes = Date().timeIntervalSince(started) / 60
                 var line = String(format: "DPF: regeneration finished after %.1f min (while watched)", minutes)
-                if let soot = reading.soot { line += String(format: " · soot %.2f g/L", soot) }
+                if let soot = reading.sootLoad { line += String(format: " · soot %.2f g/L", soot) }
                 logLine(line)
             }
             regenStartedAt = nil
@@ -303,16 +303,32 @@ final class DPFMonitor: ObservableObject {
             var raw: [(MazdaDPF.Value, [UInt8])] = []
             let dp = Self.bytes16(Int(pressure * 100))
             raw.append((.pressure, [0x01] + dp))
+            raw.append((.sootDesired, Self.bytes16(Int(min(soot * 1.04, 99) * 65536 / 100))))
             raw.append((.soot, Self.bytes16(Int(soot * 65536 / 100))))
             raw.append((.sootGenerated, Self.bytes16(Int(generated * 65536 / 100))))
-            raw.append((.regenStatus, [regenerating ? 0x02 : 0x00]))
+            raw.append((.regenStatus, [regenerating ? MazdaDPF.regenStatusMask : 0x00]))
             raw.append((.regenCount, Self.bytes16(count)))
-            let d = Int(distance * 640)
+            let d = Int(distance * 65536 / 100)
             raw.append((.regenDistance, [0x00, UInt8((d >> 16) & 0xFF), UInt8((d >> 8) & 0xFF), UInt8(d & 0xFF)]))
             let temps = [egt + 40, egt + 15, egt - 10].map { Self.bytes16(Int(($0 + 40) * 10)) }
             raw.append((.exhaustTemps, [0x07] + temps.flatMap { $0 }))
             raw.append((.dpfTemps, [0x03] + Self.bytes16(Int((egt + 40) * 10)) + Self.bytes16(Int((egt + 15) * 10))))
+            raw.append((.exhaustPressure, [0x01] + Self.bytes16(Int((101 + pressure * 1.8) * 100))))
+            let egrA = regenerating ? 0 : max(0, 40 - rpm / 80)
+            let egrByte = UInt8(min(255, egrA * 2.55))
+            raw.append((.egr, [0x1B, egrByte, egrByte, 0x80, egrByte / 2, egrByte / 2, 0x80]))
+            raw.append((.intakeShutter, [UInt8(regenerating ? 150 : 230)]))
+            let boostKPa = 101 + max(0, (rpm - 1200) / 18)
+            raw.append((.boost, [0x03] + Self.bytes16(Int((boostKPa + 5) * 32)) + Self.bytes16(Int(boostKPa * 32))))
+            raw.append((.chargeAir, [0x03, UInt8(55 + 40), UInt8(32 + 40)]))
+            raw.append((.airFlow, [0x01] + Self.bytes16(Int(rpm / 60 * 32))))
+            raw.append((.oilTemp, [UInt8(92 + 40)]))
             raw.append((.coolant, [UInt8(88 + 40)]))
+            raw.append((.aftertreatment, [0x1F, regenerating ? 0x03 : 0x00, UInt8(min(255, soot / 6 * 255))]
+                        + Self.bytes16(52) + Self.bytes16(310)))
+            raw.append((.oilDilution, Self.bytes16(1180 + count % 50)))
+            raw.append((.oilDilutionEvents, [UInt8(count % 200)]))
+            raw.append((.odometer, [0x01, 0x8A, 0x9C]))
             return (rpm, raw)
         }
 

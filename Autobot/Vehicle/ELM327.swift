@@ -12,7 +12,7 @@
 // engine ECU answering from 7E8.
 //
 // The app requests OBD2 speed (PID 0D) for stationary finder checks and uses the car's service-22
-// selector signals for M/D. RPM (PID 0C) is queried only during i-stop's startup safety check; pedal,
+// selector signals for M/D. RPM (PID 0C) is read only for the DPF monitor; pedal,
 // engine load, and estimated gear ratios are not used.
 //
 // The turn signals aren't a value to ask for but a frame the car broadcasts: the adapter listens to the
@@ -152,19 +152,6 @@ enum ELM327 {
     /// CAN IDs in front of every line while listening, when the receive filter can't be trusted.
     static let headersOn = "ATH1"
     static let headersOff = "ATH0"
-    /// Responses off/on (ATR0/ATR1): after a transmitted frame the adapter returns at once instead of
-    /// waiting for a reply. Used when replaying a broadcast frame (the i-stop OFF button), which
-    /// expects no reply.
-    static let responsesOff = "ATR0"
-    static let responsesOn = "ATR1"
-    /// CAN id filter and mask while monitoring (ATCF / ATCM, 11-bit): a frame gets through when
-    /// (id AND mask) == (filter AND mask). An aligned block of ids base..<base+size (size a power of two)
-    /// is filter = base, mask = 7FF AND NOT (size − 1); mask 000 lets every id through.
-    static func idFilter(_ filter: Int) -> String { String(format: "ATCF%03X", filter & 0x7FF) }
-    static func idMask(_ mask: Int) -> String { String(format: "ATCM%03X", mask & 0x7FF) }
-    /// Receive filters back to the adapter's defaults (CRA without an address, ELM327 v1.4+).
-    static let resetReceiveFilters = "ATCRA"
-    static let receiveAuto = "ATAR"
 
     /// Only frames with this 11-bit ID get through: "ATCRA09A".
     static func receiveFilter(_ id: String) -> String { "ATCRA" + id }
@@ -282,16 +269,6 @@ enum ELM327 {
     /// Whether the adapter answered "OK".
     static func isOK(_ reply: String?) -> Bool {
         lines(reply ?? "").contains("OK")
-    }
-
-    /// Whether the adapter explicitly rejected a raw CAN transmit. With ATR0, a successful send
-    /// normally produces only the prompt (an empty reply); ELM clones may still return one of these
-    /// diagnostics when the frame could not be sent.
-    static func hasCANTransmitError(_ reply: String) -> Bool {
-        let errors: Set<String> = [
-            "?", "ERROR", "CANERROR", "BUFFERFULL", "UNABLETOCONNECT", "BUSINIT:ERROR", "STOPPED",
-        ]
-        return lines(reply).contains { errors.contains($0) }
     }
 
     /// The adapter didn't understand the command.

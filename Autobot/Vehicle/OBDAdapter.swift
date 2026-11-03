@@ -1,6 +1,6 @@
 // OBDAdapter.swift
 // Connects to the OBD2 Bluetooth adapter (KONNWEI, ELM327-compatible) and reads road speed and the
-// transmission selector. RPM is queried only by i-stop's startup safety check. Commands and reply
+// transmission selector. RPM is read only for the DPF monitor. Commands and reply
 // parsing: ELM327.swift, MazdaTCM.swift. Live data goes out as `sample` to ManualShiftDetector and
 // the lighting monitors.
 //
@@ -12,16 +12,20 @@
 //      temperature; on this car it's on MS-CAN, out of the KW905's reach, so no
 //   -> speed and the transmission in a loop -> sample
 //      (+ the doors every few rounds -> doorStates)
-//      (+ a moment of listening to the bus for the lights frame 09A: the indicators -> turnSignal)
+//      (+ a moment of listening to the bus for the lights frame 09A: the indicators -> turnSignal,
+//      the wiper lever -> lightsFrame, read by RainMode)
+//      (+ while the wiper lever is in AUTO / INT: the FBCM's wiper motor bit every few rounds
+//      -> wiperMotorRunning)
 //
-// Listening (turn signals): the indicators aren't a value to ask for but a frame the car broadcasts,
-// so once a round the adapter monitors the bus for a moment (ATCAF0, ATCRA09A, ATMA … a space stops
-// it, ATCAF1) and TurnSignalDetector decides from what it heard (TurnSignals.swift). That makes a
-// round a few hundred ms longer (AppConfig.TurnSignals.everyRounds).
+// Listening (turn signals, wiper lever): the indicators aren't a value to ask for but a frame the car
+// broadcasts, so once a round the adapter monitors the bus for a moment (ATCAF0, ATCRA09A, ATMA … a
+// space stops it, ATCAF1) and TurnSignalDetector decides from what it heard (TurnSignals.swift). That
+// makes a round a few hundred ms longer (AppConfig.TurnSignals.everyRounds). The wiper lever is in the
+// same frame, so it costs nothing on top.
 //
 // One command at a time: the next one goes out after the ">" prompt (or a timeout). Work that needs
-// the adapter for longer (MFinder's / DoorFinder's / IStopFinder's scans and snapshots) runs between two
-// rounds via runBetweenRounds, so it never mixes with the live requests.
+// the adapter for longer (MFinder's / DoorFinder's / WiperFinder's scans, snapshots and traces) runs
+// between two rounds via runBetweenRounds, so it never mixes with the live requests.
 // If the ECU stops answering (engine off) the set-up starts again; if the adapter disconnects,
 // scanning starts again, like the lamp, and while the link isn't up the attempt is started over once
 // a minute (ReconnectTimer). Close MAXOBD while driving: both apps would share the
@@ -86,14 +90,18 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     /// listening, the frame not heard, live data stopped). Feeds TurnSignalFlash.
     @Published private(set) var turnSignal: TurnSignals.State?
     /// The lights frame (AppConfig.TurnSignals.frameID) as last heard, set after every look: the
-    /// indicators come from it. nil while it isn't heard.
+    /// indicators come from it, and the wiper lever (RainMode counts one reading per look). nil while
+    /// it isn't heard.
     @Published private(set) var lightsFrame: [UInt8]?
-    /// Whether the lights frame (AppConfig.TurnSignals.frameID: the indicators) is heard on the
-    /// bus; nil until the first look, false also when the adapter can't listen.
+    /// Whether the lights frame (AppConfig.TurnSignals.frameID: indicators, wiper lever) is heard on
+    /// the bus; nil until the first look, false also when the adapter can't listen.
     @Published private(set) var hearsLightsFrame: Bool?
-    /// Whether i-stop is currently OFF (disabled) as the learned state signal reads it; nil while
-    /// unknown (no learned signal, not read yet, live data stopped). Feeds IStopController.
-    @Published private(set) var iStopOff: Bool?
+    /// Whether the windshield wipers are moving right now, from the front body control module: set
+    /// after every reading of `wiperMotorSignal` (published even when unchanged: RainMode times the
+    /// wipes from it), nil while it isn't read or didn't answer.
+    @Published private(set) var wiperMotorRunning: Bool?
+    /// The wiper motor DID's latest reply, "726 22DA0B = 00 10", for the screens.
+    @Published private(set) var wiperMotorRaw: String?
 
     /// The M flag, read every round with the TCM gear: built in (AppConfig.Transmission.mFlag),
     /// or the one MFinder learned.
@@ -102,10 +110,13 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     var learnedDoorSignals: [DoorMonitor.Opening: BitSignal] = [:] {
         didSet { updateDoorSignals() }
     }
-    /// The learned i-stop state signal (IStopFinder): when set, it's read every few rounds so the
-    /// dashboard and IStopController know whether i-stop is on. nil = not learned, state unknown.
-    var iStopSignal: BitSignal? {
-        didSet { if iStopSignal == nil, iStopOff != nil { iStopOff = nil } }
+    /// The wiper motor bit (WiperFinder), read every AppConfig.Rain.motorPollEveryRounds rounds while
+    /// set. RainMode sets it only while the wiper lever is in AUTO / INT (and the gear lever isn't in M
+    /// or R), so it costs nothing the rest of the time.
+    var wiperMotorSignal: WiperMotorSignal? {
+        didSet {
+            if wiperMotorSignal == nil { clearWiperMotor() }
+        }
     }
 
     /// Connection and set-up messages for the dashboard log (not every reading).
@@ -148,20 +159,17 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     private final class Listening {
         let id: String
         let showsIDs: Bool
-        let captureAll: Bool               // record every frame (by id), not just `id` (bus capture)
         let keepListening: ([CANFrame], Date, Date) -> Bool   // frames, started, now
         let started = Date()
         var frames: [CANFrame] = []
-        var allFrames: [(id: String, data: [UInt8])] = []     // every frame heard, while captureAll
         var otherIDs: Set<String> = []     // frames with other IDs that got through
         var notes: [String] = []           // other lines: "?", "BUFFER FULL", "STOPPED"…
         var ended: Date?                   // when it was decided to stop
 
-        init(id: String, showsIDs: Bool, captureAll: Bool = false,
+        init(id: String, showsIDs: Bool,
              keepListening: @escaping ([CANFrame], Date, Date) -> Bool) {
             self.id = id
             self.showsIDs = showsIDs
-            self.captureAll = captureAll
             self.keepListening = keepListening
         }
     }
@@ -197,19 +205,6 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
                 },
                 cancel: { continuation.resume(returning: nil) }))
         }
-    }
-
-    /// A single RPM query for i-stop's startup safety gate. RPM is intentionally not part of the
-    /// recurring live-data requests; IStopController calls this at most once per second while arming.
-    func isEngineRunningForIStop() async -> Bool {
-        await runBetweenRounds { adapter in
-            guard await adapter.useHeader(adapter.baseHeader),
-                  let reply = await adapter.request([ELM327.rpmPID]),
-                  let data = ELM327.values(in: reply, first: ELM327.rpmPID)[ELM327.rpmPID] else {
-                return false
-            }
-            return ELM327.rpm(data) >= AppConfig.IStop.minRunningRpm
-        } ?? false
     }
 
     /// For work in runBetweenRounds: engine RPM (mode 01 PID 0C) from the engine ECU; nil if it didn't
@@ -316,103 +311,41 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         return snapshot
     }
 
-    /// For work in runBetweenRounds: one look at a block of the bus — every frame whose 11-bit id is in
-    /// base..<base+size (size a power of two) for `within` seconds, with its id. Used by the i-stop
-    /// finder's bus map and sweep: the whole bus at once overflows the adapter, a block doesn't.
-    /// `overflowed` = the adapter ran out of buffer (BUFFER FULL) or the frame limit was hit: split the
-    /// block. The receive filters go back to the defaults afterwards. nil if the adapter can't listen or
-    /// filter by id.
-    func captureBlock(base: Int, size: Int, within: TimeInterval) async -> BusLook? {
-        guard jobRunning, !turnListenUnsupported, !receiveFilterUnsupported, size > 0 else { return nil }
-        let mask = 0x7FF & ~(size - 1)
-        let run = await listen(to: "", showingIDs: true, within: within, captureAll: true,
-                               block: (filter: base & mask, mask: mask)) { _, started, now in
-            now.timeIntervalSince(started) < within
+    /// For work in runBetweenRounds: every frame with this ID heard during `duration` seconds (the wiper
+    /// finder's lever check); nil if the adapter can't listen.
+    func listenFrames(id: String, duration: TimeInterval) async -> [CANFrame]? {
+        guard jobRunning, !turnListenUnsupported, !receiveFilterUnsupported else { return nil }
+        let heard = await listen(to: id, showingIDs: turnShowIDs, within: duration) { _, started, now in
+            now.timeIntervalSince(started) < duration
         }
-        await resetCaptureFilters()
-        guard let run else { return nil }
-        let bufferFull = run.notes.contains {
-            $0.uppercased().filter { !$0.isWhitespace }.contains("BUFFERFULL")
-        }
-        return BusLook(frames: run.allFrames, overflowed: bufferFull || run.allFrames.count >= Self.captureFrameLimit)
+        return heard?.frames
     }
 
-    /// For work in runBetweenRounds: does the ECU behind `header` answer a harmless tester present
-    /// (3E00)? nil if the request header couldn't be set.
-    func answersTesterPresent(_ header: String) async -> Bool? {
-        guard jobRunning, await useHeader(header) else { return nil }
-        let reply = await send(ELM327.testerPresent)
-        return reply.map { ELM327.isTesterPresentAnswer($0) } ?? false
-    }
-
-    /// Most frames one bus capture keeps.
-    private static let captureFrameLimit = 6000
-
-    /// After a block capture: the receive filters back to the defaults (ATCRA without an address, and
-    /// ATAR), and the request header / receive filter set again on the next useHeader.
-    private func resetCaptureFilters() async {
-        _ = await send(ELM327.resetReceiveFilters)
-        _ = await send(ELM327.receiveAuto)
-        currentHeader = nil
-        currentReceive = nil
-    }
-
-    /// Replays an observed CAN frame (an experimental i-stop button candidate): sets the header to `id`,
-    /// turns CAN formatting and responses off, writes the bytes `count` times `interval` apart, then restores. SHORT press
-    /// only — never the 3 s long-press that resets battery management, and IStopController only calls
-    /// it once the engine is running. For runBetweenRounds. False if setup or any frame transmission
-    /// fails; this confirms only that the adapter accepted the send, not that the car acted on it.
-    func injectFrame(id: String, bytes: [UInt8], count: Int, interval: Duration) async -> Bool {
-        let canID = id.uppercased()
-        guard jobRunning, writeChar != nil,
-              canID.count == 3, canID.allSatisfy(\.isHexDigit),
-              let numericID = UInt16(canID, radix: 16), numericID <= 0x7FF,
-              !bytes.isEmpty, bytes.count <= 8 else {
-            logLine("i-stop: can't send frame (invalid CAN ID/data or adapter isn't ready)")
-            return false
-        }
-        guard ELM327.isOK(await send("ATSH" + canID)) else {
-            logLine("i-stop: adapter rejected CAN header \(canID)")
-            await restoreAfterInject()
-            return false
-        }
-        currentHeader = nil                         // not a request header: drop the tracking
-        guard ELM327.isOK(await send(ELM327.formattingOff)) else {
-            logLine("i-stop: adapter rejected ATCAF0 (raw CAN mode)")
-            await restoreAfterInject()
-            return false
-        }
-        guard ELM327.isOK(await send(ELM327.responsesOff)) else {
-            logLine("i-stop: adapter rejected ATR0 (responses off)")
-            await restoreAfterInject()
-            return false
-        }
-        let hex = bytes.map { String(format: "%02X", $0) }.joined()
-        for _ in 0..<max(count, 1) {
-            guard let reply = await sendRaw(hex + "\r", timeout: AppConfig.OBD.replyTimeout) else {
-                logLine("i-stop: raw CAN transmit timed out; vehicle result is unknown")
-                await restoreAfterInject()
-                return false
+    /// For work in runBetweenRounds: `keys` ("726 DA0B", with the data length each returns) read one after
+    /// the other, over and over, as fast as the adapter answers, for `duration` seconds: the wiper finder's
+    /// trace of one wipe. Each read is timed from the start of the trace; `started` is called just before
+    /// the first one goes out. nil if nothing could be asked.
+    func traceDIDs(_ keys: [(key: String, length: Int)], duration: TimeInterval, started: () -> Void,
+                   cancelled: () -> Bool) async -> [WiperMotorAnalysis.Sample]? {
+        guard jobRunning, !keys.isEmpty else { return nil }
+        var samples: [WiperMotorAnalysis.Sample] = []
+        let start = Date()
+        started()
+        tracing: while Date().timeIntervalSince(start) < duration {
+            for entry in keys {
+                if cancelled() || Date().timeIntervalSince(start) >= duration { break tracing }
+                guard writeChar != nil, !Task.isCancelled else { break tracing }   // the adapter went away
+                let parts = entry.key.split(separator: " ")
+                guard parts.count == 2, await useHeader(String(parts[0])) else { continue }
+                let did = String(parts[1])
+                let asked = Date().timeIntervalSince(start)
+                if let reply = await send22(did, complete: entry.length > 4),
+                   let data = ELM327.payload22(did, in: reply), !data.isEmpty {
+                    samples.append(WiperMotorAnalysis.Sample(time: asked, key: entry.key, data: data))
+                }
             }
-            if ELM327.hasCANTransmitError(reply) {
-                logLine("i-stop: adapter rejected raw CAN transmit: \(ELM327.readable(reply))")
-                await restoreAfterInject()
-                return false
-            }
-            try? await Task.sleep(for: interval)
         }
-        await restoreAfterInject()
-        return true
-    }
-
-    /// Back to what the requests need after replaying a frame: responses and CAN formatting on, and
-    /// the request header / receive filter set again on the next useHeader.
-    private func restoreAfterInject() async {
-        _ = await send(ELM327.responsesOn)
-        _ = await send(ELM327.formattingOn)
-        _ = await send(ELM327.receiveAuto)
-        currentHeader = nil
-        currentReceive = nil
+        return samples
     }
 
     /// Live data stopped (or the adapter went away): work still waiting gets nil.
@@ -438,7 +371,7 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
             setSample(nil)
             clearDoors()                                      // unknown now
             clearTurnSignals()
-            clearIStop()
+            clearWiperMotor()
             try? await Task.sleep(for: AppConfig.OBD.retryDelay)
         }
     }
@@ -624,9 +557,6 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
             if !doorSignals.isEmpty, round % max(AppConfig.Doors.pollEveryRounds, 1) == 0 {
                 await readDoors()
             }
-            if let signal = iStopSignal, round % max(AppConfig.IStop.pollEveryRounds, 1) == 0 {
-                await readIStop(signal)
-            }
             let thisRound = round
             round += 1
             if speed != nil || transmission.answered {
@@ -639,12 +569,40 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
                     return
                 }
             }
-            // The indicators come last, so the live data above goes out without waiting for them.
+            // The indicators (and the wiper lever) come last, so the live data above goes out without
+            // waiting for them; the wiper motor, when it's wanted, right after (the receive filter has to
+            // change after listening anyway).
             let listened = await listenToLightsFrame(round: thisRound)
-            if !listened {                         // listening to the bus already took its time
+            let readMotor = await readWiperMotor(round: thisRound)
+            if !listened, !readMotor {             // listening to the bus already took its time
                 try? await Task.sleep(for: AppConfig.OBD.pollInterval)
             }
         }
+    }
+
+    /// The wiper motor bit (`wiperMotorSignal`, set by RainMode while the wiper lever is in AUTO / INT),
+    /// every AppConfig.Rain.motorPollEveryRounds rounds: one service-22 read from the front body control
+    /// module. Published after every reading, an unchanged one too. False when it wasn't read this round.
+    private func readWiperMotor(round: Int) async -> Bool {
+        guard let signal = wiperMotorSignal, round % max(AppConfig.Rain.motorPollEveryRounds, 1) == 0 else {
+            return false
+        }
+        var data: [UInt8]?
+        if await useHeader(signal.header) {
+            let reply = await send22(signal.did, complete: signal.length > 4)
+            data = reply.flatMap { ELM327.payload22(signal.did, in: $0) }
+        }
+        guard wiperMotorSignal == signal else { return true }      // changed meanwhile: this read is stale
+        let raw = data.map { "\(signal.header) 22\(signal.did) = " + Self.hex($0) }
+        if raw != wiperMotorRaw { wiperMotorRaw = raw }
+        wiperMotorRunning = signal.isWiping(data)
+        return true
+    }
+
+    /// Not read any more (lever out of AUTO / INT), live data stopped or the adapter went away: unknown.
+    private func clearWiperMotor() {
+        if wiperMotorRunning != nil { wiperMotorRunning = nil }
+        if wiperMotorRaw != nil { wiperMotorRaw = nil }
     }
 
     /// The lever and gear for this round: from the selector DID (1E23) on cars that have it,
@@ -760,25 +718,6 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         if !doorRaw.isEmpty { doorRaw = [:] }
     }
 
-    /// Reads the learned i-stop state signal and publishes whether i-stop is currently off
-    /// (disabled). A change is logged with the raw value.
-    private func readIStop(_ signal: BitSignal) async {
-        guard await useHeader(signal.header), let data = await readSignal(signal) else { return }
-        let off = signal.isOn(data)
-        if off != iStopOff {
-            if let off {
-                logLine("i-stop: " + (off ? "off (disabled)" : "on (armed)") + " · "
-                        + signal.label(off: "on", on: "off") + " = " + Self.hex(data))
-            }
-            iStopOff = off
-        }
-    }
-
-    /// Live data stopped or the adapter went away: the i-stop state is unknown now.
-    private func clearIStop() {
-        if iStopOff != nil { iStopOff = nil }
-    }
-
     /// "00 00 80"
     private static func hex(_ bytes: [UInt8]) -> String {
         bytes.map { String(format: "%02X", $0) }.joined(separator: " ")
@@ -806,15 +745,17 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         OBDSample(speed: speed, gear: gear, selector: selector)
     }
 
-    // MARK: Lights frame: turn signals (listening to the bus)
+    // MARK: Lights frame: turn signals and the wiper lever (listening to the bus)
 
     /// Listens to the bus for the lights frame (AppConfig.TurnSignals.frameID): the turn signals
-    /// (`turnSignal`) come from it (`lightsFrame` keeps the last one heard, for the dashboard). The
+    /// (`turnSignal`) come from it, and so does the wiper lever (`lightsFrame`, read by RainMode). The
     /// first look of each session lasts `checkListen` with the CAN IDs shown: is the frame there, and
     /// does the adapter keep other frames out while listening? Later looks last as long as
-    /// TurnSignalDetector needs. False when it didn't listen this round.
+    /// TurnSignalDetector needs (only for the first frame when the turn signals are off and only rain
+    /// mode listens). False when it didn't listen this round.
     private func listenToLightsFrame(round: Int) async -> Bool {
-        guard AppConfig.TurnSignals.enabled, !turnListenUnsupported, !receiveFilterUnsupported else {
+        let turnSignalsOn = AppConfig.TurnSignals.enabled
+        guard turnSignalsOn || AppConfig.Rain.enabled, !turnListenUnsupported, !receiveFilterUnsupported else {
             return false
         }
         let every = hearsLightsFrame == false ? AppConfig.TurnSignals.retryRounds : AppConfig.TurnSignals.everyRounds
@@ -822,11 +763,13 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         let id = AppConfig.TurnSignals.frameID
         let firstLook = !turnLooked
         let checkListen = AppConfig.TurnSignals.checkListen
+        let firstFrameTimeout = AppConfig.TurnSignals.firstFrameTimeout
         let within = max(AppConfig.TurnSignals.maxListen, checkListen)
         let heard = await listen(to: id, showingIDs: firstLook || turnShowIDs, within: within) {
             [weak self] frames, started, now in
             guard let self else { return false }
             if firstLook { return now.timeIntervalSince(started) < checkListen }
+            if !turnSignalsOn { return frames.isEmpty && now.timeIntervalSince(started) < firstFrameTimeout }
             return self.turnDetector.keepListening(frames, started: started, now: now)
         }
         // Couldn't listen (no answer, refused): nothing heard. A flash then still ends after holdLimit.
@@ -853,8 +796,9 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
             turnMisses = 0
         }
         if let last = frames.last {
-            lightsFrame = last.data
+            lightsFrame = last.data                         // every look: RainMode counts its readings
         }
+        guard turnSignalsOn else { return true }
         let before = turnDetector.state
         let steadyBefore = turnDetector.steadyBits
         let state = turnDetector.finish(frames, ended: heard?.ended ?? Date())
@@ -877,36 +821,22 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     /// is off meanwhile, so a broadcast frame shows all its data bytes, and on again afterwards; the
     /// receive filter stays on `id` until the next useHeader puts it back. nil if the adapter refused
     /// (listening is then off for this session, see refuseListening).
-    private func listen(to id: String, showingIDs: Bool, within: TimeInterval, captureAll: Bool = false,
-                        block: (filter: Int, mask: Int)? = nil,
+    private func listen(to id: String, showingIDs: Bool, within: TimeInterval,
                         keepListening: @escaping ([CANFrame], Date, Date) -> Bool) async -> Listening? {
         guard await listenSetting(ELM327.formattingOff) else {
             if !turnListenUnsupported { await endListening(showingIDs: false) }   // no answer: make sure it's on
             return nil
         }
-        if showingIDs || captureAll, !(await listenSetting(ELM327.headersOn)) {
+        if showingIDs, !(await listenSetting(ELM327.headersOn)) {
             await endListening(showingIDs: false)
             return nil
         }
-        if captureAll {
-            // Only the ids in the block get through (filter/mask 000/000: every id).
-            let ids = block ?? (filter: 0, mask: 0)
-            currentReceive = nil
-            guard ELM327.isOK(await send(ELM327.idFilter(ids.filter))),
-                  ELM327.isOK(await send(ELM327.idMask(ids.mask))) else {
-                logLine("OBD: the adapter didn't take ATCF/ATCM, so it can't capture one block of the bus")
-                await endListening(showingIDs: true)
-                return nil
-            }
-        } else {
-            guard await listenSetting(ELM327.receiveFilter(id)) else {
-                await endListening(showingIDs: showingIDs)
-                return nil
-            }
-            currentReceive = id
+        guard await listenSetting(ELM327.receiveFilter(id)) else {
+            await endListening(showingIDs: showingIDs)
+            return nil
         }
-        let run = Listening(id: id.uppercased(), showsIDs: showingIDs || captureAll,
-                            captureAll: captureAll, keepListening: keepListening)
+        currentReceive = id
+        let run = Listening(id: id.uppercased(), showsIDs: showingIDs, keepListening: keepListening)
         listening = run
         let ticker = Task { [weak self] in
             while !Task.isCancelled {
@@ -959,10 +889,6 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
             return
         }
         guard run.ended == nil else { return }
-        if run.captureAll {
-            if let id = frame.id, run.allFrames.count < Self.captureFrameLimit { run.allFrames.append((id: id, data: frame.data)) }
-            return
-        }
         if let id = frame.id, id != run.id {
             run.otherIDs.insert(id)
             return
@@ -996,8 +922,8 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         turnListenUnsupported = true
         hearsLightsFrame = false
         clearTurnSignals()
-        logLine("OBD: the adapter can't listen to the bus (\(why)): no turn signals from the car, test "
-                + "buttons only")
+        logLine("OBD: the adapter can't listen to the bus (\(why)): no turn signals or wiper lever from "
+                + "the car, test buttons only")
     }
 
     /// The session's first look, for the log: is the frame there, and what else got through?
@@ -1008,7 +934,7 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
             var line = "OBD: lights frame \(heard.id) not heard on the bus in \(seconds) s"
             if !others.isEmpty { line += " (other frames got through: " + others.prefix(8).joined(separator: " ") + ")" }
             if !heard.notes.isEmpty { line += " (" + heard.notes.prefix(3).joined(separator: " / ") + ")" }
-            logLine(line + "; no turn signals from the car, test buttons only")
+            logLine(line + "; no turn signals or wiper lever from the car, test buttons only")
             return
         }
         var line = "OBD: lights frame \(heard.id) heard (\(heard.frames.count) in \(seconds) s, "
@@ -1016,7 +942,7 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         if !others.isEmpty {
             line += "; the adapter lets other frames through while listening (\(others.count) IDs), sorted out by ID"
         }
-        logLine(line + "; the turn signals come from it")
+        logLine(line + "; the turn signals and the wiper lever come from it")
     }
 
     /// "00 20 20 00": the lamp byte of each frame of a look (the last 12), for the log.
@@ -1156,7 +1082,7 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         clearDoors()
         listening = nil
         clearTurnSignals()
-        clearIStop()
+        clearWiperMotor()
     }
 
     // MARK: CBCentralManagerDelegate

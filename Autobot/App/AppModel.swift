@@ -13,17 +13,22 @@
 //   of the KW905's reach) ──▶ ClimateTempFlash ──scene (climateTemp: blue / red flash)──▶ LightingArbiter
 //   OBDAdapter (TCM gear 7E1 221E12: 3C = lever in R) ──sample──▶ ReverseLight
 //     ──scene (reverse: yellow breathing, Power Mode's level)──▶ LightingArbiter
+//   OBDAdapter (lights frame 09A: the wiper lever, layout from WiperFinder's lever check) ──lightsFrame──▶
+//     RainMode (lever in AUTO / INT: RainMode ──wiperMotorSignal──▶ OBDAdapter reads the FBCM's wiper
+//     motor bit, found by WiperFinder's traces ──wiperMotorRunning──▶ RainMode)
+//     ──scene (rain: cyan breathing, above the normal purple, below Power Mode)──▶ LightingArbiter
 //   (purple steady itself is the `.base` request, under everything else)
 //   OBDAdapter (indicator lamp frame 09A, listened for on HS-CAN) ──turnSignal──▶ TurnSignalFlash
 //     ──scene (turnSignal: current Power Mode colour flash)──▶ LightingArbiter
-//   OBDAdapter (learned i-stop state DID) ──iStopOff──▶ IStopController: at the start of a drive it
-//     may replay an experimental observed frame (OBDAdapter.injectFrame), then checks PCM state.
-//     IStopFinder learns the state DID and compares CAN captures while the physical switch is held.
 //   OBDAdapter (PCM 7E0: RPM, DPF pressure 22F47A, soot, regeneration, exhaust temperatures), only
 //     while the DPF screen is open, between live-data rounds ──▶ DPFMonitor ──▶ DPF screen (charts)
-//   OBDAdapter (220432 count, 220434 distance, once a minute; or DPFMonitor's reads) ──▶ DPFRegenLog
+//   OBDAdapter (220380 flag every 15 s; count, distance, soot once a minute; temperatures while a
+//     regeneration runs; or DPFMonitor's reads) ──▶ DPFRegenLog (start → completed / interrupted)
 //     (each regeneration with the km before it) ──new entry──▶ DPFHistoryFinder (the PCM's last-10
 //     history: finds its DID by the shift after a regeneration, then reads it)
+//   OBDAdapter (PCM 7E0 every 30 s while live data runs, 10 s around a regeneration: PM_GEN / PM_ACC_DSD /
+//     PM_ACC, the regeneration flag / count / distance, what feeds the soot model, a slow DID sweep)
+//     ──▶ DPFRecorder (CSV rows, PM_GEN growth, events) ──▶ DPF screen (PM_GEN card, export)
 //   LampController.isReady ┐
 //   CarPlayMonitor.isConnected ┼──▶ WelcomeAssistant (once per drive, via VoiceCoordinator)
 //   BootSequence finished ─────┘
@@ -57,11 +62,12 @@ final class AppModel: ObservableObject {
     let climate: ClimateTempFlash
     let turnSignals: TurnSignalFlash
     let reverse: ReverseLight
-    let iStop: IStopController
-    let iStopFinder: IStopFinder
+    let rain: RainMode
+    let wiperFinder: WiperFinder
     let dpf: DPFMonitor
     let dpfLog: DPFRegenLog
     let dpfHistory: DPFHistoryFinder
+    let dpfRecorder: DPFRecorder
     private let voice: VoiceCoordinator
     private let doorAlert: DoorSafetyAlert
 
@@ -102,25 +108,26 @@ final class AppModel: ObservableObject {
         self.dpf = dpf
         let dpfLog = DPFRegenLog(obd: obd)
         dpfLog.onLog = { [weak lamp] message in lamp?.addLog(message) }
-        dpf.onValues = { [weak dpfLog] values in
-            dpfLog?.observe(count: values.regenCount, distance: values.regenDistance, soot: values.soot,
-                            regenerating: values.regenerating)
+        dpf.onValues = { [weak dpfLog, weak obd] values in
+            dpfLog?.observe(values, speed: obd?.sample?.speed)
         }
         dpfLog.onRegenerationStarted = { [weak voice] in voice?.announce(AppConfig.Phrases.dpfRegenStarted) }
         self.dpfLog = dpfLog
         let dpfHistory = DPFHistoryFinder(obd: obd)
         dpfHistory.onLog = { [weak lamp] message in lamp?.addLog(message) }
         self.dpfHistory = dpfHistory
+        let dpfRecorder = DPFRecorder(obd: obd, regenLog: dpfLog, history: dpfHistory)
+        dpfRecorder.onLog = { [weak lamp] message in lamp?.addLog(message) }
+        self.dpfRecorder = dpfRecorder
         let reverse = ReverseLight(obd: obd, lighting: lighting)
         reverse.onLog = { [weak lamp] message in lamp?.addLog(message) }
         self.reverse = reverse
-        let iStop = IStopController(obd: obd)
-        iStop.onLog = { [weak lamp] message in lamp?.addLog(message) }
-        self.iStop = iStop
-        let iStopFinder = IStopFinder(obd: obd, controller: iStop,
-                                      announce: { [weak voice] text in voice?.announce(text, urgent: true) })
-        iStopFinder.onLog = { [weak lamp] message in lamp?.addLog(message) }
-        self.iStopFinder = iStopFinder
+        let rain = RainMode(obd: obd, lighting: lighting)
+        rain.onLog = { [weak lamp] message in lamp?.addLog(message) }
+        self.rain = rain
+        let wiperFinder = WiperFinder(obd: obd, rain: rain)
+        wiperFinder.onLog = { [weak lamp] message in lamp?.addLog(message) }
+        self.wiperFinder = wiperFinder
         self.manual = manual
         let mFinder = MFinder(obd: obd)
         mFinder.onLog = { [weak lamp] message in lamp?.addLog(message) }
@@ -176,7 +183,6 @@ final class AppModel: ObservableObject {
         speed.start()
         obd.start()
         carPlay.start()
-        iStop.start()
 
         // The DPF screen's own reads feed the regeneration log while it's open; a recorded regeneration
         // re-reads the PCM's history (and its candidates, to confirm which one it is).
@@ -230,6 +236,11 @@ final class AppModel: ObservableObject {
     /// Debug: as if the lever went into R; the same button again hands back to the car's lever.
     func testReverse() {
         reverse.simulate()
+    }
+
+    /// Debug: as if the wipers were switched on; the same button again hands back to the car's wipers.
+    func testRain() {
+        rain.simulate()
     }
 
     // MARK: Wiring
