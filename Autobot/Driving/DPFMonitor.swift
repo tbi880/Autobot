@@ -53,6 +53,8 @@ final class DPFMonitor: ObservableObject {
     private var task: Task<Void, Never>?
     private var nextID = 0
     private var misses: [MazdaDPF.Value: Int] = [:]
+    /// Values the PCM has answered since the screen opened: a later silence is a gap, not a missing value.
+    private var everAnswered: Set<MazdaDPF.Value> = []
     private var rotationIndex = 0
     private var recentReads: [Date] = []
 
@@ -69,6 +71,7 @@ final class DPFMonitor: ObservableObject {
         points = []
         peakPressure = nil
         misses = [:]
+        everAnswered = []
         unanswered = []
         rotationIndex = 0
         recentReads = []
@@ -95,7 +98,7 @@ final class DPFMonitor: ObservableObject {
         status = "Not monitoring"
         var line = "DPF monitor: stopped"
         if let peakPressure { line += String(format: " · peak back pressure %.2f kPa", peakPressure) }
-        if let soot = reading.sootLoad { line += String(format: " · soot %.2f g/L", soot) }
+        if let generated = reading.sootGenerated { line += String(format: " · PM_GEN %.2f g/L", generated) }
         logLine(line)
     }
 
@@ -161,12 +164,13 @@ final class DPFMonitor: ObservableObject {
     private func handle(_ round: Round, readPressure: Bool, slow: MazdaDPF.Value?) {
         var next = reading
         next.rpm = round.rpm
+        let answering = round.rpm != nil || round.pressure != nil || round.slow != nil
         var pressureNow: Double?
         if readPressure {
             var answered = false
             if let data = round.pressure { answered = next.apply(.pressure, data: data) }
             if answered { pressureNow = next.pressure?.differential }
-            note(.pressure, answered: answered)
+            note(.pressure, answered: answered, pcmAnswering: answering)
         }
         var fresh = DPFReading()
         if let slow {
@@ -175,7 +179,7 @@ final class DPFMonitor: ObservableObject {
                 answered = next.apply(slow, data: data)
                 fresh.apply(slow, data: data)
             }
-            note(slow, answered: answered)
+            note(slow, answered: answered, pcmAnswering: answering)
         }
         onValues?(fresh)
         let before = reading.regenerating
@@ -185,12 +189,15 @@ final class DPFMonitor: ObservableObject {
         updateStatus()
     }
 
-    /// Counts a value the PCM didn't answer; after a few in a row it isn't asked again.
-    private func note(_ value: MazdaDPF.Value, answered: Bool) {
+    /// Counts a value the PCM didn't answer; after a few in a row it isn't asked again. Not counted while
+    /// nothing answers at all (ignition off, adapter busy), and never for a value it has answered.
+    private func note(_ value: MazdaDPF.Value, answered: Bool, pcmAnswering: Bool) {
         if answered {
             misses[value] = 0
+            everAnswered.insert(value)
             return
         }
+        guard pcmAnswering, !everAnswered.contains(value) else { return }
         misses[value, default: 0] += 1
         guard misses[value, default: 0] >= Tuning.missesBeforeSkipping, !unanswered.contains(value) else { return }
         unanswered.insert(value)
@@ -223,14 +230,15 @@ final class DPFMonitor: ObservableObject {
         if now {
             regenStartedAt = Date()
             var line = before == nil ? "DPF: regeneration in progress" : "DPF: regeneration started"
-            if let soot = reading.sootLoad { line += String(format: " · soot %.2f g/L", soot) }
+            if let generated = reading.sootGenerated { line += String(format: " · PM_GEN %.2f g/L", generated) }
+            if let soot = reading.soot { line += String(format: " · PM_ACC %.2f g/L", soot) }
             if let distance = reading.regenDistance { line += String(format: " · %.0f km since the last one", distance) }
             logLine(line)
         } else {
             if let started = regenStartedAt {
                 let minutes = Date().timeIntervalSince(started) / 60
                 var line = String(format: "DPF: regeneration finished after %.1f min (while watched)", minutes)
-                if let soot = reading.sootLoad { line += String(format: " · soot %.2f g/L", soot) }
+                if let soot = reading.soot { line += String(format: " · PM_ACC %.2f g/L", soot) }
                 logLine(line)
             }
             regenStartedAt = nil
@@ -308,8 +316,9 @@ final class DPFMonitor: ObservableObject {
             raw.append((.sootGenerated, Self.bytes16(Int(generated * 65536 / 100))))
             raw.append((.regenStatus, [regenerating ? MazdaDPF.regenStatusMask : 0x00]))
             raw.append((.regenCount, Self.bytes16(count)))
-            let d = Int(distance * 65536 / 100)
-            raw.append((.regenDistance, [0x00, UInt8((d >> 16) & 0xFF), UInt8((d >> 8) & 0xFF), UInt8(d & 0xFF)]))
+            let d = Int(distance * MazdaDPF.regenDistanceUnitsPer100Km / 100)
+            raw.append((.regenDistance, [UInt8((d >> 24) & 0xFF), UInt8((d >> 16) & 0xFF), UInt8((d >> 8) & 0xFF),
+                                         UInt8(d & 0xFF)]))
             let temps = [egt + 40, egt + 15, egt - 10].map { Self.bytes16(Int(($0 + 40) * 10)) }
             raw.append((.exhaustTemps, [0x07] + temps.flatMap { $0 }))
             raw.append((.dpfTemps, [0x03] + Self.bytes16(Int((egt + 40) * 10)) + Self.bytes16(Int((egt + 15) * 10))))
@@ -326,7 +335,7 @@ final class DPFMonitor: ObservableObject {
             raw.append((.coolant, [UInt8(88 + 40)]))
             raw.append((.aftertreatment, [0x1F, regenerating ? 0x03 : 0x00, UInt8(min(255, soot / 6 * 255))]
                         + Self.bytes16(52) + Self.bytes16(310)))
-            raw.append((.oilDilution, Self.bytes16(1180 + count % 50)))
+            raw.append((.oilDilution, Self.bytes16(2 + count % 5)))
             raw.append((.oilDilutionEvents, [UInt8(count % 200)]))
             raw.append((.odometer, [0x01, 0x8A, 0x9C]))
             return (rpm, raw)

@@ -38,7 +38,8 @@ final class DPFRegenLog: ObservableObject {
         var date: Date
         /// The PCM's regeneration count after it.
         var count: Int?
-        /// Distance driven since the regeneration before it, km (the last distance read before it).
+        /// Distance driven since the regeneration before it, km (the last 0434 distance read before it, in
+        /// FORScan's scale: entries from before Nov 2026 were converted).
         var intervalKm: Double?
         /// Soot accumulated (PM_ACC) before it, g/L.
         var sootBefore: Double?
@@ -52,7 +53,7 @@ final class DPFRegenLog: ObservableObject {
         // Recorded since the regeneration flag is followed from start to end (nil in older entries).
         var outcome: Outcome?
         var started: Date?
-        /// Soot load (PM_ACC_DSD) before / after, and PM_ACC after, g/L.
+        /// 042B ("PM_ACC_DSD", not a soot mass on this car: shown nowhere) before / after, and PM_ACC after, g/L.
         var sootDesiredBefore: Double?
         var sootDesiredAfter: Double?
         var sootAfter: Double?
@@ -62,10 +63,11 @@ final class DPFRegenLog: ObservableObject {
         var peakExhaustTemp: Double?
         var peakDPFInletTemp: Double?
         var meanExhaustTemp: Double?
-        /// Odometer at the start / end, km.
+        /// Odometer at the start / end, km: the true distance (MazdaDPF.odometer, + AppConfig.Odometer.offsetKm).
         var odometerStart: Double?
         var odometerEnd: Double?
-        /// Fuel-in-oil value (220 3E1, raw: unit unproven) before / after.
+        /// The PCM's fuel-in-oil estimate (220 3E1, g; the raw value in entries from before Nov 2026, about
+        /// two thirds of it) before / after.
         var oilDilutionBefore: Double?
         var oilDilutionAfter: Double?
         /// Average road speed while it ran, km/h.
@@ -145,18 +147,34 @@ final class DPFRegenLog: ObservableObject {
     /// This regeneration was announced (cleared when the flag goes off or live data stops).
     private var announcedThisOne = false
     private var lastAnnounced: Date?
-    /// Values the PCM didn't answer while polling: not asked again this drive.
+    /// Values the PCM didn't answer while polling: not asked again this drive. One it has answered this
+    /// drive is never skipped (a silence then is the ignition off or the adapter busy).
     private var misses: [MazdaDPF.Value: Int] = [:]
     private var skipped: Set<MazdaDPF.Value> = []
+    private var everAnswered: Set<MazdaDPF.Value> = []
 
     private static let entriesKey = "DPFRegenLog.entries"
     private static let stateKey = "DPFRegenLog.state"
+    private static let unitsKey = "DPFRegenLog.units"
+
+    /// The units the saved values are in, kept next to them so that a change converts them once: 0434's
+    /// scale and AppConfig.Odometer.offsetKm. None saved = from before Nov 2026 (·100/65536, no offset).
+    private struct Units: Codable, Equatable {
+        var regenUnitsPer100Km: Double
+        var odometerOffsetKm: Double
+
+        static let current = Units(regenUnitsPer100Km: MazdaDPF.regenDistanceUnitsPer100Km,
+                                   odometerOffsetKm: AppConfig.Odometer.offsetKm)
+        static let before = Units(regenUnitsPer100Km: MazdaDPF.regenDistanceUnitsPer100KmBefore,
+                                  odometerOffsetKm: 0)
+    }
 
     init(obd: OBDAdapter) {
         self.obd = obd
         if persist {
             entries = Self.load([Entry].self, key: Self.entriesKey) ?? []
             state = Self.load(State.self, key: Self.stateKey) ?? State()
+            convertSaved()
             lastCount = state.count
             lastDistance = state.distance
             lastRead = state.seen
@@ -181,14 +199,13 @@ final class DPFRegenLog: ObservableObject {
     func healthNotes() -> [String] {
         var notes: [String] = []
         let completed = entries.filter { $0.outcome != .interrupted }
-        if let last = completed.first, let after = last.sootDesiredAfter ?? last.sootAfter,
-           after >= Tuning.postRegenSootHigh {
-            notes.append(String(format: "Soot still %.2f g/L after the last regeneration: ash or a clogged "
+        if let last = completed.first, let after = last.sootAfter, after >= Tuning.postRegenSootHigh {
+            notes.append(String(format: "PM_ACC still %.2f g/L after the last regeneration: ash or a clogged "
                                 + "filter? Worth a check if it stays like this.", after))
         }
         let intervals = completed.prefix(Tuning.shortIntervalsInARow).compactMap(\.intervalKm)
         if intervals.count == Tuning.shortIntervalsInARow, intervals.allSatisfy({ $0 < Tuning.shortIntervalKm }) {
-            notes.append(String(format: "The last %d regenerations came less than %.0f km apart (normal is "
+            notes.append(String(format: "The last %d regenerations came less than %.0f km apart (owners report "
                                 + "about 250 km or more).", Tuning.shortIntervalsInARow, Tuning.shortIntervalKm))
         }
         let recent = entries.prefix(Tuning.interruptedInARow)
@@ -213,7 +230,8 @@ final class DPFRegenLog: ObservableObject {
     func observe(_ reading: DPFReading, speed: Double?, at date: Date = Date()) {
         let r = reading
         guard r.regenCount != nil || r.regenDistance != nil || r.regenerating != nil || r.soot != nil
-                || r.sootDesired != nil || !r.exhaustTemps.isEmpty || r.dpfInletTemp != nil else { return }
+                || r.sootDesired != nil || r.sootGenerated != nil || !r.exhaustTemps.isEmpty
+                || r.dpfInletTemp != nil else { return }
         if r.regenerating == true {
             announceStart(at: date)
         } else if r.regenerating == false, (speed ?? 0) >= Tuning.movingSpeed {
@@ -238,7 +256,8 @@ final class DPFRegenLog: ObservableObject {
                               odometerStart: r.odometer ?? s.odometer, oilDilutionBefore: r.oilDilution ?? s.oilDilution,
                               watched: previousSeen.map { date.timeIntervalSince($0) < Tuning.logApproximateAfter } ?? false)
             var line = "DPF log: regeneration started"
-            if let soot = r.sootDesired ?? s.sootDesired { line += String(format: " · soot load %.2f g/L", soot) }
+            if let generated = r.sootGenerated ?? s.sootGenerated { line += String(format: " · PM_GEN %.2f g/L", generated) }
+            if let soot = r.soot ?? s.soot { line += String(format: " · PM_ACC %.2f g/L", soot) }
             if let km = s.active?.distanceBefore { line += String(format: " · %.0f km since the last one", km) }
             onLog?(line)
         }
@@ -378,6 +397,7 @@ final class DPFRegenLog: ObservableObject {
         }
         misses = [:]
         skipped = []
+        everAnswered = []
         let check = max(Tuning.regenCheckInterval.components.seconds, 1)
         let pollEvery = max(1, Int(Tuning.logInterval.components.seconds / check))
         task = Task { [weak self] in
@@ -397,10 +417,10 @@ final class DPFRegenLog: ObservableObject {
         guard !fedByMonitor, obd.isReady else { return }
         var values: [MazdaDPF.Value] = [.regenStatus]
         if full || state.active?.engineOffAt != nil {
-            values += [.regenCount, .regenDistance, .soot, .sootDesired]
+            values += [.regenCount, .regenDistance, .soot, .sootGenerated]
         }
         if state.active != nil {
-            values += [.regenCount, .soot, .sootDesired, .exhaustTemps, .dpfTemps, .odometer, .oilDilution]
+            values += [.regenCount, .soot, .sootGenerated, .exhaustTemps, .dpfTemps, .odometer, .oilDilution]
         }
         let wasActive = state.active != nil
         await read(values)
@@ -426,11 +446,13 @@ final class DPFRegenLog: ObservableObject {
         }
         guard let replies, !fedByMonitor else { return }
         var reading = DPFReading()
+        let pcmAnswering = !replies.isEmpty
         for value in toRead {
             let answered = replies[value].map { reading.apply(value, data: $0) } ?? false
             if answered {
                 misses[value] = 0
-            } else {
+                everAnswered.insert(value)
+            } else if pcmAnswering, !everAnswered.contains(value) {
                 misses[value, default: 0] += 1
                 if misses[value, default: 0] >= Tuning.missesBeforeSkipping { skipped.insert(value) }
             }
@@ -450,7 +472,8 @@ final class DPFRegenLog: ObservableObject {
 
     // MARK: Helpers
 
-    /// "312 km · soot 6.10 g/L · 14.5 min" for the log.
+    /// "312 km · PM_GEN 5.61 at start · 14.5 min" for the log. PM_ACC "at start" only when the start was
+    /// seen: without it, the last PM_ACC read was near the end (the count goes up as one finishes).
     static func describe(_ entry: Entry) -> String {
         var parts: [String] = []
         if entry.outcome == .interrupted {
@@ -461,7 +484,11 @@ final class DPFRegenLog: ObservableObject {
             parts.append("distance unknown")
         }
         if entry.missed > 0 { parts.append("\(entry.missed) more missed") }
-        if let soot = entry.sootDesiredBefore ?? entry.sootBefore { parts.append(String(format: "soot %.2f g/L", soot)) }
+        if let generated = entry.sootGeneratedBefore {
+            parts.append(String(format: "PM_GEN %.2f at start", generated))
+        } else if let soot = entry.sootBefore, entry.started != nil {
+            parts.append(String(format: "PM_ACC %.2f at start", soot))
+        }
         if let minutes = entry.durationMinutes { parts.append(String(format: "%.1f min", minutes)) }
         if let count = entry.count { parts.append("#\(count)") }
         return parts.joined(separator: " · ")
@@ -470,8 +497,12 @@ final class DPFRegenLog: ObservableObject {
     /// The second line: what the regeneration did. nil for entries without any of it.
     static func details(_ entry: Entry) -> String? {
         var parts: [String] = []
-        if let before = entry.sootDesiredBefore ?? entry.sootBefore, let after = entry.sootDesiredAfter ?? entry.sootAfter {
-            parts.append(String(format: "soot %.2f → %.2f g/L", before, after))
+        if let after = entry.sootAfter {
+            if let before = entry.sootBefore, entry.started != nil {
+                parts.append(String(format: "PM_ACC %.2f → %.2f g/L", before, after))
+            } else {
+                parts.append(String(format: "PM_ACC %.2f g/L after", after))
+            }
         }
         if let peak = entry.peakExhaustTemp { parts.append(String(format: "peak EGT %.0f °C", peak)) }
         if let peak = entry.peakDPFInletTemp { parts.append(String(format: "DPF in %.0f °C", peak)) }
@@ -479,10 +510,37 @@ final class DPFRegenLog: ObservableObject {
         if let km = entry.distanceDuring { parts.append(String(format: "%.0f km driven", km)) }
         if let speed = entry.averageSpeed { parts.append(String(format: "%.0f km/h avg", speed)) }
         if let before = entry.oilDilutionBefore, let after = entry.oilDilutionAfter {
-            parts.append(String(format: "oil dil. %.0f → %.0f", before, after))
+            parts.append(String(format: "fuel in oil %.0f → %.0f g", before, after))
         }
         if let odo = entry.odometerStart { parts.append(String(format: "odo %.0f km", odo)) }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    /// Converts what was saved in other units (Units), once: 0434 distances by the ratio of the scales,
+    /// odometer readings by the change in AppConfig.Odometer.offsetKm.
+    private func convertSaved() {
+        let saved = Self.load(Units.self, key: Self.unitsKey) ?? .before
+        if saved != .current {
+            let factor = saved.regenUnitsPer100Km / Units.current.regenUnitsPer100Km
+            let shift = Units.current.odometerOffsetKm - saved.odometerOffsetKm
+            func scaled(_ km: Double?) -> Double? { km.map { $0 * factor } }
+            func shifted(_ odometer: Double?) -> Double? { odometer.map { $0 + shift } }
+            for i in entries.indices {
+                entries[i].intervalKm = scaled(entries[i].intervalKm)
+                entries[i].odometerStart = shifted(entries[i].odometerStart)
+                entries[i].odometerEnd = shifted(entries[i].odometerEnd)
+            }
+            state.distance = scaled(state.distance)
+            state.peakDistance = scaled(state.peakDistance)
+            state.odometer = shifted(state.odometer)
+            if var a = state.active {
+                a.distanceBefore = scaled(a.distanceBefore)
+                a.odometerStart = shifted(a.odometerStart)
+                state.active = a
+            }
+            save()
+        }
+        Self.store(Units.current, key: Self.unitsKey)
     }
 
     private func save() {

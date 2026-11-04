@@ -3,18 +3,25 @@
 // read them. All are UDS service-22 reads ("22<DID>" -> "62<DID><data…>"); F4xx are the standard
 // SAE J1979 mode 01 PIDs mirrored as DIDs (F47A = PID 7A).
 //
-//   Mazda DIDs (names as Mazda's dealer tool / FORScan show them)
-//   042B  PM_ACC_DSD  soot load the PCM regenerates on, g/L — the main gauge
+//   Mazda DIDs (names as Mazda's dealer tool / FORScan show them; names, bits and scaling checked
+//   against FORScan Viewer 1.5.31's PCM definitions for the SKYACTIV-D, Nov 2026)
+//   044B  PM_ACC_DSD  PM accumulation amount desired, g/L: the soot figure the PCM decides on. Mazda's
+//                     DTC P243C test: at a steady 3,000 rpm, twice PM_GEN or more = DPF pressure sensor
 //   042C  PM_ACC      soot accumulated, estimated from the DPF differential pressure, g/L
-//   042D  PM_GEN      soot generated since the last regeneration (modelled), g/L
-//   0380  REG_REQ_A   automatic regeneration request, byte A bit 0: a request rather than "running" (it
-//                     drops to 0 while stopped although the regeneration carries on: see DPFRegenLog)
-//   0432  REG_CNT     regenerations so far (community: goes up as one starts, count − 1 = completed; the
-//                     data recorder's events show the order on this car)
-//   0434  REG_DIS     distance since the last completed regeneration, (B·65536+C·256+D)·100/65536 km
-//   03E1  OIL_DIL     fuel in the oil (calculated) — scaling unproven, shown raw     (low confidence)
-//   0435              oil-dilution events                                           (low confidence)
-//   DD01  TOTAL_DIST  odometer, km
+//   042D  PM_GEN      soot generated since the last regeneration (modelled), g/L — the main gauge
+//   042B  FIP_SCV     NOT soot: the fuel pump's suction control valve current, raw/8000 A (recorder only).
+//                     Community lists called it PM_ACC_DSD; read as g/L it showed 19–25 and followed load
+//   0380  REG_REQ_F / REG_REQ_A  regeneration requests, byte A: bit 0 forced, bit 1 automatic. Requests
+//                     rather than "running" (they drop while stopped although the regeneration carries on:
+//                     see DPFRegenLog). Bit 1 wasn't checked before Nov 2026, so automatic ones were missed
+//   0432  REG_CNT     regenerations so far. On this car it goes up at the END of one: PM_ACC was already
+//                     down at 0–1 g/L every time it went up (Autobot's log, regenerations 280–286)
+//   0434  REG_DIS     distance since the last completed regeneration: the whole value ·100/64000 km
+//   03E1  OIL_DIL     the PCM's estimate of fuel in the oil, (A·256+B)·100000/65535 g (FORScan; Mazda sets
+//                     P252F at 1,661 g, P253F at 2,236 g)
+//   0435  OIL_DIL_CNT times the PCM judged the oil deteriorated
+//   DD01  TOTAL_DIST  odometer as the cluster shows it, km; Autobot adds AppConfig.Odometer.offsetKm
+//                     (this car's odometer was adjusted)
 //
 //   Standard PIDs (byte A = which fields are supported)
 //   F47A  DPF pressures: differential (the back pressure), inlet, outlet, 0.01 kPa
@@ -32,9 +39,11 @@
 //         time and distance between regenerations (not confirmed on the 2015 KE: shows "not answered")
 //
 // The Mazda DIDs and their scaling come from community reverse engineering (the Torque plugin for
-// SKYACTIV-D, FORScan forum users on CX-5 / Mazda6 2.2), not from Mazda documentation; see README,
-// "DPF monitor". A value the PCM refuses is simply not asked again while the screen is open, and the
-// raw bytes are kept next to every decoded value so the scaling can be checked against FORScan.
+// SKYACTIV-D, FORScan forum users on CX-5 / Mazda6 2.2) and FORScan's own PCM definitions, not from
+// Mazda documentation; see README, "DPF monitor". 0434 follows FORScan since Nov 2026 (the whole value
+// ·100/64000); the community ·100/65536 used before read 2.4 % less, and what was saved in it is converted
+// once (DPFRegenLog, DPFRecorder). A value the PCM refuses is simply not asked again while the screen is
+// open, and the raw bytes are kept next to every decoded value so the scaling can be checked against FORScan.
 // RPM comes from the ordinary mode 01 PID 0C (OBDAdapter.readRPM).
 
 import Foundation
@@ -44,13 +53,22 @@ nonisolated enum MazdaDPF {
     /// The engine ECU (PCM): every DPF value lives there.
     static let header = "7E0"
 
-    /// 220380 byte A: the bit that says an automatic regeneration is requested / running (bit 0 on
-    /// SkyActiv-D PCMs per the community lists; the raw byte is on the DPF screen to check it).
-    static let regenStatusMask: UInt8 = 0x01
+    /// 220380 byte A: the regeneration request bits, bit 0 forced (REG_REQ_F) and bit 1 automatic
+    /// (REG_REQ_A) per FORScan's PCM definitions; either one counts as a regeneration (the raw byte is on
+    /// the DPF screen to check it).
+    static let regenStatusMask: UInt8 = 0x03
+    static let regenForcedBit: UInt8 = 0x01
+    static let regenAutomaticBit: UInt8 = 0x02
+
+    /// 220434 REG_DIS: raw units per 100 km, of the whole 4-byte value (FORScan: ·100/64000, 1/640 km a unit).
+    static let regenDistanceUnitsPer100Km = 64_000.0
+    /// The scale Autobot used before Nov 2026 (community lists: ·100/65536 of bytes B–D, 2.4 % less), for
+    /// converting the distances saved in it.
+    static let regenDistanceUnitsPer100KmBefore = 65_536.0
 
     /// One value read from the PCM.
     nonisolated enum Value: String, CaseIterable, Identifiable {
-        case sootDesired = "042B"
+        case sootDesired = "044B"
         case soot = "042C"
         case sootGenerated = "042D"
         case regenStatus = "0380"
@@ -77,7 +95,7 @@ nonisolated enum MazdaDPF {
 
         var label: String {
             switch self {
-            case .sootDesired: return "Soot load (PM_ACC_DSD)"
+            case .sootDesired: return "Soot desired (PM_ACC_DSD)"
             case .soot: return "Soot accumulated (PM_ACC)"
             case .sootGenerated: return "Soot generated (PM_GEN)"
             case .regenStatus: return "Regeneration flag"
@@ -95,8 +113,8 @@ nonisolated enum MazdaDPF {
             case .oilTemp: return "Oil temperature"
             case .coolant: return "Coolant"
             case .aftertreatment: return "Aftertreatment status"
-            case .oilDilution: return "Oil dilution"
-            case .oilDilutionEvents: return "Oil dilution events"
+            case .oilDilution: return "Fuel in the oil (PCM estimate)"
+            case .oilDilutionEvents: return "Oil judged deteriorated"
             case .odometer: return "Odometer"
             }
         }
@@ -150,16 +168,29 @@ nonisolated enum MazdaDPF {
         return result.differential == nil && result.inlet == nil && result.outlet == nil ? nil : result
     }
 
-    /// Soot (042B, 042C, 042D): (256·A + B) · 100 / 65536 g/L.
+    /// Soot (044B, 042C, 042D): (256·A + B) · 100 / 65536 g/L (FORScan: / 65535, the same to 0.002 %).
     static func soot(_ data: [UInt8]) -> Double? {
         guard data.count >= 2 else { return nil }
         return unsigned16(data[0], data[1]) * 100 / 65536
     }
 
-    /// Regeneration request / active (0380): byte A, regenStatusMask (bit 0).
+    /// Regeneration requested (0380): byte A, either bit of regenStatusMask.
     static func regenerating(_ data: [UInt8]) -> Bool? {
         guard let first = data.first else { return nil }
         return first & regenStatusMask != 0
+    }
+
+    /// "forced", "automatic", "forced + automatic", or nil when neither bit is on (0380 byte A).
+    static func regenKind(_ data: [UInt8]) -> String? {
+        guard let first = data.first else { return nil }
+        let forced = first & regenForcedBit != 0
+        let automatic = first & regenAutomaticBit != 0
+        switch (forced, automatic) {
+        case (true, true): return "forced + automatic"
+        case (true, false): return "forced"
+        case (false, true): return "automatic"
+        default: return nil
+        }
     }
 
     /// Regenerations so far (0432): 256·A + B.
@@ -168,10 +199,12 @@ nonisolated enum MazdaDPF {
         return Int(data[0]) * 256 + Int(data[1])
     }
 
-    /// Distance since the last regeneration (0434): (B·65536 + C·256 + D) · 100 / 65536 km; A unused.
+    /// Distance since the last regeneration (0434): the whole value, A·2²⁴ + B·65536 + C·256 + D, · 100 /
+    /// 64000 km (FORScan).
     static func regenDistance(_ data: [UInt8]) -> Double? {
         guard data.count >= 4 else { return nil }
-        return Double(Int(data[1]) << 16 | Int(data[2]) << 8 | Int(data[3])) * 100 / 65536
+        let raw = Int(data[0]) << 24 | Int(data[1]) << 16 | Int(data[2]) << 8 | Int(data[3])
+        return Double(raw) * 100 / regenDistanceUnitsPer100Km
     }
 
     /// Exhaust gas temperatures (F478, PID 78), °C by sensor number 1–4: byte 0 says which are
@@ -279,16 +312,27 @@ nonisolated enum MazdaDPF {
         return result == Aftertreatment() ? nil : result
     }
 
-    /// 2-byte value as it is (03E1 oil dilution: unit unproven).
+    /// 2-byte value as it is.
     static func word(_ data: [UInt8]) -> Double? {
         guard data.count >= 2 else { return nil }
         return unsigned16(data[0], data[1])
     }
 
-    /// Odometer (DD01): 65536·A + 256·B + C km.
-    static func odometer(_ data: [UInt8]) -> Double? {
+    /// The PCM's estimate of fuel in the oil (03E1, OIL_DIL): (A·256 + B) · 100000 / 65535 g (FORScan).
+    static func oilDilution(_ data: [UInt8]) -> Double? {
+        word(data).map { $0 * 100000 / 65535 }
+    }
+
+    /// Odometer as the cluster shows it (DD01): 65536·A + 256·B + C km.
+    static func odometerShown(_ data: [UInt8]) -> Double? {
         guard data.count >= 3 else { return nil }
         return Double(Int(data[0]) << 16 | Int(data[1]) << 8 | Int(data[2]))
+    }
+
+    /// The distance the car has really covered: the odometer (DD01) + AppConfig.Odometer.offsetKm, as this
+    /// car's odometer was adjusted. What Autobot shows, logs and records.
+    static func odometer(_ data: [UInt8]) -> Double? {
+        odometerShown(data).map { $0 + AppConfig.Odometer.offsetKm }
     }
 
     // MARK: Helpers
@@ -329,9 +373,12 @@ nonisolated struct DPFReading: Equatable {
     var oilTemp: Double?
     var coolant: Double?
     var aftertreatment: MazdaDPF.Aftertreatment?
+    /// The PCM's estimate of fuel in the oil, g.
     var oilDilution: Double?
     var oilDilutionEvents: Int?
+    /// The true distance (+ AppConfig.Odometer.offsetKm) and what the cluster shows, km.
     var odometer: Double?
+    var odometerShown: Double?
     /// The last raw data bytes of every value, by DID, for checking the scaling.
     var raw: [String: [UInt8]] = [:]
 
@@ -367,15 +414,18 @@ nonisolated struct DPFReading: Equatable {
         case .oilTemp: oilTemp = MazdaDPF.celsius(data)
         case .coolant: coolant = MazdaDPF.celsius(data)
         case .aftertreatment: aftertreatment = MazdaDPF.aftertreatment(data)
-        case .oilDilution: oilDilution = MazdaDPF.word(data)
+        case .oilDilution: oilDilution = MazdaDPF.oilDilution(data)
         case .oilDilutionEvents: oilDilutionEvents = data.first.map(Int.init)
-        case .odometer: odometer = MazdaDPF.odometer(data)
+        case .odometer:
+            odometer = MazdaDPF.odometer(data)
+            odometerShown = MazdaDPF.odometerShown(data)
         }
         return true
     }
 
-    /// The soot figure for gauges and thresholds: PM_ACC_DSD (what the PCM regenerates on), else PM_ACC.
-    var sootLoad: Double? { sootDesired ?? soot }
+    /// The soot figure for gauges and thresholds: PM_GEN (the modelled soot a regeneration starts on),
+    /// else PM_ACC. PM_ACC_DSD (044B) is shown next to them.
+    var sootLoad: Double? { sootGenerated ?? soot }
 
     /// The hottest exhaust / DPF temperature reported, °C.
     var hottestExhaust: Double? {

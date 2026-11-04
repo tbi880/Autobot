@@ -16,6 +16,17 @@ nonisolated enum AppConfig {
         static let name = "Tim"
     }
 
+    /// This car's odometer, as the engine ECU reports it (22DD01: the DPF screen, the regeneration log
+    /// and the DPF recorder).
+    nonisolated enum Odometer {
+        /// Added to the odometer reading, km. This car's odometer was adjusted: the distance it has really
+        /// covered is this much more than the cluster shows. Everything Autobot shows, logs and exports
+        /// uses the corrected figure; the cluster's own reading stays on the DPF screen and in the
+        /// recording (odometer_shown_km). 0 = no correction. A change converts the odometer readings the
+        /// regeneration log has saved, once.
+        static let offsetKm: Double = 27_668
+    }
+
     /// Power Mode: red gradient breathing in M, purple steady otherwise.
     enum PowerMode {
         enum Trigger {
@@ -220,13 +231,14 @@ nonisolated enum AppConfig {
     enum DPF {
         /// The feature on or off. Off: the dashboard row is hidden.
         static let enabled = true
-        /// Every read: RPM + DPF pressure, plus the next of these in turn. The soot load (PM_ACC_DSD)
-        /// and the regeneration flag come round three times per cycle, the rest once; a value the PCM
-        /// doesn't answer drops out until the screen is opened again.
+        /// Every read: RPM + DPF pressure, plus the next of these in turn. PM_GEN (the soot model a
+        /// regeneration starts on) and the regeneration requests come round three times per cycle, the
+        /// rest (PM_ACC_DSD, 044B, among them) once; a value the PCM doesn't answer drops out until the
+        /// screen is opened again (not while the PCM answers nothing at all, and never one it has answered).
         static let rotation: [MazdaDPF.Value] = [
-            .sootDesired, .regenStatus, .soot, .exhaustTemps, .egr,
-            .sootDesired, .regenStatus, .dpfTemps, .sootGenerated, .boost, .exhaustPressure,
-            .sootDesired, .regenStatus, .airFlow, .intakeShutter, .chargeAir, .oilTemp, .coolant,
+            .sootGenerated, .regenStatus, .soot, .exhaustTemps, .egr,
+            .sootGenerated, .regenStatus, .dpfTemps, .sootDesired, .boost, .exhaustPressure,
+            .sootGenerated, .regenStatus, .airFlow, .intakeShutter, .chargeAir, .oilTemp, .coolant,
             .regenCount, .regenDistance, .aftertreatment, .oilDilution, .oilDilutionEvents, .odometer,
         ]
         /// At least this long from the start of one read to the next, so live data keeps its pace.
@@ -239,12 +251,12 @@ nonisolated enum AppConfig {
         /// is open (reopen to try again), or for the rest of the drive by the regeneration log.
         static let missesBeforeSkipping = 3
 
-        /// Soot load gauge (PM_ACC_DSD, g/L), from Mazda's SKYACTIV-D 2.2 workshop manual and owner logs:
-        /// a regeneration is usually triggered from about 5.5–6; the DPF light comes on at 8; at 10 it
-        /// flashes and the PCM stops regenerating by itself (dealer); 13 sets the check-engine light
-        /// (P2463); 17 means a new DPF (P242F).
-        static let sootFullScale = 12.0
-        static let sootHigh = 5.5
+        /// Soot gauge (PM_GEN, else PM_ACC, g/L; not 042B, which follows engine load), from Mazda's
+        /// SKYACTIV-D 2.2 workshop manual and owner logs: a regeneration starts at about `pmGenTrigger`;
+        /// from `sootHigh` it's close; the DPF light comes on at 8; at 10 it flashes and the PCM stops
+        /// regenerating by itself (dealer); 13 sets the check-engine light (P2463); 17 means a new DPF (P242F).
+        static let sootFullScale = 10.0
+        static let sootHigh = 4.5
         static let sootWarning = 8.0
         static let sootCritical = 10.0
         /// Test mode (AppConfig.TestMode): simulated readings this often.
@@ -303,7 +315,7 @@ nonisolated enum AppConfig {
         static let historyScanSecondsPerDID = 0.1
         /// Entries in the PCM's history, and km per raw unit for 1-byte entries (the Torque preset for
         /// the SkyActiv-D shows each byte doubled; it read 30 km more than the dealer tool). 2-byte
-        /// entries are read as km, 3- and 4-byte ones in 100/65536 km like 220434.
+        /// entries are read as km, 3- and 4-byte ones like 220434 (the whole value ·100/64000 km).
         static let historyEntries = 10
         static let historyKmPerUnit = 2.0
         /// A candidate needs at least `historyMinPlausible` of its 10 entries in this range (km) and at
@@ -328,13 +340,24 @@ nonisolated enum AppConfig {
         /// The first sample after the engine ECU starts answering (seconds).
         static let recordFirstDelay: TimeInterval = 15
         /// How much is read per go between two live-data rounds, so Power Mode, reverse and the turn signals
-        /// keep their pace: a single-frame read counts 1 (~50–100 ms), a reply of several frames 3.
-        static let recordJobBudget = 4
+        /// keep their pace: a single-frame read counts 1 (~50–100 ms), a reply of several frames 3. Every go
+        /// starts with RPM (1), so the values can be lined up with the engine speed afterwards.
+        static let recordJobBudget = 5
         /// The DID sweep (raw only): DIDs per 30 s sample, the PCM blocks it goes through, the wait per DID.
         /// The first pass finds which DIDs exist (~15 min of driving); after that only those are read.
         static let recordSweepPerSample = 24
         static let recordSweepRanges: [ClosedRange<Int>] = [0x0300...0x04FF, 0xDA00...0xDAFF]
         static let recordSweepTimeout: TimeInterval = 0.6
+        /// DIDs the sweep found not there, asked again per sample, in turn (one can be missed while the PCM
+        /// is busy; ~3 h of driving goes through all of them).
+        static let recordSweepRecheck = 2
+        /// Parked check (DPF screen, user-started; README "DPF data recorder"): this long, a sample every
+        /// `recordCheckInterval` s (back to back in practice), up to `recordCheckJobBudget` per go (the car
+        /// is parked, live data can wait), ended once the road speed passes `recordCheckMaxSpeed` km/h.
+        static let recordCheckDuration: TimeInterval = 180
+        static let recordCheckInterval: TimeInterval = 2
+        static let recordCheckJobBudget = 12
+        static let recordCheckMaxSpeed = 3.0
         /// A new CSV file past this size (bytes); the oldest ones go once all of them are over the total.
         static let recordMaxFileBytes = 20_000_000
         static let recordMaxTotalBytes = 60_000_000
@@ -343,9 +366,9 @@ nonisolated enum AppConfig {
         static let recordMaxDrives = 500
         static let recordCycleMaxPoints = 3000
         /// Events: PM_GEN falling by more than this (g/L) between two samples starts a new cycle;
-        /// PM_ACC_DSD moving by this much (g/L) is noted.
+        /// PM_ACC_DSD (044B) moving by this much (g/L) is noted.
         static let recordGenDrop = 1.0
-        static let recordDsdJump = 3.0
+        static let recordDsdJump = 1.0
         /// Fuel used (PID 5E) is only added up between samples at most this far apart (seconds).
         static let recordFuelGap: TimeInterval = 120
 
@@ -358,14 +381,108 @@ nonisolated enum AppConfig {
         static let rateWindowMinutes = 10.0
         static let rateMinMinutes = 3.0
         static let rateMinFuel = 1.0
-        /// A regeneration starts when PM_GEN (or PM_ACC_DSD) reaches about this with the oil warm (owner
-        /// logs on the FORScan forum; 6+ with the oil at 40–80 °C). A healthy 2.2 (a regeneration every
-        /// 250–400 km) grows about `pmGenHealthyRate` g/L per 100 km; from `pmGenRateHigh` the DPF screen
-        /// flags it, once the last regeneration is at least `pmGenVerdictMinKm` back.
+        /// A regeneration starts when PM_GEN reaches about this with the oil warm (owner logs on the
+        /// FORScan forum; 6+ with the oil at 40–80 °C; the recorder's "0380 request" event shows this
+        /// car's). Owners report a regeneration every 250–400 km in mixed driving: about
+        /// `pmGenHealthyRate` g/L per 100 km at that trigger (an estimate, not a Mazda figure); from
+        /// `pmGenRateHigh` the DPF screen flags it, once the last regeneration is `pmGenVerdictMinKm` back.
         static let pmGenTrigger = 5.6
         static let pmGenHealthyRate: ClosedRange<Double> = 1.5...2.5
         static let pmGenRateHigh = 3.5
         static let pmGenVerdictMinKm = 15.0
+    }
+
+    /// Engine health watch (EngineHealth, shown on the DPF screen): the values tied to fuel getting into the
+    /// oil, each with a normal range and a "watch" level before the PCM's own fault codes. Fed by the DPF
+    /// recorder's samples. "Mazda" = the SKYACTIV-D 2.2 workshop manual; the rest is Autobot's own guide.
+    /// See README, "Engine health".
+    enum EngineHealth {
+        // Fuel in the oil: 03E1 OIL_DIL, the PCM's own estimate, g (FORScan's scale).
+        static let oilDilutionWatch = 500.0
+        static let oilDilutionHigh = 1_200.0
+        /// Mazda: P252F "engine oil level too high" at 1,661 g, P253F "engine oil deteriorated" at 2,236 g
+        /// (neither turns the check-engine light on).
+        static let oilDilutionP252F = 1_661.0
+        static let oilDilutionP253F = 2_236.0
+        /// Regeneration log entries looked at (fuel added per regeneration, interrupted ones).
+        static let regenEntriesUsed = 10
+        // Hot oil pressure (0415 EOP), the way the PCM checks it for P253F: 1,475–1,525 rpm with the oil at
+        // 87–88 °C, 40 kPa below the value after the oil change. Widened here, as samples are 30 s apart.
+        static let oilPressureRPM: ClosedRange<Double> = 1_400...1_600
+        static let oilPressureOilTemp: ClosedRange<Double> = 85...95
+        /// Readings in the median, and in the baseline (the first ones after an oil change); at least
+        /// `oilPressureMinSamples` before it says anything.
+        static let oilPressureSamples = 20
+        static let oilPressureMinSamples = 5
+        static let oilPressureDropWatch = 20.0
+        static let oilPressureDropHigh = 30.0
+        static let oilPressureDropP253F = 40.0
+        /// Mazda: 140–190 kPa at 1,500 rpm with the oil at 70–80 °C; hotter oil reads a little lower.
+        static let oilPressureLow = 130.0
+        /// 0519 at most this far when the watch first sees it: the baseline counts as "after the oil change".
+        static let oilPressureBaselineMaxKm = 1_000.0
+        /// 0519 going back by more than this is an oil change.
+        static let oilChangeSeenDropKm = 300.0
+        static let oilChangeWatchKm = 7_500.0
+        static let oilChangeHighKm = 10_000.0
+        // Temperatures. Mazda: the thermostat starts opening at 80–84 °C and is fully open at 95 °C.
+        static let coolantWarm = 80.0
+        /// Driving this long (minutes on the move) and the coolant still under coolantWarm: slow warm-up.
+        static let coolantWarmUpMinutes = 15.0
+        /// Once warm, the coolant under this on the move (a thermostat stuck open cools too much), this many
+        /// samples in a drive.
+        static let coolantCruiseLow = 78.0
+        static let coolantDipsWatch = 3
+        /// Drives starting colder than this outside aren't judged for the warm-up.
+        static let coolantMinAmbient = 0.0
+        static let coolantHigh = 105.0
+        /// Fuel boils out of the oil above about oilHot; a drive "got the oil hot" with oilHotMinutes there.
+        static let oilHot = 90.0
+        static let oilHotMinutes = 10.0
+        /// Drives in a row whose oil never reached oilWarm.
+        static let oilWarm = 80.0
+        static let coldDrivesWatch = 3
+        static let coldDrivesHigh = 6
+        /// After this long off, coolant, oil, intake and outside air should read about the same.
+        static let coldStartOffHours = 6.0
+        static let coldStartSpreadWatch = 8.0
+        static let coldStartSpreadHigh = 15.0
+        /// The first samples of a drive (minutes) give its cold-start temperatures.
+        static let firstSampleMinutes = 2.0
+        // Fuel system. Mazda: rail about 40 MPa at idle, 80 MPa at 4,000 rpm; injector corrections about
+        // ±0.3 mm³/stroke; idle 800 rpm (automatic) within 50 rpm of the target.
+        static let railMinSamples = 10
+        static let railGapWatch = 3.0
+        static let railGapHigh = 6.0
+        static let injectorCorrectionWatch = 0.8
+        static let injectorCorrectionHigh = 1.5
+        static let injectorLearningDriftWatch = 40.0
+        static let injectorLearningDriftHigh = 80.0
+        static let idleDeviationRPM = 50.0
+        static let idleMinSamples = 5
+        static let idleOffShareWatch = 0.3
+        static let idleOffShareHigh = 0.5
+        // Regeneration. Owners report 250–400 km between regenerations in mixed driving.
+        static let regenIntervalsAveraged = 5
+        static let regenIntervalNormalKm = 250.0
+        static let regenIntervalHighKm = 150.0
+        static let interruptedWatch = 2
+        static let interruptedHigh = 4
+        /// PM_GEN per 100 km since the last regeneration, g/L (as AppConfig.DPF.pmGenHealthyRate / pmGenRateHigh).
+        static let pmGenRateWatch = 2.5
+        static let pmGenRateHigh = 3.5
+        // Air: fresh air flow (F466, PID 66) against the PCM's target MAF_DSD (040C), warm, on the move, not
+        // regenerating, in this RPM range; off by more than mafDeviation.
+        static let mafRPM: ClosedRange<Double> = 1_200...2_500
+        static let mafMinTarget = 5.0
+        static let mafDeviation = 0.25
+        static let mafMinSamples = 10
+        static let mafOffShareWatch = 0.3
+        // Drives.
+        static let drivesKept = 10
+        static let movingSpeed = 5.0
+        /// A longer gap between two samples counts as this many seconds (live data stopped meanwhile).
+        static let maxSampleGap: TimeInterval = 60
     }
 
     /// Turn signals and hazard lights (TurnSignalFlash): flash in the current Power Mode colour while

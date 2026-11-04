@@ -21,6 +21,7 @@ struct DPFMonitorButton: View {
             HStack {
                 Label("DPF monitor", systemImage: "aqi.medium")
                 Spacer()
+                EngineHealthBadge(health: recorder.health)
                 Text(summary)
                     .font(.subheadline)
                     .foregroundColor(regenerating ? .orange : .secondary)
@@ -41,7 +42,8 @@ struct DPFMonitorButton: View {
         if let rate = recorder.rate.sinceRegen, (recorder.rate.regenKm ?? 0) >= Tuning.pmGenVerdictMinKm {
             return String(format: "PM_GEN %.1f g/L/100 km", rate)
         }
-        if let soot = monitor.reading.sootLoad { return String(format: "Soot %.1f g/L", soot) }
+        if let generated = monitor.reading.sootGenerated { return String(format: "PM_GEN %.2f g/L", generated) }
+        if let soot = monitor.reading.soot { return String(format: "PM_ACC %.2f g/L", soot) }
         return "Back pressure · soot"
     }
 }
@@ -67,11 +69,13 @@ struct DPFMonitorView: View {
                     headline
                     if regenerating { regenBanner }
                     if !healthNotes.isEmpty { healthCard }
+                    engineHealthCard
                     liveCharts
                     pressureVersusRPM
                     dpfCard
                     pmGenCard
                     recorderCard
+                    checkCard
                     historyCard
                     temperatureCard
                     engineCard
@@ -108,14 +112,19 @@ struct DPFMonitorView: View {
             HStack(spacing: 12) {
                 tile("DPF back pressure", value: number(monitor.reading.pressure?.differential, "%.2f"),
                      unit: "kPa", caption: monitor.peakPressure.map { String(format: "peak %.2f kPa", $0) })
-                tile("Engine speed", value: number(monitor.reading.rpm, "%.0f"), unit: "rpm",
-                     caption: monitor.reading.sootLoad.map { String(format: "soot load %.2f g/L", $0) })
+                tile("Engine speed", value: number(monitor.reading.rpm, "%.0f"), unit: "rpm", caption: sootCaption)
             }
             Text(monitor.status)
                 .font(.caption)
                 .foregroundColor(monitor.isRunning && !monitor.points.isEmpty ? .green : .secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+
+    /// "PM_GEN 2.80 g/L" (else PM_ACC) under the RPM tile.
+    private var sootCaption: String? {
+        if let generated = monitor.reading.sootGenerated { return String(format: "PM_GEN %.2f g/L", generated) }
+        return monitor.reading.soot.map { String(format: "PM_ACC %.2f g/L", $0) }
     }
 
     private func tile(_ title: String, value: String, unit: String, caption: String?) -> some View {
@@ -164,12 +173,16 @@ struct DPFMonitorView: View {
         .cornerRadius(12)
     }
 
-    /// "soot 6.12 g/L at start · now 2.40 · peak EGT 612 °C · after 287 km"
+    /// "PM_GEN 5.61 at start · PM_ACC 4.40 → 2.10 · peak EGT 612 °C · after 117 km"
     private var activeText: String? {
         guard let a = log.active else { return nil }
         var parts: [String] = []
-        if let soot = a.sootDesiredBefore ?? a.sootBefore { parts.append(String(format: "soot %.2f g/L at start", soot)) }
-        if let now = monitor.reading.sootLoad { parts.append(String(format: "now %.2f", now)) }
+        if let generated = a.sootGeneratedBefore { parts.append(String(format: "PM_GEN %.2f at start", generated)) }
+        if let soot = a.sootBefore {
+            parts.append(String(format: "PM_ACC %.2f", soot) + (monitor.reading.soot.map { String(format: " → %.2f", $0) } ?? ""))
+        } else if let now = monitor.reading.soot {
+            parts.append(String(format: "PM_ACC now %.2f", now))
+        }
         if let peak = a.peakExhaustTemp { parts.append(String(format: "peak EGT %.0f °C", peak)) }
         if let km = a.distanceBefore { parts.append(String(format: "after %.0f km", km)) }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
@@ -179,10 +192,10 @@ struct DPFMonitorView: View {
         var notes = log.healthNotes()
         if let soot = monitor.reading.sootLoad, soot >= Tuning.sootWarning {
             notes.insert(soot >= Tuning.sootCritical
-                         ? String(format: "Soot load %.1f g/L: at 10 g/L or more the PCM stops regenerating by "
+                         ? String(format: "Soot %.1f g/L (PM_GEN): at 10 g/L or more the PCM stops regenerating by "
                                   + "itself — see a dealer.", soot)
-                         : String(format: "Soot load %.1f g/L: the DPF light comes on from 8 g/L. A long drive at "
-                                  + "steady speed lets it regenerate.", soot), at: 0)
+                         : String(format: "Soot %.1f g/L (PM_GEN): the DPF light comes on from 8 g/L. A long drive "
+                                  + "at steady speed lets it regenerate.", soot), at: 0)
         }
         if let now = sinceRegenNow, now.km >= Tuning.pmGenVerdictMinKm, now.rate >= Tuning.pmGenRateHigh {
             notes.append(pmGenNote(rate: now.rate))
@@ -354,6 +367,13 @@ struct DPFMonitorView: View {
             sootGauge
             row("Soot accumulated (PM_ACC)", number(monitor.reading.soot, "%.2f", " g/L"), value: .soot)
             row("Soot generated (PM_GEN)", number(monitor.reading.sootGenerated, "%.2f", " g/L"), value: .sootGenerated)
+            row(MazdaDPF.Value.sootDesired.label, number(monitor.reading.sootDesired, "%.2f", " g/L"), value: .sootDesired)
+            if let ratio = desiredRatio {
+                Text(String(format: "PM_ACC_DSD is %.1f× PM_GEN. Mazda's test for the DPF pressure sensor (DTC "
+                            + "P243C) flags twice PM_GEN or more at a steady 3,000 rpm: the parked check below.", ratio))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
             row("Since last regeneration", number(monitor.reading.regenDistance, "%.1f", " km"), value: .regenDistance)
             row("Regenerations", monitor.reading.regenCount.map { "\($0)" } ?? "--", value: .regenCount)
             row("Regeneration flag", regenText, value: .regenStatus)
@@ -366,6 +386,12 @@ struct DPFMonitorView: View {
             row("Peak back pressure (this session)", number(monitor.peakPressure, "%.2f", " kPa"), value: nil)
             row("Exhaust pressure (upstream)", number(monitor.reading.exhaustPressure, "%.2f", " kPa"), value: .exhaustPressure)
             row("Odometer", number(monitor.reading.odometer, "%.0f", " km"), value: .odometer)
+            if AppConfig.Odometer.offsetKm != 0, let shown = monitor.reading.odometerShown {
+                Text(String(format: "Cluster %.0f km + %.0f km (AppConfig.Odometer.offsetKm: the odometer was "
+                            + "adjusted).", shown, AppConfig.Odometer.offsetKm))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
             aftertreatmentRows
         }
     }
@@ -388,13 +414,14 @@ struct DPFMonitorView: View {
         }
     }
 
+    /// PM_GEN (else PM_ACC) against the ~5.6 g/L a regeneration starts at.
     @ViewBuilder
     private var sootGauge: some View {
         if let soot = monitor.reading.sootLoad {
             let level = sootLevel(soot)
             Gauge(value: min(max(soot, 0), Tuning.sootFullScale), in: 0...Tuning.sootFullScale) {
                 HStack {
-                    Text(monitor.reading.sootDesired != nil ? "Soot load (PM_ACC_DSD)" : "Soot accumulated")
+                    Text(monitor.reading.sootGenerated != nil ? "Soot generated (PM_GEN)" : "Soot accumulated (PM_ACC)")
                     Spacer()
                     Text(String(format: "%.2f g/L", soot)).monospacedDigit()
                 }
@@ -405,7 +432,7 @@ struct DPFMonitorView: View {
             .gaugeStyle(.linearCapacity)
             .tint(level.color)
         } else {
-            row("Soot load (PM_ACC_DSD)", "--", value: .sootDesired)
+            row("Soot generated (PM_GEN)", "--", value: .sootGenerated)
         }
     }
 
@@ -416,14 +443,27 @@ struct DPFMonitorView: View {
         if soot >= Tuning.sootWarning {
             return ("DPF light range: a long steady drive", "exclamationmark.triangle", .red)
         }
-        if soot >= Tuning.sootHigh { return ("A regeneration is due", "flame", .orange) }
-        return ("OK", "checkmark.circle", .green)
+        if soot >= Tuning.pmGenTrigger { return ("A regeneration is due", "flame", .orange) }
+        if soot >= Tuning.sootHigh {
+            return (String(format: "Close to the ~%.1f g/L a regeneration starts at", Tuning.pmGenTrigger), "flame", .yellow)
+        }
+        return (String(format: "OK · a regeneration starts at about %.1f g/L", Tuning.pmGenTrigger), "checkmark.circle", .green)
     }
 
+    /// "On, automatic (02)": byte A bit 0 is the forced request, bit 1 the automatic one.
     private var regenText: String {
         guard let running = monitor.reading.regenerating else { return "--" }
-        let raw = monitor.reading.raw[MazdaDPF.Value.regenStatus.did]?.first.map { String(format: " (%02X)", $0) } ?? ""
-        return (running ? "On" : "Off") + raw
+        let data = monitor.reading.raw[MazdaDPF.Value.regenStatus.did] ?? []
+        let raw = data.first.map { String(format: " (%02X)", $0) } ?? ""
+        guard running else { return "Off" + raw }
+        return "On" + (MazdaDPF.regenKind(data).map { ", " + $0 } ?? "") + raw
+    }
+
+    /// PM_ACC_DSD ÷ PM_GEN from this screen's latest reads.
+    private var desiredRatio: Double? {
+        guard let desired = monitor.reading.sootDesired, let generated = monitor.reading.sootGenerated,
+              generated > 0.2 else { return nil }
+        return desired / generated
     }
 
     // MARK: PM_GEN growth and the data recorder
@@ -446,9 +486,9 @@ struct DPFMonitorView: View {
             row(String(format: "Last %.0f km", Tuning.rateWindowKm), recentText(rate), value: nil)
             row(String(format: "Per hour (last %.0f min)", Tuning.rateWindowMinutes),
                 number(rate.perHour, "%.2f", " g/L/h"), value: nil)
-            row("PM_ACC_DSD, same stretch", perHundred(rate.dsdRecent), value: nil)
             row(String(format: "%.1f g/L in about", Tuning.pmGenTrigger), number(rate.kmToTrigger, "%.0f", " km"),
                 value: nil)
+            row("PM_ACC ÷ PM_GEN (pressure ÷ model)", accRatioText, value: nil)
             if let fuel = rate.fuelSinceRegen {
                 row("Fuel since the last regeneration", String(format: "%.1f L", fuel), value: nil)
             }
@@ -468,32 +508,44 @@ struct DPFMonitorView: View {
 
     private func pmGenNote(rate: Double) -> String {
         String(format: """
-            PM_GEN is growing %.1f g/L per 100 km (a healthy 2.2: about %.1f–%.1f), so the PCM's soot model \
-            reaches the ~%.1f g/L that starts a regeneration after about %.0f km. The model works from engine \
-            speed, intake air and injected fuel: look at those (injectors, air flow, EGR) more than at the filter.
-            """, rate, Tuning.pmGenHealthyRate.lowerBound, Tuning.pmGenHealthyRate.upperBound,
-            Tuning.pmGenTrigger, Tuning.pmGenTrigger / rate * 100)
+            PM_GEN is growing %.1f g/L per 100 km, so the PCM's soot model reaches the ~%.1f g/L that starts a \
+            regeneration after about %.0f km (owners report 250–400 km, about %.1f–%.1f g/L per 100 km). The \
+            model works from engine speed, intake air and injected fuel: look at those (air flow, boost, EGR, \
+            injectors) more than at the filter.
+            """, rate, Tuning.pmGenTrigger, Tuning.pmGenTrigger / rate * 100,
+            Tuning.pmGenHealthyRate.lowerBound, Tuning.pmGenHealthyRate.upperBound)
     }
 
     private var pmGenExplanation: String {
         String(format: """
             PM_GEN is the soot the PCM's model says the engine has made since the last regeneration, worked \
             out from engine speed, intake air and injected fuel (Mazda workshop manual). A regeneration starts \
-            when it, or PM_ACC_DSD, reaches about %.1f g/L with the oil warm (owner logs). A healthy 2.2 grows \
-            about %.1f–%.1f g/L per 100 km: a regeneration every 250–400 km. The data recorder works it out \
-            every %.0f s.
+            when it reaches about %.1f g/L with the oil warm (owner logs; the recorder's "0380 request" event \
+            shows this car's). Owners report a regeneration every 250–400 km in mixed driving, about %.1f–%.1f \
+            g/L per 100 km: an estimate, not a Mazda figure. PM_ACC is the soot worked out from the DPF \
+            pressure; well below PM_GEN is normal (some soot burns off by itself), well above it points at \
+            the filter or its pressure sensor. The data recorder works the rates out every %.0f s.
             """, Tuning.pmGenTrigger, Tuning.pmGenHealthyRate.lowerBound, Tuning.pmGenHealthyRate.upperBound,
             Tuning.recordInterval)
+    }
+
+    /// "0.81" from this screen's latest PM_ACC and PM_GEN.
+    private var accRatioText: String {
+        guard let acc = monitor.reading.soot, let generated = monitor.reading.sootGenerated, generated > 0.2 else {
+            return "--"
+        }
+        return String(format: "%.2f", acc / generated)
     }
 
     private var recorderExplanation: String {
         String(format: """
             Every %.0f s while live data runs, screen open or not (every %.0f s around a regeneration): \
-            PM_GEN, PM_ACC_DSD, PM_ACC, the regeneration flag, count and distance, exhaust and DPF temperatures \
-            and pressure, air flow, EGR, intake shutter, boost, fuel rate, torque, rail pressure and more \
-            (whatever this PCM answers), with every raw reply. A slow sweep through the PCM's 0300–04FF and \
-            DA00–DAFF DIDs looks for where it keeps the exhaust temperatures, the DPF pressure and the injected \
-            fuel. Export shares the CSV and a JSON with the drives, events and regeneration log.
+            PM_GEN, PM_ACC, 042B, the regeneration flag, count and distance, exhaust and DPF temperatures \
+            and pressure, air flow, EGR, intake shutter, boost, rail pressure and more (whatever this PCM \
+            answers), with every raw reply and when it came in. With the ignition off nothing is recorded and \
+            nothing is dropped. A slow sweep through the PCM's 0300–04FF and DA00–DAFF DIDs looks for where \
+            it keeps the exhaust temperatures, the DPF pressure and the injected fuel. Export shares the CSV \
+            and a JSON with the drives, events and regeneration log.
             """, Tuning.recordInterval, Tuning.recordIntervalDuringRegen)
     }
 
@@ -510,14 +562,14 @@ struct DPFMonitorView: View {
         guard let now = sinceRegenNow, now.km >= Tuning.pmGenVerdictMinKm, now.rate > 0 else { return nil }
         let healthy = Tuning.pmGenHealthyRate
         if now.rate >= Tuning.pmGenRateHigh {
-            return (String(format: "About %.1f× a healthy engine: at this pace a regeneration every ~%.0f km.",
+            return (String(format: "About %.1f× the top of what owners report: at this pace a regeneration every ~%.0f km.",
                            now.rate / healthy.upperBound, Tuning.pmGenTrigger / now.rate * 100),
                     "exclamationmark.triangle", .orange)
         }
         if now.rate > healthy.upperBound {
-            return ("A little faster than a healthy engine.", "exclamationmark.circle", .yellow)
+            return ("A little faster than owners report.", "exclamationmark.circle", .yellow)
         }
-        return ("In the healthy range.", "checkmark.circle", .green)
+        return ("Within what owners report.", "checkmark.circle", .green)
     }
 
     private var recorderCard: some View {
@@ -549,6 +601,99 @@ struct DPFMonitorView: View {
     /// The recorder's files, plus the history finder's raw scan when there is one.
     private var shareItems: [URL] {
         recorder.exportFiles + [finder.exportURL].compactMap { $0 }
+    }
+
+    // MARK: Parked check
+
+    private var checkCard: some View {
+        card("Parked check (3,000 rpm)") {
+            if let ends = recorder.checkEnds {
+                HStack {
+                    Label("Recording back to back", systemImage: "record.circle").foregroundColor(.red)
+                    Spacer()
+                    Text(ends, style: .timer).monospacedDigit()
+                }
+                .font(.subheadline)
+                row("Samples", "\(recorder.checkSamples)", value: nil)
+                row("Engine speed", number(checkValue("rpm"), "%.0f", " rpm"), value: nil)
+                row("Air flow (MAF)", number(checkValue("maf_a_gs"), "%.1f", " g/s"), value: nil)
+                row("Boost target / actual", checkPair("boost_target_kpa", "boost_kpa", "%.0f", " kPa"), value: nil)
+                row("DPF back pressure", number(checkValue("dpf_dp_kpa"), "%.2f", " kPa"), value: nil)
+                row("EGR A / B", checkPair("egr_a_act_pct", "egr_b_act_pct", "%.0f", " %"), value: nil)
+                row("Exhaust temperatures", checkEGTText, value: nil)
+                row("Exhaust flow · DPF sensor", checkFlowText, value: nil)
+                row("Exhaust O2 · fuel injected", checkO2FuelText, value: nil)
+                row("PM_GEN / PM_ACC", checkPair("pm_gen", "pm_acc", "%.2f", " g/L"), value: nil)
+                row("PM_ACC_DSD ÷ PM_GEN", checkRatioText, value: nil)
+                Button("Stop", role: .destructive) { recorder.stopCheck() }
+                    .font(.subheadline)
+            } else {
+                Button { recorder.startCheck() } label: {
+                    Label(String(format: "Start the check (%.0f min)", Tuning.recordCheckDuration / 60),
+                          systemImage: "speedometer")
+                }
+                .buttonStyle(.bordered)
+                .disabled(!recorder.isRecording)
+                if !recorder.checkNote.isEmpty {
+                    Text(recorder.checkNote).font(.caption)
+                }
+            }
+            Text(checkExplanation)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func checkValue(_ column: String) -> Double? {
+        recorder.checkValues[column]
+    }
+
+    /// "129 / 109 kPa" from two of the check's values.
+    private func checkPair(_ first: String, _ second: String, _ format: String, _ unit: String) -> String {
+        let a = checkValue(first)
+        let b = checkValue(second)
+        guard a != nil || b != nil else { return "--" }
+        return number(a, format) + " / " + number(b, format) + unit
+    }
+
+    private var checkEGTText: String {
+        let temps = ["egt1_c", "egt2_c", "egt3_c"].compactMap { checkValue($0) }
+        guard !temps.isEmpty else { return "--" }
+        return temps.map { String(format: "%.0f", $0) }.joined(separator: " / ") + " °C"
+    }
+
+    private var checkRatioText: String {
+        guard let dsd = checkValue("pm_acc_dsd"), let generated = checkValue("pm_gen"), generated > 0.2 else {
+            return "--"
+        }
+        return String(format: "%.1f×", dsd / generated)
+    }
+
+    /// "2.1 m³/min · 0.78 V": the PCM's exhaust flow (0430) and the DPF pressure sensor's voltage (03DB).
+    private var checkFlowText: String {
+        let flow = checkValue("exh_flow")
+        let volts = checkValue("dpf_dp_sensor_v")
+        guard flow != nil || volts != nil else { return "--" }
+        return number(flow, "%.2f", " m³/min") + " · " + number(volts, "%.2f", " V")
+    }
+
+    /// "17.2 % · 6.4 mm³": exhaust O2 (0451) and the injection amount the PCM wants (1411).
+    private var checkO2FuelText: String {
+        let o2 = checkValue("exh_o2_pct")
+        let fuel = checkValue("fuel_inj_dsd_mm3")
+        guard o2 != nil || fuel != nil else { return "--" }
+        return number(o2, "%.1f", " %") + " · " + number(fuel, "%.1f", " mm³")
+    }
+
+    private var checkExplanation: String {
+        String(format: """
+            Parked in P, engine warm (coolant above 80 °C), A/C off: tap Start, hold about 3,000 rpm for a \
+            minute until the numbers settle, then let it idle. Everything is read back to back for %.0f min \
+            (kind "check" in the export); it stops by itself if the car moves. Mazda's test for the DPF \
+            pressure sensor (DTC P243C) compares PM_ACC_DSD with PM_GEN once they settle at 3,000 rpm: twice \
+            or more points at the sensor. The back pressure, exhaust flow and air flow at 3,000 rpm are also a \
+            baseline to repeat after the next regeneration (ash) and later on.
+            """, Tuning.recordCheckDuration / 60)
     }
 
     // MARK: Regeneration history
@@ -661,6 +806,13 @@ struct DPFMonitorView: View {
         }
     }
 
+    /// Fuel in the oil and what leads to it (EngineHealth), before the PCM sets a code.
+    private var engineHealthCard: some View {
+        card("Engine health: before the warning light") {
+            EngineHealthList(health: recorder.health)
+        }
+    }
+
     private var engineCard: some View {
         card("Engine, EGR and oil") {
             let r = monitor.reading
@@ -674,11 +826,12 @@ struct DPFMonitorView: View {
             }
             if r.chargeAirTemps.isEmpty { row("Charge air", "--", value: .chargeAir) }
             row("Oil temperature", number(r.oilTemp, "%.0f", " °C"), value: .oilTemp)
-            row("Oil dilution (raw)", number(r.oilDilution, "%.0f"), value: .oilDilution)
-            row("Oil dilution events", r.oilDilutionEvents.map { "\($0)" } ?? "--", value: .oilDilutionEvents)
-            Text("EGR closes to 0 % during a regeneration. The oil-dilution values (220 3E1, 220435) are "
-                 + "community finds with an unproven unit: watch how they move, e.g. up after an interrupted "
-                 + "regeneration.")
+            row(MazdaDPF.Value.oilDilution.label, number(r.oilDilution, "%.0f", " g"), value: .oilDilution)
+            row(MazdaDPF.Value.oilDilutionEvents.label, r.oilDilutionEvents.map { "\($0)" } ?? "--",
+                value: .oilDilutionEvents)
+            Text("EGR closes to 0 % during a regeneration. Fuel in the oil (220 3E1) is the PCM's own estimate "
+                 + "(FORScan's scale, g): it goes up with every regeneration and down as the fuel boils off on long "
+                 + "drives. Mazda sets P252F at 1,661 g; the Engine health card has the rest.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
         }
@@ -698,7 +851,8 @@ struct DPFMonitorView: View {
                 .font(.caption)
             }
             Text("The Mazda values (04xx, 0380, 03E1, DD01) and their scaling come from community PID lists "
-                 + "for SkyActiv-D cars (Torque plugin, FORScan forum), not Mazda documents. The F4xx ones are "
+                 + "for SkyActiv-D cars (Torque plugin, FORScan forum) and FORScan's PCM definitions, not Mazda "
+                 + "documents. The F4xx ones are "
                  + "standard OBD2 PIDs. If a value looks off, compare it with FORScan; the raw bytes are here "
                  + "for that. RPM is the standard PID 01 0C.")
                 .font(.caption2)
