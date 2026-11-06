@@ -573,7 +573,8 @@ nonisolated enum AppConfig {
     /// Above the normal purple steady, below Power Mode and reverse.
     ///   lever OFF          -> off (the washer running the wipers with the lever OFF isn't rain)
     ///   lever LO or HI     -> on
-    ///   lever AUTO / INT   -> on once the wipers really wipe, until `autoHold` after the last wipe
+    ///   lever AUTO / INT   -> on once the wipers really wipe, until they have stayed parked for `autoHold`
+    ///                         (time the motor was really watched) with no next wipe
     /// The lever comes from the lights frame (AppConfig.TurnSignals.frameID, Wipers.swift), which is heard
     /// every round for the turn signals anyway: no extra adapter time. The wiping in AUTO / INT comes from
     /// the front body control module's wiper motor bit (found by the wiper finder), read only while the
@@ -585,11 +586,21 @@ nonisolated enum AppConfig {
         /// A lever reading counts once it has held for this many readings in a row (one a round), so a
         /// quick MIST flick, or passing a position on the way to another, doesn't count.
         static let confirmReadings = 2
-        /// Lever in AUTO / INT: rain mode stays on this long after the last wipe seen. Long enough to bridge
-        /// the pauses of intermittent wiping in light rain and a wipe a reading misses (the motor is read
-        /// every `motorPollEveryRounds` rounds, a wipe takes about a second); when the rain stops, rain mode
-        /// ends this long after the last wipe. Coming from LO or HI into AUTO counts as a wipe.
-        static let autoHold: TimeInterval = 90
+        /// Lever in AUTO / INT: rain mode ends once the wipers have stayed parked this long with no next wipe
+        /// seen. It counts from the first reading that shows them parked again after a wipe, and only time
+        /// the motor was really watched counts (see `wipeLength`): a stretch where it wasn't read (the
+        /// adapter busy between rounds, the FBCM not answering, M / R) adds nothing, so a wipe that couldn't
+        /// have been seen never ends rain mode. With the motor read about every second this is about
+        /// 30 s on the clock; with sparser reads it takes longer. Coming from LO or HI into AUTO counts as
+        /// a wipe.
+        static let autoHold: TimeInterval = 30
+        /// How long one wipe keeps the motor bit away from parked (about a second, wiper finder trace): a
+        /// reading catches any wipe that started within this long before it, so each parked reading counts
+        /// as watched for at most this long since the reading before.
+        static let wipeLength: TimeInterval = 1.0
+        /// Lever in AUTO / INT: this many motor reads in a row without a usable reply and the wipers count
+        /// as unknown, so rain mode ends (instead of staying on with nothing watched).
+        static let motorMissLimit = 20
         /// Lever in AUTO / INT: wipes within this long after the lever got there don't count. Moving the
         /// lever from OFF to AUTO wipes once (owner's manual), rain or not.
         static let autoSettle: TimeInterval = 5
@@ -597,10 +608,16 @@ nonisolated enum AppConfig {
         /// The washer wipes too (and a few more times after letting go), and the rain sensor may take the
         /// fluid on the glass for rain for a moment. Needs the washer's bit (lever check).
         static let washerHold: TimeInterval = 10
-        /// Read the wiper motor bit every this many rounds while the lever is in AUTO / INT (a round with the
-        /// turn-signal look takes about a second). Each read is three short adapter commands (ATSH726,
-        /// ATCRA72E, the DID). 1 = every round: wipes are caught a little sooner, M / D a little later.
-        static let motorPollEveryRounds = 2
+        /// Read the wiper motor bit this many times a round while the lever is in AUTO / INT: 1 = after the
+        /// turn-signal look, 2 = also before it. A wipe takes about a second and a round about 1.5 s, so
+        /// with 1 about every other wipe slips between two reads; with 2 there's rarely more than a second
+        /// between reads and nearly every wipe is seen. Each read is up to three short adapter commands
+        /// (ATSH726, ATCRA72E, the DID, about 0.15 s): with 2, M / D and R show about 0.2 s later while
+        /// the wipers are in AUTO / INT (not at all in OFF, LO and HI, where the motor isn't read).
+        static let motorReadsPerRound = 2
+        /// Also read the wiper motor bit after each piece of work between two rounds (the DPF recorder's
+        /// reads, the DPF monitor), so that work doesn't leave a gap a wipe could slip through.
+        static let motorReadAfterJobs = true
         /// Don't read the wiper motor while the gear lever is in M (Power Mode shows red breathing instead)
         /// or R (reverse shows yellow): live data then stays as fast as without rain mode, and rain mode
         /// keeps its state until the lever is back in D.

@@ -110,9 +110,10 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     var learnedDoorSignals: [DoorMonitor.Opening: BitSignal] = [:] {
         didSet { updateDoorSignals() }
     }
-    /// The wiper motor bit (WiperFinder), read every AppConfig.Rain.motorPollEveryRounds rounds while
-    /// set. RainMode sets it only while the wiper lever is in AUTO / INT (and the gear lever isn't in M
-    /// or R), so it costs nothing the rest of the time.
+    /// The wiper motor bit (WiperFinder), read AppConfig.Rain.motorReadsPerRound times a round (and after
+    /// work between rounds, AppConfig.Rain.motorReadAfterJobs) while set. RainMode sets it only while the
+    /// wiper lever is in AUTO / INT (and the gear lever isn't in M or R), so it costs nothing the rest of
+    /// the time.
     var wiperMotorSignal: WiperMotorSignal? {
         didSet {
             if wiperMotorSignal == nil { clearWiperMotor() }
@@ -539,6 +540,9 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
                 jobRunning = true
                 await job.run()
                 jobRunning = false
+                // Work between rounds can take a while (the DPF recorder's reads): a wipe meanwhile
+                // shouldn't slip through unseen.
+                if AppConfig.Rain.motorReadAfterJobs { _ = await readWiperMotor() }
                 continue
             }
             let transmission = await readTransmission()
@@ -571,9 +575,17 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
             }
             // The indicators (and the wiper lever) come last, so the live data above goes out without
             // waiting for them; the wiper motor, when it's wanted, right after (the receive filter has to
-            // change after listening anyway).
+            // change after listening anyway), and with motorReadsPerRound 2 right before too, so there's
+            // rarely more than a second between two reads (a wipe takes about a second).
+            var readMotor = false
+            if AppConfig.Rain.motorReadsPerRound >= 2 {
+                readMotor = await readWiperMotor()
+            }
             let listened = await listenToLightsFrame(round: thisRound)
-            let readMotor = await readWiperMotor(round: thisRound)
+            if AppConfig.Rain.motorReadsPerRound >= 1 {
+                let readAfter = await readWiperMotor()
+                readMotor = readMotor || readAfter
+            }
             if !listened, !readMotor {             // listening to the bus already took its time
                 try? await Task.sleep(for: AppConfig.OBD.pollInterval)
             }
@@ -581,12 +593,10 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     }
 
     /// The wiper motor bit (`wiperMotorSignal`, set by RainMode while the wiper lever is in AUTO / INT),
-    /// every AppConfig.Rain.motorPollEveryRounds rounds: one service-22 read from the front body control
-    /// module. Published after every reading, an unchanged one too. False when it wasn't read this round.
-    private func readWiperMotor(round: Int) async -> Bool {
-        guard let signal = wiperMotorSignal, round % max(AppConfig.Rain.motorPollEveryRounds, 1) == 0 else {
-            return false
-        }
+    /// AppConfig.Rain.motorReadsPerRound times a round: one service-22 read from the front body control
+    /// module. Published after every reading, an unchanged one too. False when it isn't wanted (not read).
+    private func readWiperMotor() async -> Bool {
+        guard let signal = wiperMotorSignal else { return false }
         var data: [UInt8]?
         if await useHeader(signal.header) {
             let reply = await send22(signal.did, complete: signal.length > 4)

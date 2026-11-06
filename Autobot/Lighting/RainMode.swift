@@ -5,8 +5,12 @@
 //
 //   lever OFF          -> not rain (the washer running the wipers with the lever OFF isn't rain either)
 //   lever LO or HI     -> rain, as soon as two readings in a row agree (so a MIST flick doesn't count)
-//   lever AUTO / INT   -> rain once the wipers really wipe, and until AppConfig.Rain.autoHold after the
-//                         last wipe seen. Not counted: the one wipe moving the lever into AUTO makes
+//   lever AUTO / INT   -> rain once the wipers really wipe, and until they have stayed parked for
+//                         AppConfig.Rain.autoHold (30 s) with no next wipe seen. Only time the motor was
+//                         really watched counts: each parked reading adds the time since the reading
+//                         before, at most AppConfig.Rain.wipeLength (a wipe that started longer ago than
+//                         that could have come and gone unseen), and a stretch without readings adds
+//                         nothing. Not counted: the one wipe moving the lever into AUTO makes
 //                         (autoSettle) and the washer's wipes (washerHold). Coming from LO or HI it stays
 //                         on (that counts as a wipe).
 //
@@ -15,8 +19,9 @@
 //     OBDAdapter listens to that frame every round for the turn signals anyway (`lightsFrame`), so this
 //     costs no adapter time;
 //   - the wiping in AUTO / INT: the front body control module's wiper motor bit (the one the wiper finder
-//     found), which OBDAdapter reads only while the lever is in AUTO / INT, every few rounds
-//     (AppConfig.Rain.motorPollEveryRounds), and not at all while the lever is in M or R
+//     found), which OBDAdapter reads only while the lever is in AUTO / INT, twice a round and after work
+//     between rounds (AppConfig.Rain.motorReadsPerRound, motorReadAfterJobs), and not at all while the
+//     lever is in M or R
 //     (AppConfig.Rain.pauseMotorInPowerModeAndReverse): the lamp shows Power Mode / reverse then anyway, and
 //     live data stays as fast as without rain mode. Without a found motor bit, AUTO / INT doesn't count
 //     (AppConfig.Rain.autoCountsWithoutMotor).
@@ -43,8 +48,11 @@ final class RainMode: ObservableObject {
     @Published private(set) var washing = false
     /// It rains as far as the car's wipers say.
     @Published private(set) var carRaining = false
-    /// Lever in AUTO / INT and the wipers wiped within AppConfig.Rain.autoHold.
+    /// Lever in AUTO / INT and the wipers wiped, and haven't stayed parked for AppConfig.Rain.autoHold since.
     @Published private(set) var wipingInAuto = false
+    /// Lever in AUTO / INT, after a wipe: how long the wipers have been watched parked since (watched time,
+    /// see AppConfig.Rain.wipeLength); rain mode ends at AppConfig.Rain.autoHold. 0 while wiping.
+    @Published private(set) var parkedFor: TimeInterval = 0
     /// Lever in AUTO / INT but the motor isn't read right now: the lever is in M or R.
     @Published private(set) var motorPaused = false
     /// True while the test button is in charge.
@@ -76,6 +84,8 @@ final class RainMode: ObservableObject {
     private var enteredAuto: Date?                   // the lever got to AUTO / INT (as far as we can tell)
     private var lastWasher: Date?                    // the washer was last seen in use
     private var lastRainWipe: Date?                  // the wipers last wiped in AUTO / INT (not for the washer)
+    private var lastParkedRead: Date?                // the latest motor reading, if it showed them parked
+    private var motorMisses = 0                      // motor reads in a row without a usable reply
     private var selector: ELM327.Selector?           // the gear lever, for pausing the motor in M / R
     private var reportedCodes: Set<String> = []      // frame codes already logged as unknown
     private var subscriptions = Set<AnyCancellable>()
@@ -108,7 +118,9 @@ final class RainMode: ObservableObject {
                 : "motor bit not found yet: AUTO doesn't count (Wiper finder)"
         }
         if motorPaused { return "motor not read in M / R" }
-        return wipingInAuto ? "wiping" : "waiting for a wipe"
+        guard wipingInAuto else { return "waiting for a wipe" }
+        if obd.wiperMotorRunning == true { return "wiping" }
+        return String(format: "parked %.0f of %.0f s", parkedFor, Tuning.autoHold)
     }
 
     // MARK: Readings
@@ -125,6 +137,7 @@ final class RainMode: ObservableObject {
             autoSeen = nil
             enteredAuto = nil
             lastRainWipe = nil
+            resetParked()
             updateMotorPolling()
             evaluate(now)
             return
@@ -157,6 +170,7 @@ final class RainMode: ObservableObject {
     private func leverMoved(from old: WiperLever?, to new: WiperLever, frame: [UInt8], at now: Date) {
         confirmed = new
         onLog?("Wipers: lever \(new.label) · 09A " + leverLayout.placeLabel + " = " + leverLayout.codeText(frame))
+        resetParked()
         guard new == .auto else {
             enteredAuto = nil
             lastRainWipe = nil
@@ -167,14 +181,39 @@ final class RainMode: ObservableObject {
         lastRainWipe = (old == .low || old == .high) ? now : nil
     }
 
-    /// One reading of the wiper motor bit (every few rounds while the lever is in AUTO / INT).
+    /// The parked count starts again from nothing (a wipe, the lever moved, back from M / R).
+    private func resetParked() {
+        lastParkedRead = nil
+        motorMisses = 0
+        if parkedFor != 0 { parkedFor = 0 }
+    }
+
+    /// One reading of the wiper motor bit (about every second while the lever is in AUTO / INT); nil = no
+    /// usable reply, or not read any more.
     private func motorReading(_ running: Bool?) {
-        guard running == true, confirmed == .auto else { return }
+        guard confirmed == .auto, motorSignal != nil, !motorPaused else { return }
         let now = Date()
-        if let enteredAuto, now.timeIntervalSince(enteredAuto) < Tuning.autoSettle { return }  // moving the lever wipes once
-        if let lastWasher, now.timeIntervalSince(lastWasher) < Tuning.washerHold { return }    // the washer's wipes
-        if !wipingInAuto { onLog?("Wipers: wiping in AUTO / INT (" + (obd.wiperMotorRaw ?? "") + ")") }
-        lastRainWipe = now
+        switch running {
+        case nil:
+            // Not watched: the stretch up to the next reply adds nothing to the parked count.
+            lastParkedRead = nil
+            motorMisses += 1
+        case true?:
+            motorMisses = 0
+            if let enteredAuto, now.timeIntervalSince(enteredAuto) < Tuning.autoSettle { return }  // moving the lever wipes once
+            if let lastWasher, now.timeIntervalSince(lastWasher) < Tuning.washerHold { return }    // the washer's wipes
+            if !wipingInAuto { onLog?("Wipers: wiping in AUTO / INT (" + (obd.wiperMotorRaw ?? "") + ")") }
+            lastRainWipe = now
+            resetParked()                            // the 30 s start again once they're parked
+        case false?:
+            motorMisses = 0
+            // Parked: watched since the reading before, as far as a wipe starting meanwhile would still
+            // show now (wipeLength). The first parked reading after a wipe is where the count starts.
+            if lastRainWipe != nil, let last = lastParkedRead {
+                parkedFor += min(now.timeIntervalSince(last), Tuning.wipeLength)
+            }
+            lastParkedRead = now
+        }
         evaluate(now)
     }
 
@@ -195,8 +234,11 @@ final class RainMode: ObservableObject {
         if paused != motorPaused {
             motorPaused = paused
             // Back from M / R while it rained: the wipes weren't watched meanwhile (rain mode was kept as it
-            // was), so the hold starts again from now.
-            if !paused, wipingInAuto { lastRainWipe = Date() }
+            // was), so the parked count starts again from now.
+            if !paused, wipingInAuto {
+                lastRainWipe = Date()
+                resetParked()
+            }
         }
         if obd.wiperMotorSignal != wanted { obd.wiperMotorSignal = wanted }
     }
@@ -216,21 +258,34 @@ final class RainMode: ObservableObject {
 
     private func evaluate(_ now: Date) {
         let autoWiping: Bool
+        var why: String?                                     // why AUTO / INT stopped counting, for the log
         if confirmed != .auto {
             autoWiping = false
         } else if motorSignal == nil {
             autoWiping = Tuning.autoCountsWithoutMotor
         } else if motorPaused {
             autoWiping = wipingInAuto                        // not watched in M / R: stays as it was
+        } else if lastRainWipe == nil {
+            autoWiping = false
+        } else if motorMisses >= max(Tuning.motorMissLimit, 1) {
+            autoWiping = false
+            why = "the wiper motor bit stopped answering"
         } else {
-            autoWiping = lastRainWipe.map { now.timeIntervalSince($0) < Tuning.autoHold } ?? false
+            autoWiping = parkedFor < Tuning.autoHold        // still wiping, or parked for less than 30 s
+            why = "wipers parked for \(Int(Tuning.autoHold)) s with no next wipe"
         }
-        if autoWiping != wipingInAuto { wipingInAuto = autoWiping }
-        carChanged(raining: confirmed == .low || confirmed == .high || autoWiping)
+        if autoWiping != wipingInAuto {
+            wipingInAuto = autoWiping
+            if !autoWiping {                                 // done with this rain: wait for a new wipe
+                lastRainWipe = nil
+                resetParked()
+            }
+        }
+        carChanged(raining: confirmed == .low || confirmed == .high || autoWiping, why: why)
     }
 
     /// The car's wipers say rain or not; that takes over from a test.
-    private func carChanged(raining: Bool) {
+    private func carChanged(raining: Bool, why: String?) {
         guard raining != carRaining else { return }
         carRaining = raining
         simulated = false
@@ -238,7 +293,7 @@ final class RainMode: ObservableObject {
         if raining {
             onLog?("Rain mode: on (" + (confirmed == .auto ? "AUTO / INT, the wipers are wiping" : wipers) + ")")
         } else if confirmed == .auto {
-            onLog?("Rain mode: off (AUTO / INT, no wipe for \(Int(Tuning.autoHold)) s)")
+            onLog?("Rain mode: off (AUTO / INT, " + (why ?? "no wipe") + ")")
         } else {
             onLog?("Rain mode: off (" + wipers + ")")
         }

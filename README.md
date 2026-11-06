@@ -28,7 +28,7 @@ assistant when the phone connects to CarPlay.
 - **Rain mode → cyan breathing**: while it rains as far as the windshield wipers say, the lamp does
   the firmware's *Cyan Gradient* breathing — wiper lever in **LO or HI**: at once; in **AUTO / INT**:
   once the wipers really wipe (not the one wipe moving the lever into AUTO makes, not the washer's),
-  until 90 s after the last wipe; **OFF**: never, washer or not. Above the normal purple steady, below
+  until they have stayed parked for 30 s with no next wipe; **OFF**: never, washer or not. Above the normal purple steady, below
   Power Mode and reverse. The lever comes from the same CAN frame as the turn signals (no extra adapter
   time), the wiping in AUTO / INT from one bit of the front body control module, read only while the
   lever is there (see [Wipers](#wipers-rain-mode)); the dashboard's *Rain* button stands in for both,
@@ -368,7 +368,7 @@ it off.
 |---|---|
 | OFF | off (the washer running the wipers with the lever OFF isn't rain) |
 | LO, HI | on, once two readings in a row agree (a MIST flick doesn't count) |
-| AUTO / INT | on once the wipers really wipe, until 90 s after the last wipe (`AppConfig.Rain.autoHold`). Not counted: the one wipe moving the lever OFF → AUTO makes (`autoSettle`) and the washer's wipes (`washerHold`). From LO / HI into AUTO it stays on |
+| AUTO / INT | on once the wipers really wipe, until they've stayed parked for 30 s with no next wipe (`AppConfig.Rain.autoHold`; only time the motor was really watched counts, see below). Not counted: the one wipe moving the lever OFF → AUTO makes (`autoSettle`) and the washer's wipes (`washerHold`). From LO / HI into AUTO it stays on |
 
 **The lever comes from frame `0x09A`**, the turn signals' frame, heard every round anyway — so it
 costs no adapter time. In the CX-5 the start stop unit reads the steering-column switches and sends the
@@ -391,9 +391,16 @@ It isn't confirmed on this car yet: the wiper finder's *lever check* (below) doe
 decides, and the lever frame only says "AUTO". The FBCM drives the wiper relays and reads the motor's
 auto-stop switch (workshop manual PIDs `WIP_F_RY_LO`, `WIP_F_RY_HI`, `WIP_F_MST`), but no public source
 has their DIDs, so the wiper finder finds the bit on the car. Autobot reads it **only while the lever is
-in AUTO / INT**, every 2nd round (`motorPollEveryRounds`: `ATSH726`, `ATCRA72E`, the DID — about 0.15 s),
-and not at all while the gear lever is in M or R (`pauseMotorInPowerModeAndReverse`; the lamp shows
-Power Mode / reverse then anyway, and rain mode keeps its state until D). In OFF, LO and HI nothing is
+in AUTO / INT**, twice a round — before and after the turn-signal look — and after each piece of work
+between rounds such as the DPF recorder's reads (`motorReadsPerRound`, `motorReadAfterJobs`: `ATSH726`,
+`ATCRA72E`, the DID — about 0.15 s each), so there's rarely more than a second between two reads and a wipe
+(about a second) can't slip through. Rain mode ends once the wipers have been **watched parked for 30 s**:
+each parked reading adds the time since the reading before, at most `wipeLength` (1 s — a wipe that started
+longer ago could have come and gone unseen), and a stretch without readings (the adapter busy, the FBCM not
+answering) adds nothing; 20 unanswered reads in a row (`motorMissLimit`) end it. Earlier the bit was read
+every 2nd round and rain mode ended 90 s after the last wipe *seen*: in light rain most single wipes fell
+between two reads, so it kept switching off and back on. The wipers are not read at all while the gear
+lever is in M or R (`pauseMotorInPowerModeAndReverse`; the lamp shows Power Mode / reverse then anyway, and rain mode keeps its state until D). In OFF, LO and HI nothing is
 read. Without a found motor bit AUTO / INT doesn't count (`autoCountsWithoutMotor = false`).
 
 What the OBD2 port can't give: the rain sensor's own reading (rain amount, AUTO sensitivity) travels
