@@ -6,14 +6,14 @@
 // per hour, and how far it is to the ~5.6 g/L that starts the next regeneration. Everything can be
 // exported from the DPF screen (CSV + JSON).
 //
-//   a sample every 30 s (every 10 s while the request flag 220380 is on, and for 20 min after the count
+//   a sample every 10 s (every 5 s while a request bit of 220380 is on, and for 20 min after the count
 //   220432 goes up: a regeneration is starting or running):
 //     every sample  RPM, PM_GEN / PM_ACC_DSD / PM_ACC (042D / 044B / 042C), regeneration requests 0380
 //                   (forced / automatic), count 0432, distance 0434, the PCM's exhaust flow 0430, DPF
 //                   pressure sensor voltage 03DB, exhaust O2 0451, desired injection amount 1411 and air
-//                   flow 040C; load, air flow, fuel rate, EGR, exhaust / DPF temperatures, DPF pressure
-//                                                                                  (tier .fast)
-//     every 30 s    + coolant, oil, MAP, boost, intake shutter, exhaust pressure, injection timing,
+//                   flow 040C; load, air flow, fuel rate, EGR, exhaust / DPF temperatures, DPF pressure;
+//                   coolant, oil temperature, boost, oil pressure 0415                (tier .fast)
+//     every 30 s    + MAP, intake shutter, exhaust pressure, injection timing,
 //                   torque, rail pressure, pedal, VGT / wastegate, fuel pump suction control valve 042B
 //                   and flow 042A / 0431, MAF voltage, EGR position, boost / wastegate solenoids, the
 //                   regeneration failure code 0381, EXHTEMP1–3 (22 003C–003E)       (tier .normal)
@@ -56,9 +56,9 @@ private typealias Tuning = AppConfig.DPF
 /// One value the recorder reads from the PCM (7E0, service 22) and the CSV columns it fills.
 nonisolated struct DPFRecordField: Sendable {
     nonisolated enum Tier: Sendable {
-        /// Every sample (every 10 s around a regeneration).
+        /// Every sample (AppConfig.DPF.recordInterval, 10 s; 5 s around a regeneration).
         case fast
-        /// Every 30 s.
+        /// Every 30 s (recordNormalInterval).
         case normal
         /// Every 2 min.
         case slow
@@ -200,11 +200,11 @@ nonisolated enum DPFRecordPlan {
             let pressure = MazdaDPF.pressure(d)
             return [pressure?.differential, pressure?.inlet, pressure?.outlet]
         },
-        // Every 30 s.
-        field("F405", .normal, ["coolant_c"], "PID 05 coolant A − 40 °C") {
+        // Every 30 s; coolant, oil temperature, boost and oil pressure (0415) every sample (EngineHealth).
+        field("F405", .fast, ["coolant_c"], "PID 05 coolant A − 40 °C") {
             [celsius(byte($0, 0))]
         },
-        field("F45C", .normal, ["oil_c"], "PID 5C engine oil temperature A − 40 °C (the trigger is ~5.6 g/L above 80 °C)") {
+        field("F45C", .fast, ["oil_c"], "PID 5C engine oil temperature A − 40 °C (the trigger is ~5.6 g/L above 80 °C)") {
             [celsius(byte($0, 0))]
         },
         field("F40B", .normal, ["map_kpa"], """
@@ -213,7 +213,7 @@ nonisolated enum DPFRecordPlan {
               """) {
             [byte($0, 0).map { $0 * 10 }]
         },
-        field("F470", .normal, ["boost_target_kpa", "boost_kpa"],
+        field("F470", .fast, ["boost_target_kpa", "boost_kpa"],
               "PID 70 boost commanded (B·256+C)/32, actual (D·256+E)/32 kPa abs", multiFrame: true) { d in
             let boost = MazdaDPF.boost(d)
             return [boost.target, boost.actual]
@@ -314,7 +314,7 @@ nonisolated enum DPFRecordPlan {
               """) {
             [word($0, 0), word($0, 0).map { $0 * 100000 / 65535 }]
         },
-        field("0415", .normal, ["oil_pressure_kpa"], """
+        field("0415", .fast, ["oil_pressure_kpa"], """
               EOP: engine oil pressure, A·256+B kPa (FORScan's definition from other Mazda PCMs; this PCM answers \
               it). Mazda: about 184 kPa at a warm idle; 140–190 kPa at 1,500 rpm and 310–450 kPa at 3,500 rpm with \
               the oil at 70–80 °C; P253F when it is 40 kPa below its value after the oil change (1,500 rpm, oil 87–88 °C)
@@ -554,8 +554,11 @@ final class DPFRecorder: ObservableObject {
 
     /// How fast PM_GEN grows (and how 042B moved), worked out after every sample.
     struct Rate: Codable, Equatable {
-        /// PM_GEN per 100 km since the last regeneration (PM_GEN ÷ distance since it), g/L.
+        /// PM_GEN per 100 km since the last regeneration (PM_GEN ÷ distance since it; after one that didn't
+        /// complete — PM_GEN burnt down, the distance not reset — since PM_GEN was lowest), g/L.
         var sinceRegen: Double?
+        /// The distance `sinceRegen` covers, km (optional: rates saved before 7 Nov 2026 don't have it).
+        var sinceKm: Double?
         /// PM_GEN per 100 km over the last ~rateWindowKm of this regeneration cycle, g/L…
         var recent: Double?
         /// …over this many km.
@@ -648,6 +651,15 @@ final class DPFRecorder: ObservableObject {
         /// The scale cycle[].regenKm and last.regenKm are in (220434 units per 100 km); nil: saved before Nov
         /// 2026, in the community ·100/65536 (optional, like sweepRecheckCursor).
         var regenUnitsPer100Km: Double?
+        /// After a regeneration that didn't complete (PM_GEN burnt down, 0434 not reset): the lowest PM_GEN
+        /// since and the distance there; the rate since the regeneration counts from it. nil once 0434 starts
+        /// again (optional, like sweepRecheckCursor).
+        var pmGenLow: PMGenLow?
+    }
+
+    private struct PMGenLow: Codable {
+        var pmGen: Double
+        var regenKm: Double
     }
 
     private struct CyclePoint: Codable {
@@ -984,7 +996,7 @@ final class DPFRecorder: ObservableObject {
             inGap = false
             onLog?("DPF recorder: the PCM is answering again")
         }
-        let normal = !check && (lastNormal.map { started.timeIntervalSince($0) >= Tuning.recordInterval - 1 } ?? true)
+        let normal = !check && (lastNormal.map { started.timeIntervalSince($0) >= Tuning.recordNormalInterval - 1 } ?? true)
         let slow = !check && (lastSlow.map { started.timeIntervalSince($0) >= Tuning.recordSlowInterval - 1 } ?? true)
         var reads: [Read] = []
         for field in DPFRecordPlan.fields where wanted(field, normal: normal, slow: slow, check: check) {
@@ -1088,8 +1100,10 @@ final class DPFRecorder: ObservableObject {
         if cut { events.append("cut short: live data stopped") }
         updateCycle(at: started, drive: driveID, regenKm: regenKm, pmGen: pmGen, pmDsd: pmDsd, fuelRate: fuelRate)
         let newRate = makeRate(at: started, drive: driveID, pmGen: pmGen, pmDsd: pmDsd, regenKm: regenKm)
-        health.observe(values, rpm: chunk.rpm, speed: speed, at: started, drive: driveID,
-                       pmGenPer100Km: (newRate.regenKm ?? 0) >= Tuning.pmGenVerdictMinKm ? newRate.sinceRegen : nil,
+        let (rpmAt, speedAt) = Self.nearestMarks(chunk)
+        health.observe(values, rpm: chunk.rpm, speed: speed, rpmAt: rpmAt, speedAt: speedAt, at: started,
+                       drive: driveID,
+                       pmGenPer100Km: (newRate.sinceKm ?? 0) >= Tuning.pmGenVerdictMinKm ? newRate.sinceRegen : nil,
                        regenEntries: regenLog.entries)
 
         // The row.
@@ -1175,6 +1189,24 @@ final class DPFRecorder: ObservableObject {
             result.replies += chunk.replies
         }
         return (result, false)
+    }
+
+    /// The RPM and road speed read nearest in time to each DID's reply (within Tuning.recordMarkMaxSeconds):
+    /// a sample's reads span several seconds, sometimes much more.
+    private static func nearestMarks(_ chunk: Chunk) -> (rpm: [String: Double], speed: [String: Double]) {
+        let marks = chunk.marks.filter { $0.rpm != nil }
+        var rpm: [String: Double] = [:]
+        var speed: [String: Double] = [:]
+        for item in chunk.replies {
+            guard case .data = item.reply else { continue }
+            let nearest = marks.min { abs($0.time.timeIntervalSince(item.time)) < abs($1.time.timeIntervalSince(item.time)) }
+            guard let mark = nearest, abs(mark.time.timeIntervalSince(item.time)) <= Tuning.recordMarkMaxSeconds else {
+                continue
+            }
+            rpm[item.did] = mark.rpm
+            speed[item.did] = mark.speed
+        }
+        return (rpm, speed)
     }
 
     /// How long a read keeps live data waiting, roughly: one CAN frame 1, a reply of several frames 3.
@@ -1392,8 +1424,17 @@ final class DPFRecorder: ObservableObject {
         let previous = state.cycle.last
         let sameDrive = state.last?.drive == drive
         var reset = false
-        if let regenKm, let old = previous?.regenKm, regenKm < old - 1 { reset = true }
-        if let pmGen, let old = previous?.pmGen, pmGen < old - Tuning.recordGenDrop { reset = true }
+        var distanceReset = false
+        var genDrop = false
+        if let regenKm, let old = previous?.regenKm, regenKm < old - 1 { reset = true; distanceReset = true }
+        if let pmGen, let old = previous?.pmGen, pmGen < old - Tuning.recordGenDrop { reset = true; genDrop = true }
+        // PM_GEN burnt down without 0434 starting again (a regeneration that didn't complete, e.g. engine off
+        // half-way): the rate since the regeneration counts from where PM_GEN was lowest.
+        if distanceReset {
+            state.pmGenLow = nil
+        } else if let pmGen, let regenKm, genDrop || (state.pmGenLow.map { pmGen < $0.pmGen } ?? false) {
+            state.pmGenLow = PMGenLow(pmGen: pmGen, regenKm: regenKm)
+        }
         if reset {
             state.cycle = []
             state.cycleFuel = 0
@@ -1429,7 +1470,11 @@ final class DPFRecorder: ObservableObject {
             if let pmGen, fuel >= Tuning.rateMinFuel { result.perLitre = pmGen / fuel }
         }
         guard let pmGen, let regenKm else { return result }
-        if regenKm >= Tuning.rateMinSinceRegenKm { result.sinceRegen = pmGen / regenKm * 100 }
+        let sinceKm = regenKm - (state.pmGenLow?.regenKm ?? 0)
+        result.sinceKm = sinceKm
+        if sinceKm >= Tuning.rateMinSinceRegenKm {
+            result.sinceRegen = (pmGen - (state.pmGenLow?.pmGen ?? 0)) / sinceKm * 100
+        }
         // The last ~rateWindowKm of this cycle (all of it while it's shorter).
         let cycle = state.cycle
         if let first = cycle.first {
@@ -1672,13 +1717,13 @@ final class DPFRecorder: ObservableObject {
         ("unix", "The same, seconds since 1970"),
         ("drive", "Drive (live data from start to stop), named after when it started"),
         ("sample", "Sample number since the data was last cleared"),
-        ("kind", "normal: every 30 s; regen: every 10 s while a 0380 request bit (0 forced, 1 automatic) is on or for 20 min after 0432 went up; check: the parked check, back to back"),
+        ("kind", "normal: every 10 s (30 s before 6 Nov 2026), the .normal fields every 30 s and .slow every 2 min (fields[].tier); regen: every 5 s while a 0380 request bit (0 forced, 1 automatic) is on or for 20 min after 0432 went up; check: the parked check, back to back"),
         ("speed_kmh", "Road speed from live data (PID 0D) when the sample started"),
         ("rpm", "Engine speed (mode 01 PID 0C) at the start of the sample's first go; every go's RPM and road speed are in raw (RPM:…@t SPD:…@t)"),
     ]
 
     private static let rateNotes: [(String, String)] = [
-        ("pm_gen_per_100km_since_regen", "PM_GEN ÷ distance since the last regeneration (0434) × 100, g/L per 100 km"),
+        ("pm_gen_per_100km_since_regen", "PM_GEN ÷ distance since the last regeneration (0434) × 100, g/L per 100 km; after one that didn't complete (PM_GEN burnt down, 0434 not reset), the growth since PM_GEN was lowest (since 7 Nov 2026)"),
         ("pm_gen_per_100km_recent", "PM_GEN growth over the last ~10 km of this cycle (recent_window_km), g/L per 100 km"),
         ("recent_window_km", "Distance the recent rates are over, km"),
         ("pm_gen_per_hour_recent", "PM_GEN growth over the last ~10 min of this drive, g/L per hour"),

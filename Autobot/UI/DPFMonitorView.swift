@@ -39,7 +39,7 @@ struct DPFMonitorButton: View {
 
     private var summary: String {
         if regenerating { return "Regenerating" }
-        if let rate = recorder.rate.sinceRegen, (recorder.rate.regenKm ?? 0) >= Tuning.pmGenVerdictMinKm {
+        if let rate = recorder.rate.sinceRegen, (recorder.rate.sinceKm ?? recorder.rate.regenKm ?? 0) >= Tuning.pmGenVerdictMinKm {
             return String(format: "PM_GEN %.1f g/L/100 km", rate)
         }
         if let generated = monitor.reading.sootGenerated { return String(format: "PM_GEN %.2f g/L", generated) }
@@ -475,7 +475,7 @@ struct DPFMonitorView: View {
         if let generated = r.sootGenerated, let km = r.regenDistance, km >= Tuning.rateMinSinceRegenKm {
             return (generated / km * 100, km)
         }
-        if let rate = recorder.rate.sinceRegen, let km = recorder.rate.regenKm { return (rate, km) }
+        if let rate = recorder.rate.sinceRegen, let km = recorder.rate.sinceKm ?? recorder.rate.regenKm { return (rate, km) }
         return nil
     }
 
@@ -540,13 +540,14 @@ struct DPFMonitorView: View {
     private var recorderExplanation: String {
         String(format: """
             Every %.0f s while live data runs, screen open or not (every %.0f s around a regeneration): \
-            PM_GEN, PM_ACC, 042B, the regeneration flag, count and distance, exhaust and DPF temperatures \
-            and pressure, air flow, EGR, intake shutter, boost, rail pressure and more (whatever this PCM \
-            answers), with every raw reply and when it came in. With the ignition off nothing is recorded and \
+            PM_GEN, PM_ACC, PM_ACC_DSD, the regeneration flag, count and distance, exhaust and DPF \
+            temperatures and pressure, air flow, EGR, boost, coolant, oil temperature and pressure; every \
+            %.0f s also intake shutter, rail pressure and more (whatever this PCM answers), with every raw \
+            reply and when it came in. With the ignition off nothing is recorded and \
             nothing is dropped. A slow sweep through the PCM's 0300–04FF and DA00–DAFF DIDs looks for where \
             it keeps the exhaust temperatures, the DPF pressure and the injected fuel. Export shares the CSV \
             and a JSON with the drives, events and regeneration log.
-            """, Tuning.recordInterval, Tuning.recordIntervalDuringRegen)
+            """, Tuning.recordInterval, Tuning.recordIntervalDuringRegen, Tuning.recordNormalInterval)
     }
 
     private func perHundred(_ value: Double?) -> String {

@@ -53,7 +53,8 @@ final class DPFRegenLog: ObservableObject {
         // Recorded since the regeneration flag is followed from start to end (nil in older entries).
         var outcome: Outcome?
         var started: Date?
-        /// 042B ("PM_ACC_DSD", not a soot mass on this car: shown nowhere) before / after, and PM_ACC after, g/L.
+        /// PM_ACC_DSD (044B) before / after, and PM_ACC after, g/L. Entries before 5 Nov 2026 have 042B (the
+        /// fuel pump's valve current, misread as PM_ACC_DSD: 15–25) in sootDesired*.
         var sootDesiredBefore: Double?
         var sootDesiredAfter: Double?
         var sootAfter: Double?

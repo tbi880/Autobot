@@ -87,8 +87,8 @@ assistant when the phone connects to CarPlay.
 - **PM_GEN growth**: how fast the PCM's soot model (PM_GEN) fills up — g/L per 100 km since the last
   regeneration and over the last 10 km, per hour, km left to the ~5.6 g/L that starts a regeneration —
   against the 1.5–2.5 g/L per 100 km that owners' 250–400 km between regenerations works out to
-- **Data recorder** (see [DPF data recorder](#dpf-data-recorder)): every 30 s while live data runs, screen
-  open or not (every 10 s around a regeneration), a CSV row with the soot model, the regeneration flag,
+- **Data recorder** (see [DPF data recorder](#dpf-data-recorder)): every 10 s while live data runs, screen
+  open or not (every 5 s around a regeneration; the slower values every 30 s / 2 min), a CSV row with the soot model, the regeneration flag,
   count and distance, and what feeds the model — air flow, EGR, intake shutter, boost, fuel rate,
   temperatures, pressures — plus every raw PCM reply with the time it came in, and a slow sweep through
   the PCM's DIDs. A *parked check* reads it all back to back for 3 min (e.g. at 3,000 rpm). *Export
@@ -617,17 +617,21 @@ the 2 × PM_GEN of Mazda's pressure-sensor test; and the count `0432` goes up as
 was already 0–1 g/L every time). (`042B`, the 19–25 that looked like a soot alarm, is the fuel pump's
 suction control valve current.)
 
-While live data runs (DPF screen open or not) it takes a sample every `recordInterval` (30 s), and every
-`recordIntervalDuringRegen` (10 s) while either request bit of `220380` is on and for 20 min after the count `220432`
-goes up. The reads go a few at a time between live-data rounds (`recordJobBudget`: a single-frame read
-counts 1, a reply of several frames 3), so Power Mode, reverse and the turn signals keep working. Every
-go starts with RPM (and the road speed live data last read), and every reply keeps the time it came in,
-so the values of one sample — read over several seconds — can be lined up with the engine speed.
+While live data runs (DPF screen open or not) it takes a sample every `recordInterval` (10 s), and every
+`recordIntervalDuringRegen` (5 s) while either request bit of `220380` is on and for 20 min after the
+count `220432` goes up; the fast tier is in every sample, the rest every `recordNormalInterval` (30 s),
+every 2 min or once a drive. (Until 6 Nov 2026 everything was every 30 s: measured on the car, a read
+takes 50–100 ms and a live-data round 0.3–1.5 s between two goes, so a sample of all ~70–90 values took
+13–48 s — the interval couldn't go lower without splitting it.) The reads go a few at a time between
+live-data rounds (`recordJobBudget`, 7: a single-frame read counts 1, a reply of several frames 3), so
+Power Mode, reverse and the turn signals keep working. Every go starts with RPM (and the road speed live
+data last read), and every reply keeps the time it came in, so the values of one sample — read over
+several seconds — can be lined up with the engine speed.
 
 | When | What |
 |---|---|
-| every sample | RPM (`010C`), `042D` PM_GEN, `044B` PM_ACC_DSD, `042C` PM_ACC, `0380` requests (forced / automatic), `0432` count, `0434` distance; the PCM's soot-model inputs: exhaust flow `0430` (`EXH_FL`), DPF pressure sensor voltage `03DB` (`EXHPRESS_DIF`), exhaust O2 `0451`, desired injection amount `1411` (`FIA_DSD`, mm³/stroke), desired air flow `040C` (`MAF_DSD`); load `F404`, MAF `F410` / `F466`, fuel rate `F45E` / `F49D`, exhaust flow `F49E`, EGR `F469`, exhaust temperatures `F478`, DPF temperatures `F47C`, DPF pressure `F47A` |
-| every 30 s | coolant `F405`, oil `F45C`, MAP `F40B` (A·10 kPa on this PCM), boost `F470`, intake shutter `F411` / `F46A` / `F46C` (commanded vs position), commanded EGR / EGR error `F42C` / `F42D`, exhaust pressure `F473`, injection timing `F45D`, torque `F461` / `F462`, rail pressure `F423` / `F459` / `F46D`, pedal `F449`, VGT / wastegate `F471` / `F472`; fuel pump suction control valve / flow `042B` / `042A` / `0431`, MAF voltage `0314`, EGR position `03FB`, boost / wastegate solenoids `03DF` / `0462` / `046E`, fuel pump duty `0307`, desired RPM `0308`, O2 sensor status `044A`, regeneration failure code `0381` (`REG_FAIL_C`), EXHTEMP1–3 `003C`–`003E`; fuel in the oil `03E1`, oil pressure `0415` / `0424`, oil pump duty `0594` (see *Engine health*); and the next 24 DIDs of the sweep |
+| every sample (10 s) | RPM (`010C`), `042D` PM_GEN, `044B` PM_ACC_DSD, `042C` PM_ACC, `0380` requests (forced / automatic), `0432` count, `0434` distance; the PCM's soot-model inputs: exhaust flow `0430` (`EXH_FL`), DPF pressure sensor voltage `03DB` (`EXHPRESS_DIF`), exhaust O2 `0451`, desired injection amount `1411` (`FIA_DSD`, mm³/stroke), desired air flow `040C` (`MAF_DSD`); load `F404`, MAF `F410` / `F466`, fuel rate `F45E` / `F49D`, exhaust flow `F49E`, EGR `F469`, exhaust temperatures `F478`, DPF temperatures `F47C`, DPF pressure `F47A`; coolant `F405`, oil temperature `F45C`, boost `F470`, oil pressure `0415` |
+| every 30 s | MAP `F40B` (A·10 kPa on this PCM), intake shutter `F411` / `F46A` / `F46C` (commanded vs position), commanded EGR / EGR error `F42C` / `F42D`, exhaust pressure `F473`, injection timing `F45D`, torque `F461` / `F462`, rail pressure `F423` / `F459` / `F46D`, pedal `F449`, VGT / wastegate `F471` / `F472`; fuel pump suction control valve / flow `042B` / `042A` / `0431`, MAF voltage `0314`, EGR position `03FB`, boost / wastegate solenoids `03DF` / `0462` / `046E`, fuel pump duty `0307`, desired RPM `0308`, O2 sensor status `044A`, regeneration failure code `0381` (`REG_FAIL_C`), EXHTEMP1–3 `003C`–`003E`; fuel in the oil `03E1`, oil pressure sensor voltage `0424`, oil pump duty `0594` (see *Engine health*); and the next 8 DIDs of the sweep |
 | every 2 min | odometer `DD01`, intake / outside air `F40F` / `F446`, barometer `F433`, fuel level `F42F`, run time `F41F`, charge air `F477`, turbo `F474`–`F476`, EGR temperature `F46B`, `F46F`, coolant / intake air sensors `F467` / `F468`, module voltage `F442`, check-engine light and stored emissions DTCs `F401`, `F48B`, oil-deteriorated events `0435`, low oil pressure switch `0416`, oil pressure solenoid `DA01`, DPF light count `0433`, injector corrections `098A`–`098D` (`INJx_CMP`, mm³/stroke), community candidates `0301` `1305` `DAAE` (raw only) |
 | once a drive | supported-PID bitmaps `F400`…`F4C0` (standard PIDs the PCM leaves out aren't asked), software / calibration IDs `F188` `F187` `F804` `F806`, reference torque `F463`, the MAP / MAF scales `F44F` / `F450`, distance and warm-ups since the trouble codes were cleared `F431` / `F430`, distance with the check-engine light on `F421`, injector learning values `0436`–`0439` (`FI_LRN`, 4 injectors × 35 / 65 / 100 / 140 MPa, µs), fuel pump / intake shutter / EGR learning `051A` `051E` `0534` `0538`, km since the oil change `0519` / `0542`, total time `DD00`, injector learning failure codes `C968` / `C969` |
 
@@ -636,7 +640,7 @@ doesn't answer (or answers "busy") three times in a row is asked every 2 min; wh
 drive. A sample in which the PCM answers nothing at all — ignition off, adapter busy — is a gap: no row,
 nothing held against the values, and a value that has answered on the drive is never dropped (before
 this, a 2-minute stop with the ignition off dropped every value for the rest of the drive). **The sweep**
-goes through `7E0 0300–04FF` and `DA00–DAFF` (`recordSweepRanges`), 24 DIDs per 30 s sample, raw only.
+goes through `7E0 0300–04FF` and `DA00–DAFF` (`recordSweepRanges`), 8 DIDs per 30 s sample (24 before 6 Nov 2026), raw only.
 The first pass (~15 min of driving) finds which DIDs exist; after that only those are read, plus two of
 the ones not there per sample, in turn (`recordSweepRecheck`), as one can be missed while the PCM is
 busy. DIDs read as fields are left out of it.
@@ -692,27 +696,39 @@ included in the export (`engineHealth`). Ranges and thresholds: `AppConfig.Engin
 |---|---|---|---|
 | Fuel in the oil, PCM's estimate | `03E1` `OIL_DIL` | under 500 g / from 500 g, high from 1,200 g | 1,661 g P252F (oil level too high), 2,236 g P253F — no warning light for either |
 | Oil judged deteriorated | `0435` `OIL_DIL_CNT` | 0 / 1, high from 2 | — |
-| Hot oil pressure at ~1,500 rpm | `0415` `EOP` (oil 85–95 °C, 1,400–1,600 rpm, median of 20) | Mazda 140–190 kPa (oil 70–80 °C) / 20 kPa below its value after the oil change, high from 30 | 40 kPa below → P253F |
+| Oil pressure at a hot idle | `0415` `EOP` (oil 85–95 °C, standing at 700–900 rpm, median of 20) | Mazda about 184 kPa (this car ~190–210) / 20 kPa below its value after the oil change or under 150, high from 30 | 40 kPa below at 1,500 rpm → P253F |
 | Since the oil change | `0519` | under 7,500 km / to 10,000 km | — |
 | Coolant warm-up, thermostat | `F405` | Mazda: opens 80–84 °C, fully 95 °C / under 80 °C after 15 min of driving, or under 78 °C on the move once warm | — |
-| Oil hot enough to boil the fuel off | `F45C` | ≥ 90 °C for 10 min on most drives / 3 drives in a row under 80 °C | — |
-| Temperature sensors after ≥ 6 h off | `F405` `F45C` `F40F` `F446` | about the same / 8 °C apart, high 15 | — |
+| Oil hot enough to boil the fuel off | `F45C` | ≥ 85 °C for 10 min on most drives / 3 drives in a row under 80 °C | — |
+| Temperature sensors after ≥ 6 h off | `F405` `F45C` `F40F` `F446` | coolant ≈ oil, intake ≈ outside, engine not colder than the air / 6 °C off, high 10 (the engine may still be warmer than the air) | — |
 | Rail pressure follows the command | `F46D` | Mazda: ~40 MPa idle, ~80 MPa at 4,000 rpm; average gap ≤ 3 MPa / high from 6 | — |
-| Injector corrections | `098A`–`098D` | Mazda reference about ±0.3 mm³/stroke / ±0.8, high ±1.5 | — |
+| Injector corrections at a warm idle | `098A`–`098D` (median of the last 10 warm idles) | Mazda reference about ±0.3 mm³/stroke / ±0.8, high ±1.5 | — |
 | Injector learning drift | `0436`–`0439` | change since the first reading under 40 µs / high from 80 | — |
 | Warm idle vs target | RPM, `0308` | Mazda: 800 rpm within 50 rpm / 30 % of samples off, high 50 % | — |
 | Distance between regenerations | regeneration log | 250 km or more / under 250, high under 150 | — |
 | Interrupted regenerations | regeneration log | 0–1 of the last 10 / 2, high 4 | — |
 | PM_GEN growth | recorder | up to 2.5 g/L per 100 km / high above 3.5 | — |
-| Air flow vs the PCM's target | `F466` / `040C` | within 25 % / 30 % of warm samples off | — |
+| Soot left right after a regeneration | regeneration log (`044B`, `042C` in older entries) | Mazda approx. 0 (P243C), ~0.1 typical / 0.3, high 0.5 g/L (ash, clogged DPF) | — |
+| Pressure-based soot vs the model | `044B` / `042D` (PM_GEN ≥ 1 g/L) | up to 1.3× / high from 2× | Mazda's P243C check: 2× or more at 3,000 rpm |
+
+`044B` (PM_ACC_DSD) behaves like the pressure-based estimate: it rises with exhaust flow and, in the burn
+of 7 Nov 2026, stopped at ~0.9 g/L while `042C` (PM_ACC) fell smoothly to 0.2 and PM_GEN to 0. Injector
+corrections are only kept at warm idles without a regeneration (they swung to ±1 mm³ during that burn).
+After a regeneration that didn't complete (PM_GEN burnt down, `0434` not reset) the recorder's PM_GEN rate
+counts from where PM_GEN was lowest. A cold start needs the first coolant reading at 40 °C or less (the car
+may have been driven without Autobot in between).
+| Boost vs the PCM's target at high load | `F470` (warm, 1,500–3,500 rpm, load ≥ 60 %) | average gap under 15 kPa / from 15 kPa (Mazda gives no figure; at part load the PCM doesn't chase this target) | — |
 
 "Mazda" values are from the SKYACTIV-D 2.2 workshop manual (PID reference values, engine technical data,
-DTCs P252F / P253F); the rest is Autobot's own guide. Notes: `03E1` only counts the fuel the PCM puts in
+DTCs P252F / P253F); the rest is Autobot's own guide. A sample's reads span several seconds, so the RPM
+and road speed used with a value are the ones read nearest to it (within `recordMarkMaxSeconds`). Notes: `03E1` only counts the fuel the PCM puts in
 during regenerations, so a dipstick near X with a low `03E1` points at another source (a dripping
 injector: corrections, learning drift, rail pressure). `0415` / `0424` / `0594` / `0416` / `DA01` aren't in
 FORScan's SKYACTIV-D list; their meanings come from FORScan's definitions for other Mazda PCMs, and this
-PCM answers `0415`, `0424`, `0416` and `DA01` (the sweep, Nov 2026). The oil pressure baseline starts
-again when `0519` goes back (an oil change).
+PCM answers `0415`, `0424`, `0416` and `DA01` (the sweep, Nov 2026); `0415` matches Mazda's reference
+values here (~200 kPa at a hot idle, ~370 at 1,700–3,300 rpm). The oil pressure baseline starts again when
+`0519` goes back (an oil change). `040C` (`MAF_DSD`), `0381`, `0542`, `0538` and `003C`–`003E` aren't on
+this PCM (`7F 22 31`).
 
 ## Manual shifting detection
 
@@ -748,7 +764,7 @@ Autobot/
 │                SpeedMonitor (GPS), PowerModeController (3-second transition buffer), CarPlayMonitor,
 │                DPFMonitor (DPF back pressure, soot, regeneration while its screen is open)
 │                DPFRegenLog (records each regeneration), DPFHistoryFinder (the PCM's last-10 history),
-│                DPFRecorder (30 s samples of the soot model and its inputs, PM_GEN growth, export),
+│                DPFRecorder (10 s samples of the soot model and its inputs, PM_GEN growth, export),
 │                EngineHealth (fuel in the oil: ranges and early warnings)
 ├── Climate/     ClimateTempFlash (A/C set colder / warmer → blue / red burst flash)
 ├── Voice/       AudioSessionManager, Speaker, MetallicVoiceEffect, VoiceCoordinator (queue)
@@ -804,7 +820,8 @@ versions ignore sections they don't know.
   (`AppConfig.Climate.enabled`); reading the set temperature needs an MS-CAN capable adapter
   (climate control unit `733`, pins 3/11).
 - i-stop auto-off — **dropped**: no documented way to switch i-stop off through the KW905 (HS-CAN only) on
-  this CX-5; the code was removed.
+  this CX-5; the code was removed. Revisited in Nov 2026 by reverse engineering FORScan Viewer (it only
+  reads i-stop on Mazda, no disable); the live-state monitor and the prohibit-frame experiment were removed too.
 - DPF monitor: live back pressure + RPM charts, soot (PM_GEN gauge / PM_ACC / PM_ACC_DSD), regeneration,
   temperatures, EGR / boost / air flow / oil, regeneration log from start to end — **done**;
   the community scaling of the Mazda DIDs is to be confirmed against FORScan on the car.

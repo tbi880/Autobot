@@ -288,8 +288,9 @@ nonisolated enum AppConfig {
         static let movingSpeed = 5.0
         /// Health notes on the DPF screen: soot still at or above this after a completed regeneration
         /// (ash / clogging?), regenerations closer together than `shortIntervalKm` this many times in a
-        /// row, and this many interrupted regenerations in a row (fuel in the oil).
-        static let postRegenSootHigh = 1.5
+        /// row, and this many interrupted regenerations in a row (fuel in the oil). Soot after: Mazda expects
+        /// about 0 after a complete regeneration (P243C), 0.5 g/L is too high (FORScan forum).
+        static let postRegenSootHigh = 0.5
         static let shortIntervalKm = 150.0
         static let shortIntervalsInARow = 3
         static let interruptedInARow = 2
@@ -328,12 +329,20 @@ nonisolated enum AppConfig {
 
         /// Data recorder (DPFRecorder, README "DPF data recorder"): while live data runs, screen open or not,
         /// a snapshot of the PCM's soot model and what feeds it every `recordInterval` seconds — every
-        /// `recordIntervalDuringRegen` while the request flag (220380 bit 0) is on and for
-        /// `recordFastAfterCountUp` after the count (220432) goes up — as one CSV row, exportable from the
-        /// DPF screen. Off: nothing is read or recorded.
+        /// `recordIntervalDuringRegen` while a request bit of 220380 is on and for `recordFastAfterCountUp`
+        /// after the count (220432) goes up — as one CSV row, exportable from the DPF screen. The fast tier is
+        /// in every sample, the rest every `recordNormalInterval` / `recordSlowInterval` / once a drive. Off:
+        /// nothing is read or recorded.
         static let recordEnabled = true
-        static let recordInterval: TimeInterval = 30
-        static let recordIntervalDuringRegen: TimeInterval = 10
+        /// The RPM / road speed read at most this far (seconds) from a reply count as "next to it"
+        /// (EngineHealth lines oil pressure, idle and injector readings up with them).
+        static let recordMarkMaxSeconds: TimeInterval = 4
+        /// Measured on this car (5 Nov 2026): a read takes 50–100 ms, a live-data round 0.3–1.5 s between two
+        /// goes, so a sample of everything (~70–90 reads) took 13–48 s and the old 30 s interval was the
+        /// limit. Hence: a small fast tier every 10 s, the rest every 30 s, a smaller sweep and a bigger go.
+        static let recordInterval: TimeInterval = 10
+        static let recordNormalInterval: TimeInterval = 30
+        static let recordIntervalDuringRegen: TimeInterval = 5
         static let recordFastAfterCountUp: TimeInterval = 1200
         /// The slow values (odometer, outside air, fuel level, oil dilution, community candidates…).
         static let recordSlowInterval: TimeInterval = 120
@@ -341,11 +350,13 @@ nonisolated enum AppConfig {
         static let recordFirstDelay: TimeInterval = 15
         /// How much is read per go between two live-data rounds, so Power Mode, reverse and the turn signals
         /// keep their pace: a single-frame read counts 1 (~50–100 ms), a reply of several frames 3. Every go
-        /// starts with RPM (1), so the values can be lined up with the engine speed afterwards.
-        static let recordJobBudget = 5
+        /// starts with RPM (1), so the values can be lined up with the engine speed afterwards. 7: RPM and up
+        /// to 6 single-frame reads, ~0.4–0.6 s, before live data has its next round (was 5).
+        static let recordJobBudget = 7
         /// The DID sweep (raw only): DIDs per 30 s sample, the PCM blocks it goes through, the wait per DID.
-        /// The first pass finds which DIDs exist (~15 min of driving); after that only those are read.
-        static let recordSweepPerSample = 24
+        /// The first pass finds which DIDs exist (done on this car: 88 answer); after that only those are
+        /// read, in turn (was 24 per sample).
+        static let recordSweepPerSample = 8
         static let recordSweepRanges: [ClosedRange<Int>] = [0x0300...0x04FF, 0xDA00...0xDAFF]
         static let recordSweepTimeout: TimeInterval = 0.6
         /// DIDs the sweep found not there, asked again per sample, in turn (one can be missed while the PCM
@@ -406,9 +417,13 @@ nonisolated enum AppConfig {
         static let oilDilutionP253F = 2_236.0
         /// Regeneration log entries looked at (fuel added per regeneration, interrupted ones).
         static let regenEntriesUsed = 10
-        // Hot oil pressure (0415 EOP), the way the PCM checks it for P253F: 1,475–1,525 rpm with the oil at
-        // 87–88 °C, 40 kPa below the value after the oil change. Widened here, as samples are 30 s apart.
-        static let oilPressureRPM: ClosedRange<Double> = 1_400...1_600
+        // Oil pressure (0415 EOP). The PCM's own check (P253F) is 40 kPa below the value after the oil change
+        // at 1,475–1,525 rpm with the oil at 87–88 °C. Here: standing at a hot idle (RPM read next to the
+        // reply), where it is steady (~190–210 kPa on this car, Nov 2026; Mazda: about 184 kPa) and comes up at
+        // every stop; at 1,500 rpm it climbs ~0.2 kPa per rpm, too steep to compare readings. The readings at
+        // oilPressureHighRPM (~360–390 kPa here; Mazda: about 366 kPa at 4,000 rpm) are only shown.
+        static let oilPressureRPM: ClosedRange<Double> = 700...900
+        static let oilPressureHighRPM: ClosedRange<Double> = 1_700...3_500
         static let oilPressureOilTemp: ClosedRange<Double> = 85...95
         /// Readings in the median, and in the baseline (the first ones after an oil change); at least
         /// `oilPressureMinSamples` before it says anything.
@@ -417,8 +432,8 @@ nonisolated enum AppConfig {
         static let oilPressureDropWatch = 20.0
         static let oilPressureDropHigh = 30.0
         static let oilPressureDropP253F = 40.0
-        /// Mazda: 140–190 kPa at 1,500 rpm with the oil at 70–80 °C; hotter oil reads a little lower.
-        static let oilPressureLow = 130.0
+        /// Hot idle under this: low whatever the baseline.
+        static let oilPressureLow = 150.0
         /// 0519 at most this far when the watch first sees it: the baseline counts as "after the oil change".
         static let oilPressureBaselineMaxKm = 1_000.0
         /// 0519 going back by more than this is an oil change.
@@ -436,17 +451,22 @@ nonisolated enum AppConfig {
         /// Drives starting colder than this outside aren't judged for the warm-up.
         static let coolantMinAmbient = 0.0
         static let coolantHigh = 105.0
-        /// Fuel boils out of the oil above about oilHot; a drive "got the oil hot" with oilHotMinutes there.
-        static let oilHot = 90.0
+        /// Fuel boils out of the oil faster above about oilHot; a drive "got the oil hot" with oilHotMinutes
+        /// there. This car's oil settles at 89–91 °C on a warm drive (Nov 2026).
+        static let oilHot = 85.0
         static let oilHotMinutes = 10.0
         /// Drives in a row whose oil never reached oilWarm.
         static let oilWarm = 80.0
         static let coldDrivesWatch = 3
         static let coldDrivesHigh = 6
-        /// After this long off, coolant, oil, intake and outside air should read about the same.
+        /// After this long off: coolant and oil within coldStartSpreadWatch of each other, intake and outside
+        /// air too, and the engine not colder than the air by that much (it may well be warmer: after 10 h on
+        /// 6 Nov 2026 coolant / oil read 28 / 25 °C with the air at 19 °C, 47 s after the start).
         static let coldStartOffHours = 6.0
-        static let coldStartSpreadWatch = 8.0
-        static let coldStartSpreadHigh = 15.0
+        /// …and the first coolant reading at most this (a drive without Autobot in between leaves it warm).
+        static let coldStartMaxCoolant = 40.0
+        static let coldStartSpreadWatch = 6.0
+        static let coldStartSpreadHigh = 10.0
         /// The first samples of a drive (minutes) give its cold-start temperatures.
         static let firstSampleMinutes = 2.0
         // Fuel system. Mazda: rail about 40 MPa at idle, 80 MPa at 4,000 rpm; injector corrections about
@@ -460,6 +480,10 @@ nonisolated enum AppConfig {
         static let injectorLearningDriftHigh = 80.0
         static let idleDeviationRPM = 50.0
         static let idleMinSamples = 5
+        /// Standing (road speed 0) below this RPM counts as idle (idle speed, injector corrections).
+        static let idleMaxRPM = 900.0
+        /// Warm-idle readings of each injector correction kept (the item shows their median).
+        static let injectorIdleReadings = 10
         static let idleOffShareWatch = 0.3
         static let idleOffShareHigh = 0.5
         // Regeneration. Owners report 250–400 km between regenerations in mixed driving.
@@ -471,18 +495,32 @@ nonisolated enum AppConfig {
         /// PM_GEN per 100 km since the last regeneration, g/L (as AppConfig.DPF.pmGenHealthyRate / pmGenRateHigh).
         static let pmGenRateWatch = 2.5
         static let pmGenRateHigh = 3.5
-        // Air: fresh air flow (F466, PID 66) against the PCM's target MAF_DSD (040C), warm, on the move, not
-        // regenerating, in this RPM range; off by more than mafDeviation.
-        static let mafRPM: ClosedRange<Double> = 1_200...2_500
-        static let mafMinTarget = 5.0
-        static let mafDeviation = 0.25
-        static let mafMinSamples = 10
-        static let mafOffShareWatch = 0.3
+        // Air: boost (PID 70, the MAP sensor) against the PCM's target, warm, on the move, at high load, in
+        // this RPM range; the average gap over a drive. (MAF_DSD, 040C, isn't on this PCM.) Mazda gives no
+        // figure. Only high load: at part load the PCM doesn't chase this target (5–6 Nov 2026: ~30 kPa short
+        // at a steady 100 km/h, 228 kPa asked for with no fuel), at 60 % load and more it gets there.
+        static let boostRPM: ClosedRange<Double> = 1_500...3_500
+        static let boostMinLoad = 60.0
+        static let boostMinSamples = 5
+        static let boostGapWatch = 15.0
+        // The DPF. Soot right after a regeneration (PM_ACC_DSD, PM_ACC in older log entries): Mazda "approx. 0"
+        // after a complete one (P243C), ~0.1 typical (FORScan forum); more is ash or a clogged filter. Values
+        // above sootAfterPlausibleMax are the old 042B misreading in log entries before 5 Nov 2026.
+        static let sootAfterWatch = 0.3
+        static let sootAfterHigh = 0.5
+        static let sootAfterPlausibleMax = 5.0
+        /// PM_ACC_DSD / PM_GEN while driving, judged from pressureVsModelMinGen g/L PM_GEN; Mazda's P243C check
+        /// is 2× or more at 3,000 rpm.
+        static let pressureVsModelMinGen = 1.0
+        static let pressureVsModelWatch = 1.3
+        static let pressureVsModelHigh = 2.0
         // Drives.
         static let drivesKept = 10
         static let movingSpeed = 5.0
+        /// Under this road speed (km/h) the car counts as standing (hot-idle oil pressure, idle speed).
+        static let standingSpeed = 3.0
         /// A longer gap between two samples counts as this many seconds (live data stopped meanwhile).
-        static let maxSampleGap: TimeInterval = 60
+        static let maxSampleGap: TimeInterval = 300
     }
 
     /// Turn signals and hazard lights (TurnSignalFlash): flash in the current Power Mode colour while

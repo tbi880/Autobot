@@ -6,13 +6,17 @@
 // works whenever live data runs, screen open or not, and is shown on the DPF screen.
 //
 //   Fuel in the oil   03E1 the PCM's own estimate of fuel in the oil (g), 0435 oil-deteriorated events,
-//                     0415 hot oil pressure at ~1,500 rpm against its value after the oil change (fuel
-//                     thins the oil; the PCM sets P253F at a 40 kPa drop), 0519 distance since the change
+//                     0415 oil pressure at a hot idle against its value after the oil change (fuel thins
+//                     the oil; the PCM's own check, P253F, is a 40 kPa drop at 1,500 rpm), 0519 distance
+//                     since the change
 //   Temperatures      coolant warm-up (thermostat), oil hot enough to boil the fuel off again, the
 //                     temperature sensors agreeing after a cold soak
 //   Fuel system       rail pressure following the command, injector corrections and learning, idle speed
 //   Regeneration      distance between regenerations, interrupted ones, PM_GEN growth
-//   Air               air flow (F466) against the PCM's target (EGR, MAF sensor, boost leaks: more soot)
+//   Air               boost against the PCM's target (F470; less air, more soot)
+//
+// A sample's reads span several seconds (sometimes much more), so the engine speed and road speed used
+// with a value are the ones read nearest in time to it (the recorder passes them per DID).
 //
 // Ranges are in AppConfig.EngineHealth: Mazda's SKYACTIV-D 2.2 workshop manual where it gives a value,
 // otherwise Autobot's own guide; each item says which. Levels: normal, watch (a little off: keep an eye
@@ -73,10 +77,11 @@ final class EngineHealth: ObservableObject {
         /// Warm idle: samples, and those more than Tuning.idleDeviationRPM from the target.
         var idleSamples = 0
         var idleOff = 0
-        /// Warm steady driving: samples with air flow and its target, and those off by more than
-        /// Tuning.mafDeviation.
-        var mafSamples = 0
-        var mafOff = 0
+        /// Warm, under high load: samples with boost and its target, and the sum of target − actual, kPa
+        /// (optional: drives saved before them don't have them; boostSamples / boostGapSum, all loads, were
+        /// dropped on 6 Nov 2026 — at part load the target isn't what the PCM chases).
+        var highLoadBoostSamples: Int?
+        var highLoadBoostGapSum: Double?
     }
 
     /// Everything kept between launches. New fields must be optional: a missing non-optional key would
@@ -87,11 +92,19 @@ final class EngineHealth: ObservableObject {
         var latestAt: [String: Date] = [:]
         /// 0519 distance since the oil change at the last reading, km (an oil change makes it go back).
         var oilChangeKm: Double?
-        /// Hot oil pressure at ~1,500 rpm: the first Tuning.oilPressureSamples qualifying readings after the
-        /// oil change (or since the watch started), and the latest ones, kPa.
+        /// Oil pressure at a hot idle: the first Tuning.oilPressureSamples qualifying readings after the oil
+        /// change (or since the watch started), and the latest ones, kPa.
         var pressureBaseline: [Double] = []
         var baselineAfterOilChange = false
         var pressureRecent: [Double] = []
+        /// Which reading the baseline is of (a change of probe starts it again), and the latest hot readings
+        /// at Tuning.oilPressureHighRPM, for the screen.
+        var pressureProbe: String?
+        var pressureHighRecent: [Double]?
+        /// The last Tuning.injectorIdleReadings warm-idle readings of every injector correction, mm³/stroke
+        /// (they read 0 while driving), and which readings they are (a change starts them again).
+        var injectorIdle: [String: [Double]]?
+        var injectorProbe: String?
         /// The first reading of every injector learning value (FI_LRN, µs), for the drift.
         var learningFirst: [String: Double] = [:]
         var learningFirstAt: Date?
@@ -107,6 +120,8 @@ final class EngineHealth: ObservableObject {
         let oilPressureBaseline: [Double]
         let oilPressureBaselineAfterOilChange: Bool
         let oilPressureRecent: [Double]
+        let oilPressureHighRPMRecent: [Double]
+        let injectorCorrectionsAtIdle: [String: [Double]]
         let injectorLearningFirst: [String: Double]
         let latest: [String: Double]
     }
@@ -123,7 +138,8 @@ final class EngineHealth: ObservableObject {
         Export(items: items, drives: state.drives, oilChangeKm: state.oilChangeKm,
                oilPressureBaseline: state.pressureBaseline,
                oilPressureBaselineAfterOilChange: state.baselineAfterOilChange,
-               oilPressureRecent: state.pressureRecent, injectorLearningFirst: state.learningFirst,
+               oilPressureRecent: state.pressureRecent, oilPressureHighRPMRecent: state.pressureHighRecent ?? [],
+               injectorCorrectionsAtIdle: state.injectorIdle ?? [:], injectorLearningFirst: state.learningFirst,
                latest: state.latest)
     }
 
@@ -131,6 +147,9 @@ final class EngineHealth: ObservableObject {
     private var state = State()
     private var regenEntries: [DPFRegenLog.Entry] = []
     private var pmGenPer100Km: Double?
+    /// The previous sample's PM_GEN: falling means a regeneration is burning (also while its request bit is
+    /// off, standing at the lights).
+    private var lastPmGen: Double?
 
     private static let stateKey = "EngineHealth.state"
 
@@ -138,8 +157,14 @@ final class EngineHealth: ObservableObject {
     private static let kept: Set<String> = [
         "oil_dilution_g", "oil_dilution_events", "oil_change_km", "oil_pressure_kpa", "coolant_c", "oil_c",
         "intake_air_c", "ambient_c", "rail_cmd_kpa", "rail_act_kpa", "inj1_cmp_mm3", "inj2_cmp_mm3",
-        "inj3_cmp_mm3", "inj4_cmp_mm3", "rpm_desired", "maf_a_gs", "maf_dsd_gs", "regen_req",
+        "inj3_cmp_mm3", "inj4_cmp_mm3", "rpm_desired", "regen_req", "boost_target_kpa", "boost_kpa", "load_pct",
+        "pm_gen", "pm_acc", "pm_acc_dsd",
     ]
+
+    /// The oil pressure reading the baseline is of (see State.pressureProbe), and the injector readings kept
+    /// (State.injectorProbe: since 7 Nov 2026 not while regenerating — they swing to ±1 mm³ then).
+    private static let pressureProbe = "hot idle"
+    private static let injectorProbe = "warm idle, not regenerating"
 
     init(persist: Bool, regenEntries: [DPFRegenLog.Entry]) {
         self.persist = persist
@@ -148,15 +173,27 @@ final class EngineHealth: ObservableObject {
            let saved = try? JSONDecoder().decode(State.self, from: data) {
             state = saved
         }
+        if state.pressureProbe != Self.pressureProbe {
+            state.pressureProbe = Self.pressureProbe
+            state.pressureBaseline = []
+            state.pressureRecent = []
+            state.baselineAfterOilChange = (state.oilChangeKm ?? .infinity) <= Tuning.oilPressureBaselineMaxKm
+        }
+        if state.injectorProbe != Self.injectorProbe {
+            state.injectorProbe = Self.injectorProbe
+            state.injectorIdle = nil
+        }
         items = evaluate()
     }
 
     // MARK: Samples
 
-    /// One recorder sample: its decoded values by CSV column, the RPM and road speed when it started.
-    /// `pmGenPer100Km`: PM_GEN growth since the last regeneration, once it means something.
-    func observe(_ values: [String: Double], rpm: Double?, speed: Double?, at date: Date, drive: String,
-                 pmGenPer100Km: Double?, regenEntries: [DPFRegenLog.Entry]) {
+    /// One recorder sample: its decoded values by CSV column, the RPM and road speed when it started, and
+    /// the RPM / road speed read nearest in time to each DID's reply. `pmGenPer100Km`: PM_GEN growth since
+    /// the last regeneration, once it means something.
+    func observe(_ values: [String: Double], rpm: Double?, speed: Double?, rpmAt: [String: Double],
+                 speedAt: [String: Double], at date: Date, drive: String, pmGenPer100Km: Double?,
+                 regenEntries: [DPFRegenLog.Entry]) {
         self.regenEntries = regenEntries
         self.pmGenPer100Km = pmGenPer100Km
         for (column, value) in values where Self.kept.contains(column) || Self.isLearning(column) {
@@ -168,13 +205,24 @@ final class EngineHealth: ObservableObject {
             state.learningFirst[column] = value
             if state.learningFirstAt == nil { state.learningFirstAt = date }
         }
-        updateDrive(values, rpm: rpm, speed: speed, at: date, drive: drive)
-        if let pressure = values["oil_pressure_kpa"], let rpm, Tuning.oilPressureRPM.contains(rpm),
+        updateDrive(values, rpm: rpm, speed: speed, rpmAt: rpmAt, speedAt: speedAt, at: date, drive: drive)
+        if let pressure = values["oil_pressure_kpa"], let engine = rpmAt["0415"],
            let oil = values["oil_c"], Tuning.oilPressureOilTemp.contains(oil) {
-            if state.pressureBaseline.count < Tuning.oilPressureSamples { state.pressureBaseline.append(pressure) }
-            state.pressureRecent.append(pressure)
-            if state.pressureRecent.count > Tuning.oilPressureSamples { state.pressureRecent.removeFirst() }
+            if Tuning.oilPressureRPM.contains(engine), (speedAt["0415"] ?? speed ?? 99) < Tuning.standingSpeed {
+                if state.pressureBaseline.count < Tuning.oilPressureSamples { state.pressureBaseline.append(pressure) }
+                state.pressureRecent.append(pressure)
+                if state.pressureRecent.count > Tuning.oilPressureSamples { state.pressureRecent.removeFirst() }
+            } else if Tuning.oilPressureHighRPM.contains(engine) {
+                var high = state.pressureHighRecent ?? []
+                high.append(pressure)
+                if high.count > Tuning.oilPressureSamples { high.removeFirst(high.count - Tuning.oilPressureSamples) }
+                state.pressureHighRecent = high
+            }
         }
+        let burning = (values["regen_req"] ?? 0) != 0
+            || (values["pm_gen"].flatMap { now in lastPmGen.map { now < $0 } } ?? false)
+        if let pmGen = values["pm_gen"] { lastPmGen = pmGen }
+        if !burning { noteInjectorCorrections(values, rpmAt: rpmAt, speedAt: speedAt, speed: speed) }
         publish()
         save()
     }
@@ -187,6 +235,27 @@ final class EngineHealth: ObservableObject {
 
     private static func isLearning(_ column: String) -> Bool {
         column.hasPrefix("inj") && column.contains("_lrn") && column.hasSuffix("_us")
+    }
+
+    /// INJx_CMP only means something around idle (it reads 0 while driving; at idle, in gear or not, it
+    /// doesn't): warm readings below Tuning.idleMaxRPM are kept, not the all-zero ones.
+    private func noteInjectorCorrections(_ values: [String: Double], rpmAt: [String: Double],
+                                         speedAt: [String: Double], speed: Double?) {
+        let warm = (values["coolant_c"] ?? state.latest["coolant_c"] ?? 0) >= Tuning.coolantWarm
+        let columns = (1...4).map { "inj\($0)_cmp_mm3" }
+        guard warm, columns.contains(where: { (values[$0] ?? 0) != 0 }) else { return }
+        var kept = state.injectorIdle ?? [:]
+        for (index, did) in ["098A", "098B", "098C", "098D"].enumerated() {
+            let column = columns[index]
+            guard let value = values[column], let engine = rpmAt[did], engine < Tuning.idleMaxRPM else { continue }
+            var readings = kept[column] ?? []
+            readings.append(value)
+            if readings.count > Tuning.injectorIdleReadings {
+                readings.removeFirst(readings.count - Tuning.injectorIdleReadings)
+            }
+            kept[column] = readings
+        }
+        state.injectorIdle = kept
     }
 
     /// 0519 going back means the oil was changed: the oil pressure baseline starts again.
@@ -204,7 +273,8 @@ final class EngineHealth: ObservableObject {
         state.oilChangeKm = km
     }
 
-    private func updateDrive(_ values: [String: Double], rpm: Double?, speed: Double?, at date: Date, drive: String) {
+    private func updateDrive(_ values: [String: Double], rpm: Double?, speed: Double?, rpmAt: [String: Double],
+                             speedAt: [String: Double], at date: Date, drive: String) {
         var stats: DriveStats
         if let last = state.drives.last, last.id == drive {
             stats = last
@@ -238,19 +308,20 @@ final class EngineHealth: ObservableObject {
             if oil >= Tuning.oilHot { stats.oilHotMinutes += minutes }
         }
         let warm = (coolant ?? state.latest["coolant_c"] ?? 0) >= Tuning.coolantWarm
-        let regenerating = (state.latest["regen_req"] ?? 0) != 0
         if let command = values["rail_cmd_kpa"], let actual = values["rail_act_kpa"], (rpm ?? 0) >= 700 {
             stats.railSamples += 1
             stats.railGapSum += abs(actual - command) / 1000
         }
-        if let rpm, let target = values["rpm_desired"], target > 0, warm, (speed ?? 1) < 1 {
+        if let engine = rpmAt["0308"] ?? rpm, let target = values["rpm_desired"], target > 0, warm,
+           (speedAt["0308"] ?? speed ?? 99) < Tuning.standingSpeed, engine < Tuning.idleMaxRPM {
             stats.idleSamples += 1
-            if abs(rpm - target) > Tuning.idleDeviationRPM { stats.idleOff += 1 }
+            if abs(engine - target) > Tuning.idleDeviationRPM { stats.idleOff += 1 }
         }
-        if let actual = values["maf_a_gs"], let target = values["maf_dsd_gs"], target >= Tuning.mafMinTarget,
-           let rpm, Tuning.mafRPM.contains(rpm), warm, moving, !regenerating {
-            stats.mafSamples += 1
-            if abs(actual / target - 1) > Tuning.mafDeviation { stats.mafOff += 1 }
+        if let target = values["boost_target_kpa"], let actual = values["boost_kpa"], let engine = rpmAt["F470"],
+           Tuning.boostRPM.contains(engine), (values["load_pct"] ?? 0) >= Tuning.boostMinLoad, warm,
+           (speedAt["F470"] ?? speed ?? 0) >= Tuning.movingSpeed {
+            stats.highLoadBoostSamples = (stats.highLoadBoostSamples ?? 0) + 1
+            stats.highLoadBoostGapSum = (stats.highLoadBoostGapSum ?? 0) + (target - actual)
         }
         state.drives.append(stats)
         if state.drives.count > Tuning.drivesKept { state.drives.removeFirst(state.drives.count - Tuning.drivesKept) }
@@ -276,15 +347,15 @@ final class EngineHealth: ObservableObject {
         [oilDilution(), oilEvents(), oilPressure(), oilChange(),
          warmUp(), oilHeat(), coldStart(),
          rail(), injectorCorrections(), injectorLearning(), idle(),
-         regenInterval(), regenInterrupted(), pmGenRate(),
-         airFlow()]
+         regenInterval(), regenInterrupted(), pmGenRate(), sootAfterRegen(), pressureVsModel(),
+         boost()]
     }
 
     private static let oilGroup = "Fuel in the oil"
     private static let temperatureGroup = "Engine temperature"
     private static let fuelGroup = "Fuel system (fuel reaching the oil without a regeneration)"
     private static let regenGroup = "Regeneration (the main source of fuel in the oil)"
-    private static let airGroup = "Air (more soot, more regenerations)"
+    private static let airGroup = "Air (less air, more soot, more regenerations)"
 
     private func oilDilution() -> Item {
         let grams = state.latest["oil_dilution_g"]
@@ -343,16 +414,23 @@ final class EngineHealth: ObservableObject {
         } else if !state.pressureRecent.isEmpty {
             value = String(format: "%d/%d readings", state.pressureRecent.count, Tuning.oilPressureMinSamples)
         }
-        return Item(id: "oil_pressure", group: Self.oilGroup, title: "Hot oil pressure at ~1,500 rpm (0415)",
+        if let high = Self.median(state.pressureHighRecent ?? []) {
+            value += String(format: " · %.0f–%.0f rpm %.0f kPa", Tuning.oilPressureHighRPM.lowerBound,
+                            Tuning.oilPressureHighRPM.upperBound, high)
+        }
+        return Item(id: "oil_pressure", group: Self.oilGroup, title: "Oil pressure at a hot idle (0415)",
                     value: value,
-                    range: String(format: "Mazda 140–190 kPa at 1,500 rpm (oil 70–80 °C) · watch at −%.0f kPa from "
-                                  + "after the oil change · PCM: −%.0f kPa sets P253F", Tuning.oilPressureDropWatch,
+                    range: String(format: "Mazda: about 184 kPa at a warm idle, 366 kPa at 4,000 rpm · watch at "
+                                  + "−%.0f kPa from after the oil change, or under %.0f kPa · PCM: −%.0f kPa at "
+                                  + "1,500 rpm sets P253F", Tuning.oilPressureDropWatch, Tuning.oilPressureLow,
                                   Tuning.oilPressureDropP253F),
                     level: level,
-                    about: String(format: "EOP with the oil at %.0f–%.0f °C and %.0f–%.0f rpm, the median of the "
-                                  + "last %d such readings. Fuel thins the oil, so its pressure falls as fuel builds "
-                                  + "up: the PCM compares it with the value after the oil change (that's P253F). "
-                                  + "0415 in kPa is FORScan's definition from other Mazda PCMs.",
+                    about: String(format: "EOP with the oil at %.0f–%.0f °C, standing at %.0f–%.0f rpm (the RPM read "
+                                  + "next to it), the median of the last %d such readings. Fuel thins the oil, so its "
+                                  + "pressure falls as fuel builds up; the PCM compares it with the value after the "
+                                  + "oil change (P253F). At a hot idle the pressure is steady and comes up at every "
+                                  + "stop. 0415 in kPa is FORScan's definition from other Mazda PCMs; it matches "
+                                  + "Mazda's reference values on this car.",
                                   Tuning.oilPressureOilTemp.lowerBound, Tuning.oilPressureOilTemp.upperBound,
                                   Tuning.oilPressureRPM.lowerBound, Tuning.oilPressureRPM.upperBound,
                                   Tuning.oilPressureSamples),
@@ -431,7 +509,10 @@ final class EngineHealth: ObservableObject {
     }
 
     private func coldStart() -> Item {
-        guard let drive = state.drives.last(where: { ($0.offHours ?? 0) >= Tuning.coldStartOffHours }) else {
+        // A cold start: long enough since the last recorded drive, and the coolant still cold (the car may
+        // have been driven without Autobot in between).
+        guard let drive = state.drives.last(where: { ($0.offHours ?? 0) >= Tuning.coldStartOffHours
+            && ($0.firstCoolant ?? 0) <= Tuning.coldStartMaxCoolant }) else {
             return Item(id: "cold_start", group: Self.temperatureGroup,
                         title: "Temperature sensors after a cold soak", value: "--",
                         range: coldStartRange, level: .unknown, about: coldStartAbout, advice: coldStartAdvice)
@@ -440,22 +521,33 @@ final class EngineHealth: ObservableObject {
                                           ("intake", drive.firstIntake), ("outside", drive.firstAmbient)]
         let readings: [(String, Double)] = named.compactMap { pair in pair.1.map { (pair.0, $0) } }
         var value = readings.map { $0.0 + " " + String(format: "%.0f", $0.1) }.joined(separator: ", ")
+        if !readings.isEmpty { value += " °C" }
+        if let hours = drive.offHours { value += String(format: " after %.0f h off", hours) }
+        // The two engine sensors should agree, and so should the two air sensors. The engine may still be
+        // warmer than the air after a night (a big block keeps its heat), but never colder: a coolant or oil
+        // reading below the air is a sensor reading low, the harmful way round.
         var level = Level.unknown
-        if readings.count >= 3, let low = readings.map(\.1).min(), let high = readings.map(\.1).max() {
-            value += String(format: " °C (spread %.0f)", high - low)
-            level = Self.level(high - low, watch: Tuning.coldStartSpreadWatch, high: Tuning.coldStartSpreadHigh)
+        var gaps: [Double] = []
+        if let coolant = drive.firstCoolant, let oil = drive.firstOil { gaps.append(abs(coolant - oil)) }
+        if let intake = drive.firstIntake, let outside = drive.firstAmbient { gaps.append(abs(intake - outside)) }
+        let air = [drive.firstIntake, drive.firstAmbient].compactMap { $0 }.min()
+        let engine = [drive.firstCoolant, drive.firstOil].compactMap { $0 }.min()
+        if let air, let engine { gaps.append(max(0, air - engine)) }
+        if let worst = gaps.max() {
+            level = Self.level(worst, watch: Tuning.coldStartSpreadWatch, high: Tuning.coldStartSpreadHigh)
         }
         return Item(id: "cold_start", group: Self.temperatureGroup, title: "Temperature sensors after a cold soak",
                     value: value, range: coldStartRange, level: level, about: coldStartAbout, advice: coldStartAdvice)
     }
 
     private var coldStartRange: String {
-        String(format: "guide: after %.0f h off they read about the same · watch at a %.0f °C spread",
-               Tuning.coldStartOffHours, Tuning.coldStartSpreadWatch)
+        String(format: "guide: after %.0f h off, coolant and oil within %.0f °C of each other, intake and outside "
+               + "too, and the engine not colder than the air", Tuning.coldStartOffHours, Tuning.coldStartSpreadWatch)
     }
     private let coldStartAbout = "Coolant, oil, intake air and outside air at the first sample after the car stood "
-        + "for hours. A coolant sensor reading low makes the PCM treat the engine as cold: more fuel, longer "
-        + "glow and post injection, failed regenerations."
+        + "for hours. The engine can still be warmer than the air after a night; a coolant sensor reading low, "
+        + "though, makes the PCM treat the engine as cold: more fuel, longer glow and post injection, failed "
+        + "regenerations."
     private let coldStartAdvice = "Compare again on the next cold start; if one sensor keeps reading apart from "
         + "the others, test that sensor (Mazda's ECT sensor inspection)."
 
@@ -475,17 +567,26 @@ final class EngineHealth: ObservableObject {
     }
 
     private func injectorCorrections() -> Item {
-        let values = (1...4).map { state.latest["inj\($0)_cmp_mm3"] }
+        let kept = state.injectorIdle ?? [:]
+        let values = (1...4).map { Self.median(kept["inj\($0)_cmp_mm3"] ?? []) }
         let known = values.compactMap { $0 }
-        return Item(id: "injector_correction", group: Self.fuelGroup, title: "Injector corrections (098A–098D)",
-                    value: known.isEmpty ? "--" : values.map { $0.map { String(format: "%+.2f", $0) } ?? "--" }
-                        .joined(separator: " / ") + " mm³",
+        let count = kept.values.map(\.count).min() ?? 0
+        var value = "--"
+        if !known.isEmpty {
+            value = values.map { $0.map { String(format: "%+.2f", $0) } ?? "--" }.joined(separator: " / ")
+                + " mm³ (median of \(count) warm idles)"
+        }
+        return Item(id: "injector_correction", group: Self.fuelGroup, title: "Injector corrections at a warm idle (098A–098D)",
+                    value: value,
                     range: String(format: "Mazda reference about ±0.3 mm³/stroke · guide: watch at ±%.1f, high at ±%.1f",
                                   Tuning.injectorCorrectionWatch, Tuning.injectorCorrectionHigh),
                     level: Self.level(known.map(abs).max(), watch: Tuning.injectorCorrectionWatch,
                                       high: Tuning.injectorCorrectionHigh),
-                    about: "INJx_CMP: how much the PCM corrects each injector's quantity. One far from the others is "
-                    + "a worn or dripping injector — a dripping one puts fuel in the oil without any regeneration.",
+                    about: "INJx_CMP, injectors 1–4: how much the PCM trims each injector's quantity to even out the "
+                    + "idle (it reads 0 while driving, and swings to ±1 mm³ during a regeneration, so only warm "
+                    + "idles without one count). Negative = the injector "
+                    + "gives more than it should. One drifting away from the others is a worn or dripping injector "
+                    + "— a dripping one puts fuel in the oil without any regeneration, and makes soot.",
                     advice: "Have the injectors checked (leak-off test, balance); compare with the injector "
                     + "learning drift below.")
     }
@@ -549,7 +650,9 @@ final class EngineHealth: ObservableObject {
                     about: "Every regeneration injects extra fuel late in the stroke (post injection) to heat the "
                     + "DPF; some of it gets past the rings into the oil. Frequent regenerations are the main source "
                     + "of fuel in the oil on this engine.",
-                    advice: "The PM_GEN growth and air flow items show why the soot builds up so fast.")
+                    advice: "See the items below: the soot model's growth (PM_GEN), the pressure-based estimate "
+                    + "against it, and the soot left after a regeneration (ash) — which of them brings the "
+                    + "regenerations forward.")
     }
 
     private func regenInterrupted() -> Item {
@@ -580,23 +683,77 @@ final class EngineHealth: ObservableObject {
                     + "calibration: see the other items and the DPF recorder's export.")
     }
 
-    private func airFlow() -> Item {
-        let drive = Self.latestDrive(state.drives) { $0.mafSamples >= Tuning.mafMinSamples }
-        let share = drive.map { Double($0.mafOff) / Double($0.mafSamples) }
-        var level = Self.level(share, watch: Tuning.mafOffShareWatch, high: .infinity)
+    private func boost() -> Item {
+        let drive = Self.latestDrive(state.drives) { ($0.highLoadBoostSamples ?? 0) >= Tuning.boostMinSamples }
+        let gap = drive.map { ($0.highLoadBoostGapSum ?? 0) / Double($0.highLoadBoostSamples ?? 1) }
+        var level = Self.level(gap, watch: Tuning.boostGapWatch, high: .infinity)
         if level == .high { level = .watch }
-        return Item(id: "air_flow", group: Self.airGroup, title: "Air flow vs the PCM's target (F466 / 040C)",
-                    value: drive.map { String(format: "%.0f %% of %d samples off by more than %.0f %%",
-                                              Double($0.mafOff) * 100 / Double($0.mafSamples), $0.mafSamples,
-                                              Tuning.mafDeviation * 100) } ?? "--",
-                    range: String(format: "Mazda: about 5.5 g/s at idle · guide: warm, %.0f–%.0f rpm, not "
-                                  + "regenerating, within %.0f %% of MAF_DSD", Tuning.mafRPM.lowerBound,
-                                  Tuning.mafRPM.upperBound, Tuning.mafDeviation * 100),
+        return Item(id: "boost", group: Self.airGroup, title: "Boost vs the PCM's target at high load (F470)",
+                    value: drive.map { String(format: "%.0f kPa under the target on average over %d samples",
+                                              ($0.highLoadBoostGapSum ?? 0) / Double($0.highLoadBoostSamples ?? 1),
+                                              $0.highLoadBoostSamples ?? 0) } ?? "--",
+                    range: String(format: "guide: warm, %.0f–%.0f rpm, load %.0f %% or more: within %.0f kPa of the "
+                                  + "target on average (Mazda gives no figure)", Tuning.boostRPM.lowerBound,
+                                  Tuning.boostRPM.upperBound, Tuning.boostMinLoad, Tuning.boostGapWatch),
                     level: level,
-                    about: "The PCM steers EGR so the fresh air flow meets its target (MAF_DSD). Staying away from it "
-                    + "points at the EGR valve or cooler, the MAF sensor or a boost leak — all of them make more soot.",
-                    advice: "Compare EGR target / actual and boost on the DPF screen; a dirty MAF sensor or EGR valve "
-                    + "is a common cause.")
+                    about: "PID 70: the boost the PCM asks for against the MAP sensor's. Only high load counts: at "
+                    + "part load the PCM lets boost fall short of this target (EGR comes first; on this car it "
+                    + "read 30 kPa short at a steady 100 km/h and asked for 228 kPa with no fuel at all), while "
+                    + "under high load it reaches it. A boost leak or a sticking turbo valve shows there.",
+                    advice: "Worth a boost-leak (smoke) test of the intercooler pipes and hoses, and a check of the "
+                    + "turbo's regulating valve, wastegate and their vacuum lines.")
+    }
+
+    /// The DPF's soot right after a regeneration: about 0 when the filter is clean (Mazda's P243C check);
+    /// what stays is ash or a clogged filter, and it brings the next regeneration forward.
+    private func sootAfterRegen() -> Item {
+        let completed = regenEntries.filter { $0.outcome != .interrupted }
+        let readings: [Double] = completed.prefix(3).compactMap { entry -> Double? in
+            if let desired = entry.sootDesiredAfter, desired <= Tuning.sootAfterPlausibleMax { return desired }
+            return entry.sootAfter
+        }
+        return Item(id: "soot_after_regen", group: Self.regenGroup, title: "Soot left right after a regeneration",
+                    value: readings.isEmpty ? "--" : readings.map { String(format: "%.2f", $0) }
+                        .joined(separator: " / ") + " g/L (latest first)",
+                    range: String(format: "Mazda: approx. 0 after a complete regeneration (P243C) · FORScan forum: "
+                                  + "~0.1 typical · guide: watch from %.1f, high from %.1f g/L",
+                                  Tuning.sootAfterWatch, Tuning.sootAfterHigh),
+                    level: Self.level(readings.first, watch: Tuning.sootAfterWatch, high: Tuning.sootAfterHigh),
+                    about: "PM_ACC_DSD (044B; PM_ACC in older log entries) when the count goes up. Soot burns in a "
+                    + "regeneration, ash doesn't: what stays makes the pressure-based estimate start the next cycle "
+                    + "higher, so regenerations come sooner. Mazda's P243C steps: a forced regeneration, and if "
+                    + "PM_ACC_DSD isn't about 0 afterwards, the DPF is clogged.",
+                    advice: "Have a forced regeneration done (FORScan / dealer) and read PM_ACC_DSD after it; if it "
+                    + "stays up, the DPF needs cleaning or replacing (ash after many km), or check the DPF pressure "
+                    + "sensor and its hoses.")
+    }
+
+    /// The pressure-based soot estimate against the model's. Regeneration starts when the PCM's soot
+    /// estimate (it uses both) is high enough; a pressure-based one well above the model's brings it forward.
+    private func pressureVsModel() -> Item {
+        let generated = state.latest["pm_gen"]
+        let accumulated = state.latest["pm_acc_dsd"] ?? state.latest["pm_acc"]
+        var ratio: Double?
+        if let generated, let accumulated, generated >= Tuning.pressureVsModelMinGen { ratio = accumulated / generated }
+        var value = "--"
+        if let generated, let accumulated {
+            value = String(format: "PM_ACC_DSD %.2f / PM_GEN %.2f g/L", accumulated, generated)
+            if let ratio { value += String(format: " = %.2f", ratio) }
+        }
+        return Item(id: "pressure_vs_model", group: Self.regenGroup, title: "Pressure-based soot vs the model",
+                    value: value,
+                    range: String(format: "guide: up to %.1f× · Mazda: 2× or more at 3,000 rpm → check the DPF "
+                                  + "pressure sensor (P243C)", Tuning.pressureVsModelWatch),
+                    level: Self.level(ratio, watch: Tuning.pressureVsModelWatch, high: Tuning.pressureVsModelHigh),
+                    about: "PM_ACC_DSD (044B) behaves like the estimate from the DPF's differential pressure: it "
+                    + "rises with exhaust flow on the motorway and stays up after a burn (7 Nov 2026: ~0.9 g/L while "
+                    + "PM_ACC fell to 0.2). PM_GEN is the engine model (fuel, air, RPM); PM_ACC (042C) the PCM's "
+                    + "running estimate, which falls smoothly during a burn. The PCM uses both kinds; when the "
+                    + "pressure-based one runs ahead, the regeneration comes sooner than the model alone would start "
+                    + "it. Judged from PM_GEN ≥ 1 g/L.",
+                    advice: "Watch which one is highest when the next regeneration starts (the recorder notes it); "
+                    + "if it's the pressure-based one, ash in the DPF, the pressure sensor or its hoses are the "
+                    + "suspects.")
     }
 
     // MARK: Helpers
