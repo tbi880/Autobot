@@ -715,7 +715,7 @@ included in the export (`engineHealth`). Ranges and thresholds: `AppConfig.Engin
 | Distance between regenerations | regeneration log | 250 km or more / under 250, high under 150 | — |
 | Interrupted regenerations | regeneration log | 0–1 of the last 10 / 2, high 4 | — |
 | PM_GEN growth | recorder | up to 2.5 g/L per 100 km / high above 3.5 | — |
-| Soot left right after a regeneration | regeneration log (`044B`, `042C` in older entries) | Mazda approx. 0 (P243C), ~0.1 typical / 0.3, high 0.5 g/L (ash, clogged DPF) | — |
+| Soot left right after a regeneration | lowest `044B` in the 5 min after the count `0432` goes up (from the recorder's samples) | Mazda approx. 0 (P243C), ~0.1 typical / 0.3, high 0.5 g/L (ash, clogged DPF) | — |
 | Pressure-based soot vs the model | `044B` / `042D` (PM_GEN ≥ 1 g/L) | up to 1.3× / high from 2× | Mazda's P243C check: 2× or more at 3,000 rpm |
 
 `044B` (PM_ACC_DSD) behaves like the pressure-based estimate: it rises with exhaust flow and, in the burn

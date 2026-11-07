@@ -509,6 +509,9 @@ nonisolated enum AppConfig {
         static let sootAfterWatch = 0.3
         static let sootAfterHigh = 0.5
         static let sootAfterPlausibleMax = 5.0
+        /// The window after the count goes up in which the lowest PM_ACC_DSD is taken, and how many are kept.
+        static let sootAfterWindow: TimeInterval = 300
+        static let sootAfterKept = 5
         /// PM_ACC_DSD / PM_GEN while driving, judged from pressureVsModelMinGen g/L PM_GEN; Mazda's P243C check
         /// is 2× or more at 3,000 rpm.
         static let pressureVsModelMinGen = 1.0

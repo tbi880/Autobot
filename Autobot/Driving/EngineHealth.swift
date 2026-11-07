@@ -105,11 +105,26 @@ final class EngineHealth: ObservableObject {
         /// (they read 0 while driving), and which readings they are (a change starts them again).
         var injectorIdle: [String: [Double]]?
         var injectorProbe: String?
+        /// Soot left after a regeneration, from the recorder's own samples (the regeneration log doesn't get
+        /// the after values when it isn't the one reading): the count seen last, the window after it went up
+        /// and the lowest PM_ACC_DSD in it, and the last results.
+        var lastRegenCount: Int?
+        var afterRegenCount: Int?
+        var afterRegenUntil: Date?
+        var afterRegenMin: Double?
+        var sootAfter: [SootAfter]?
         /// The first reading of every injector learning value (FI_LRN, µs), for the drift.
         var learningFirst: [String: Double] = [:]
         var learningFirstAt: Date?
         /// The last drives, oldest first; the last one is the current or latest drive.
         var drives: [DriveStats] = []
+    }
+
+    /// The lowest PM_ACC_DSD in the minutes after the count went up.
+    struct SootAfter: Codable, Equatable {
+        var count: Int
+        var date: Date
+        var pmAccDsd: Double
     }
 
     /// For the export.
@@ -123,6 +138,7 @@ final class EngineHealth: ObservableObject {
         let oilPressureHighRPMRecent: [Double]
         let injectorCorrectionsAtIdle: [String: [Double]]
         let injectorLearningFirst: [String: Double]
+        let sootAfterRegenerations: [SootAfter]
         let latest: [String: Double]
     }
 
@@ -140,6 +156,7 @@ final class EngineHealth: ObservableObject {
                oilPressureBaselineAfterOilChange: state.baselineAfterOilChange,
                oilPressureRecent: state.pressureRecent, oilPressureHighRPMRecent: state.pressureHighRecent ?? [],
                injectorCorrectionsAtIdle: state.injectorIdle ?? [:], injectorLearningFirst: state.learningFirst,
+               sootAfterRegenerations: state.sootAfter ?? [],
                latest: state.latest)
     }
 
@@ -219,6 +236,7 @@ final class EngineHealth: ObservableObject {
                 state.pressureHighRecent = high
             }
         }
+        noteRegeneration(values, at: date)
         let burning = (values["regen_req"] ?? 0) != 0
             || (values["pm_gen"].flatMap { now in lastPmGen.map { now < $0 } } ?? false)
         if let pmGen = values["pm_gen"] { lastPmGen = pmGen }
@@ -235,6 +253,37 @@ final class EngineHealth: ObservableObject {
 
     private static func isLearning(_ column: String) -> Bool {
         column.hasPrefix("inj") && column.contains("_lrn") && column.hasSuffix("_us")
+    }
+
+    /// The count going up opens a window of Tuning.sootAfterWindow; the lowest PM_ACC_DSD in it is the soot
+    /// left after that regeneration.
+    private func noteRegeneration(_ values: [String: Double], at date: Date) {
+        if let until = state.afterRegenUntil, date > until { closeAfterRegen() }
+        if let count = values["regen_count"].map({ Int($0) }) {
+            if let last = state.lastRegenCount, count > last {
+                closeAfterRegen()
+                state.afterRegenCount = count
+                state.afterRegenUntil = date.addingTimeInterval(Tuning.sootAfterWindow)
+                state.afterRegenMin = nil
+            }
+            state.lastRegenCount = count
+        }
+        if let until = state.afterRegenUntil, date <= until, let soot = values["pm_acc_dsd"] {
+            state.afterRegenMin = min(state.afterRegenMin ?? soot, soot)
+        }
+    }
+
+    private func closeAfterRegen() {
+        if let count = state.afterRegenCount, let soot = state.afterRegenMin, let until = state.afterRegenUntil {
+            var list = state.sootAfter ?? []
+            list.append(SootAfter(count: count, date: until.addingTimeInterval(-Tuning.sootAfterWindow), pmAccDsd: soot))
+            if list.count > Tuning.sootAfterKept { list.removeFirst(list.count - Tuning.sootAfterKept) }
+            state.sootAfter = list
+            onLog?(String(format: "Engine health: soot left after regeneration %d: PM_ACC_DSD %.2f g/L", count, soot))
+        }
+        state.afterRegenCount = nil
+        state.afterRegenUntil = nil
+        state.afterRegenMin = nil
     }
 
     /// INJx_CMP only means something around idle (it reads 0 while driving; at idle, in gear or not, it
@@ -707,11 +756,17 @@ final class EngineHealth: ObservableObject {
     /// The DPF's soot right after a regeneration: about 0 when the filter is clean (Mazda's P243C check);
     /// what stays is ash or a clogged filter, and it brings the next regeneration forward.
     private func sootAfterRegen() -> Item {
-        let completed = regenEntries.filter { $0.outcome != .interrupted }
-        let readings: [Double] = completed.prefix(3).compactMap { entry -> Double? in
-            if let desired = entry.sootDesiredAfter, desired <= Tuning.sootAfterPlausibleMax { return desired }
-            return entry.sootAfter
+        // From the recorder's samples (newest first, the one still in its window too), else the log's.
+        var readings: [Double] = (state.sootAfter ?? []).reversed().map(\.pmAccDsd)
+        if let pending = state.afterRegenMin { readings.insert(pending, at: 0) }
+        if readings.isEmpty {
+            let completed = regenEntries.filter { $0.outcome != .interrupted }
+            readings = completed.prefix(3).compactMap { entry -> Double? in
+                if let desired = entry.sootDesiredAfter, desired <= Tuning.sootAfterPlausibleMax { return desired }
+                return entry.sootAfter
+            }
         }
+        readings = Array(readings.prefix(3))
         return Item(id: "soot_after_regen", group: Self.regenGroup, title: "Soot left right after a regeneration",
                     value: readings.isEmpty ? "--" : readings.map { String(format: "%.2f", $0) }
                         .joined(separator: " / ") + " g/L (latest first)",
@@ -719,7 +774,8 @@ final class EngineHealth: ObservableObject {
                                   + "~0.1 typical · guide: watch from %.1f, high from %.1f g/L",
                                   Tuning.sootAfterWatch, Tuning.sootAfterHigh),
                     level: Self.level(readings.first, watch: Tuning.sootAfterWatch, high: Tuning.sootAfterHigh),
-                    about: "PM_ACC_DSD (044B; PM_ACC in older log entries) when the count goes up. Soot burns in a "
+                    about: "The lowest PM_ACC_DSD (044B) in the 5 minutes after the count goes up (older: the "
+                    + "regeneration log's value). Soot burns in a "
                     + "regeneration, ash doesn't: what stays makes the pressure-based estimate start the next cycle "
                     + "higher, so regenerations come sooner. Mazda's P243C steps: a forced regeneration, and if "
                     + "PM_ACC_DSD isn't about 0 afterwards, the DPF is clogged.",
