@@ -25,7 +25,10 @@
 //     (AppConfig.Rain.pauseMotorInPowerModeAndReverse): the lamp shows Power Mode / reverse then anyway, and
 //     live data stays as fast as without rain mode. Without a found motor bit, AUTO / INT doesn't count
 //     (AppConfig.Rain.autoCountsWithoutMotor).
-// No frame (live data stopped) ends it. The dashboard's Rain button stands in for all of it.
+// No frame for AppConfig.Rain.leverLostHold (30 s) ends it: a shorter gap (looks that missed it, the OBD
+// session starting again) keeps the lever as it was. Back to OFF while it rains needs
+// AppConfig.Rain.offConfirmReadings readings in a row, so a stray frame or two never ends it. The
+// dashboard's Rain button stands in for all of it.
 //
 // The breathing is a LightingArbiter request from `.rain`, between the normal purple (`.base`) and Power
 // Mode (`.powerMode`); reverse, the turn signals, the A/C flash and the door alert go above it too.
@@ -62,8 +65,7 @@ final class RainMode: ObservableObject {
     var leverLayout = WiperLeverLayout.builtIn {
         didSet {
             guard leverLayout != oldValue else { return }
-            candidate = nil
-            candidateCount = 0
+            leverReadings.reset()
             reportedCodes = []
         }
     }
@@ -78,12 +80,13 @@ final class RainMode: ObservableObject {
 
     private let obd: OBDAdapter
     private let lighting: LightingArbiter
-    private var candidate: WiperLever?               // the lever in the latest readings…
-    private var candidateCount = 0                   // …and in how many in a row
+    private var leverReadings = Streak<WiperLever>() // the lever in the latest readings, and in how many in a row
     private var autoSeen: Date?                      // the first reading of AUTO / INT this time
     private var enteredAuto: Date?                   // the lever got to AUTO / INT (as far as we can tell)
     private var lastWasher: Date?                    // the washer was last seen in use
     private var lastRainWipe: Date?                  // the wipers last wiped in AUTO / INT (not for the washer)
+    private var frameLost: Date?                     // the lights frame stopped coming (lever kept meanwhile)
+    private var lostTask: Task<Void, Never>?         // ends the lever after leverLostHold without the frame
     private var lastParkedRead: Date?                // the latest motor reading, if it showed them parked
     private var motorMisses = 0                      // motor reads in a row without a usable reply
     private var selector: ELM327.Selector?           // the gear lever, for pausing the motor in M / R
@@ -125,22 +128,18 @@ final class RainMode: ObservableObject {
 
     // MARK: Readings
 
-    /// One reading of frame 09A (every round); nil = not heard, no live data.
+    /// One reading of frame 09A (every round); nil = not heard any more, no live data.
     private func handle(_ frame: [UInt8]?) {
         let now = Date()
         guard let frame else {
-            if lever != nil { lever = nil }
-            if washing { washing = false }
-            candidate = nil
-            candidateCount = 0
-            confirmed = nil
-            autoSeen = nil
-            enteredAuto = nil
-            lastRainWipe = nil
-            resetParked()
-            updateMotorPolling()
-            evaluate(now)
+            lightsFrameLost(now)
             return
+        }
+        if frameLost != nil {
+            frameLost = nil
+            lostTask?.cancel()
+            lostTask = nil
+            onLog?("Wipers: lights frame back, lever " + (confirmed?.label ?? "unknown") + " kept")
         }
         let reading = leverLayout.lever(in: frame)
         if reading != lever { lever = reading }
@@ -149,14 +148,13 @@ final class RainMode: ObservableObject {
         if washingNow { lastWasher = now }
 
         if let reading, !washingNow {                    // while washing the lever reading is no news
-            if reading == candidate {
-                candidateCount += 1
-            } else {
-                candidate = reading
-                candidateCount = 1
+            if leverReadings.record(reading) == 1 {      // the lever just moved here
                 autoSeen = reading == .auto ? now : nil
             }
-            if candidateCount >= max(Tuning.confirmReadings, 1), reading != confirmed {
+            // Turning on (or LO <-> HI <-> AUTO) after confirmReadings; back to OFF while it rains only
+            // after offConfirmReadings, so a stray frame or two can't end rain mode.
+            let needed = (reading == .off && carRaining) ? Tuning.offConfirmReadings : Tuning.confirmReadings
+            if leverReadings.count >= max(needed, 1), reading != confirmed {
                 leverMoved(from: confirmed, to: reading, frame: frame, at: now)
             }
         } else if reading == nil, !washingNow {
@@ -164,6 +162,38 @@ final class RainMode: ObservableObject {
         }
         updateMotorPolling()
         evaluate(now)
+    }
+
+    /// The lights frame isn't heard any more (looks without it, live data starting again, the adapter
+    /// gone): the lever stays as it was for AppConfig.Rain.leverLostHold, then counts as unknown.
+    private func lightsFrameLost(_ now: Date) {
+        if lever != nil { lever = nil }
+        if washing { washing = false }
+        leverReadings.reset()
+        guard confirmed != nil, frameLost == nil else { return }
+        frameLost = now
+        onLog?("Wipers: lights frame lost, lever " + (confirmed?.label ?? "") + " kept for up to "
+               + "\(Int(Tuning.leverLostHold)) s")
+        lostTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(Tuning.leverLostHold))
+            guard !Task.isCancelled else { return }
+            self?.lightsFrameGone()
+        }
+    }
+
+    /// No lights frame for AppConfig.Rain.leverLostHold: the lever is unknown now (rain mode off).
+    private func lightsFrameGone() {
+        guard frameLost != nil else { return }
+        frameLost = nil
+        lostTask = nil
+        onLog?("Wipers: no lights frame for \(Int(Tuning.leverLostHold)) s, lever unknown")
+        confirmed = nil
+        autoSeen = nil
+        enteredAuto = nil
+        lastRainWipe = nil
+        resetParked()
+        updateMotorPolling()
+        evaluate(Date())
     }
 
     /// The lever has held in a new position.
@@ -227,7 +257,7 @@ final class RainMode: ObservableObject {
 
     /// The motor bit is read only while the lever is (or is about to be) in AUTO / INT, and not in M or R.
     private func updateMotorPolling() {
-        let inAuto = confirmed == .auto || candidate == .auto
+        let inAuto = confirmed == .auto || leverReadings.value == .auto
         let overridden = Tuning.pauseMotorInPowerModeAndReverse && isLampOverridden
         let wanted = (inAuto && !overridden) ? motorSignal : nil
         let paused = inAuto && overridden && motorSignal != nil
@@ -307,7 +337,7 @@ final class RainMode: ObservableObject {
         guard !reportedCodes.contains(code), reportedCodes.count < 8 else { return }
         reportedCodes.insert(code)
         onLog?("Wipers: 09A " + leverLayout.placeLabel + " = " + code
-               + " is no known lever position (between two, or run the lever check) · " + Wipers.hex(frame))
+               + " is no known lever position (between two, or run the lever check) · " + frame.hexString())
     }
 
     private func update() {

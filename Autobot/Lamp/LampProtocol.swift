@@ -46,6 +46,4 @@ enum LampProtocol {
 
     /// Queries: 2E 90 02 7C <sub>  (sub 0 = brightness, 1 = color, 2 = mode)
     static func query(_ sub: UInt8) -> Data { pack(0x90, [0x7C, sub]) }
-
-    static func hex(_ d: Data) -> String { d.map { String(format: "%02X", $0) }.joined(separator: " ") }
 }

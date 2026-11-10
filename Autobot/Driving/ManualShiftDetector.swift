@@ -20,8 +20,7 @@ final class ManualShiftDetector: ObservableObject, PowerModeTrigger {
     var onLog: ((String) -> Void)?
 
     private var subscription: AnyCancellable?
-    private var selectorCandidate: ELM327.Selector?
-    private var selectorCount = 0
+    private var readings = Streak<ELM327.Selector>()     // the selector's latest readings, and how many in a row
 
     init(obd: OBDAdapter) {
         subscription = obd.$sample.sink { [weak self] sample in self?.handle(sample) }
@@ -29,8 +28,7 @@ final class ManualShiftDetector: ObservableObject, PowerModeTrigger {
 
     private func handle(_ sample: OBDSample?) {
         guard let sample else {
-            selectorCandidate = nil
-            selectorCount = 0
+            readings.reset()
             selector = nil
             gear = nil
             return
@@ -38,13 +36,7 @@ final class ManualShiftDetector: ObservableObject, PowerModeTrigger {
 
         if let gear = sample.gear { self.gear = gear }
         guard let reported = sample.selector else { return }
-        if reported == selectorCandidate {
-            selectorCount += 1
-        } else {
-            selectorCandidate = reported
-            selectorCount = 1
-        }
-        guard selectorCount >= AppConfig.OBD.selectorConfirmReadings else { return }
+        guard readings.record(reported) >= AppConfig.OBD.selectorConfirmReadings else { return }
         selector = reported
         if case .unknown = reported { return }
         setManual(reported.isManual, reason: "selector in \(reported.label) (from the car)")

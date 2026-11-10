@@ -193,15 +193,12 @@ final class SavedPlacesStore: ObservableObject {
     // MARK: Storage
 
     private func load() {
-        guard let data = UserDefaults.standard.data(forKey: storageKey),
-              let saved = try? JSONDecoder().decode([SavedPlace].self, from: data) else { return }
+        guard let saved = UserDefaults.standard.codable([SavedPlace].self, forKey: storageKey) else { return }
         places = saved
         enforceUniqueRoles()
     }
 
     private func persist() {
-        if let data = try? JSONEncoder().encode(places) {
-            UserDefaults.standard.set(data, forKey: storageKey)
-        }
+        UserDefaults.standard.setCodable(places, forKey: storageKey)
     }
 }

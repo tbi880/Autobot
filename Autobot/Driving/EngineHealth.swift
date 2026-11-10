@@ -186,8 +186,7 @@ final class EngineHealth: ObservableObject {
     init(persist: Bool, regenEntries: [DPFRegenLog.Entry]) {
         self.persist = persist
         self.regenEntries = regenEntries
-        if persist, let data = UserDefaults.standard.data(forKey: Self.stateKey),
-           let saved = try? JSONDecoder().decode(State.self, from: data) {
+        if persist, let saved = UserDefaults.standard.codable(State.self, forKey: Self.stateKey) {
             state = saved
         }
         if state.pressureProbe != Self.pressureProbe {
@@ -386,8 +385,8 @@ final class EngineHealth: ObservableObject {
     }
 
     private func save() {
-        guard persist, let data = try? JSONEncoder().encode(state) else { return }
-        UserDefaults.standard.set(data, forKey: Self.stateKey)
+        guard persist else { return }
+        UserDefaults.standard.setCodable(state, forKey: Self.stateKey)
     }
 
     // MARK: The items

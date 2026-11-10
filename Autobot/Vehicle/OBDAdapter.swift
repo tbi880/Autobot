@@ -146,6 +146,8 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     private var turnShowIDs = true             // show the CAN IDs while listening: the filter let others through
     private var turnListenUnsupported = false  // the adapter refused to listen (ATMA, ATCAF0 or ATCRA)
     private var turnMisses = 0                 // looks in a row without the frame
+    private var lightsFrameLength: Int?        // data bytes of the lights frame, from a look that showed the IDs
+    private var strayLooksLogged = 0           // looks with stray lines logged this session
 
     /// Work waiting to run between two rounds of live data (runBetweenRounds).
     private struct Job {
@@ -160,17 +162,21 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     private final class Listening {
         let id: String
         let showsIDs: Bool
+        /// Without IDs: only lines of this many data bytes are the frame (nil = any).
+        let expectedLength: Int?
         let keepListening: ([CANFrame], Date, Date) -> Bool   // frames, started, now
         let started = Date()
         var frames: [CANFrame] = []
         var otherIDs: Set<String> = []     // frames with other IDs that got through
+        var strays: [String] = []          // without IDs: hex lines of another length, left out
         var notes: [String] = []           // other lines: "?", "BUFFER FULL", "STOPPED"…
         var ended: Date?                   // when it was decided to stop
 
-        init(id: String, showsIDs: Bool,
+        init(id: String, showsIDs: Bool, expectedLength: Int?,
              keepListening: @escaping ([CANFrame], Date, Date) -> Bool) {
             self.id = id
             self.showsIDs = showsIDs
+            self.expectedLength = expectedLength
             self.keepListening = keepListening
         }
     }
@@ -388,6 +394,8 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         turnShowIDs = true
         turnListenUnsupported = false
         turnMisses = 0
+        lightsFrameLength = nil
+        strayLooksLogged = 0
         let version = await send(ELM327.reset, timeout: AppConfig.OBD.resetTimeout)
         guard version != nil else {
             logLine("OBD: no answer to \(ELM327.reset)")
@@ -453,7 +461,7 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
            let code = ELM327.payload22(MazdaTCM.gearDID, in: reply)?.first {
             tcmGearAvailable = true
             tcmGearCode = code
-            logLine("OBD: TCM gear (7E1 221E12) reported, now " + String(format: "%02X", code)
+            logLine("OBD: TCM gear (7E1 221E12) reported, now " + code.hex
                     + "; P/R/N and gear from it, M/D "
                     + (mFlag.map { "from the M flag (\($0.label(off: "D", on: "M")))" } ?? "unknown (no M flag)"))
         }
@@ -490,8 +498,8 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
                     known.length = data.count
                     working[opening] = known
                 }
-                doorRaw[key] = Self.hex(data)
-                answered.append("\(key) = \(Self.hex(data))")
+                doorRaw[key] = data.hexString()
+                answered.append("\(key) = \(data.hexString())")
             }
             await useHeader(baseHeader)
         }
@@ -549,8 +557,8 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
             if transmission.answered {
                 // Publish the selector before the independent speed request, so a shift does not
                 // wait for a dashboard-only value before it reaches PowerModeController.
-                setSample(makeSample(speed: sample?.speed, selector: transmission.selector,
-                                     gear: transmission.gear))
+                setSample(OBDSample(speed: sample?.speed, gear: transmission.gear,
+                                    selector: transmission.selector))
             }
             await useHeader(baseHeader)
             let speedReply = await request([ELM327.speedPID])
@@ -565,7 +573,7 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
             round += 1
             if speed != nil || transmission.answered {
                 misses = 0
-                setSample(makeSample(speed: speed, selector: transmission.selector, gear: transmission.gear))
+                setSample(OBDSample(speed: speed, gear: transmission.gear, selector: transmission.selector))
             } else {
                 misses += 1
                 if misses >= AppConfig.OBD.maxMissedReadings {
@@ -603,7 +611,7 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
             data = reply.flatMap { ELM327.payload22(signal.did, in: $0) }
         }
         guard wiperMotorSignal == signal else { return true }      // changed meanwhile: this read is stale
-        let raw = data.map { "\(signal.header) 22\(signal.did) = " + Self.hex($0) }
+        let raw = data.map { "\(signal.header) 22\(signal.did) = " + $0.hexString() }
         if raw != wiperMotorRaw { wiperMotorRaw = raw }
         wiperMotorRunning = signal.isWiping(data)
         return true
@@ -633,14 +641,8 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
             let bytes = await readSignal(signal)
             manual = signal.isOn(bytes)
             answered = bytes != nil
-            if let manual, manual, sample?.selector != .manual {
-                setSample(makeSample(speed: sample?.speed,
-                                     selector: .manual,
-                                     gear: sample?.gear))
-            } else if let manual, !manual, sample?.selector == .manual {
-                setSample(makeSample(speed: sample?.speed,
-                                     selector: .drive,
-                                     gear: sample?.gear))
+            if let manual, manual != (sample?.selector == .manual) {     // M just went on, or off
+                setSample(OBDSample(speed: sample?.speed, gear: sample?.gear, selector: manual ? .manual : .drive))
             }
         }
 
@@ -682,7 +684,7 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
             }
         }
         var raw = doorRaw
-        for (key, data) in replies { raw[key] = Self.hex(data) }
+        for (key, data) in replies { raw[key] = data.hexString() }
         if raw != doorRaw { doorRaw = raw }
 
         var states = doorStates
@@ -728,11 +730,6 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         if !doorRaw.isEmpty { doorRaw = [:] }
     }
 
-    /// "00 00 80"
-    private static func hex(_ bytes: [UInt8]) -> String {
-        bytes.map { String(format: "%02X", $0) }.joined(separator: " ")
-    }
-
     /// Optional raw diagnostic: every candidate transmission DID on both ECUs, as raw bytes.
     private func diagnose() async -> [SelectorDiag] {
         var rows: [SelectorDiag] = []
@@ -742,17 +739,13 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
                 reply = await send22(candidate.did, timeout: AppConfig.OBD.diagnosticTimeout)
             }
             let bytes = reply.flatMap { ELM327.payload22(candidate.did, in: $0) }
-            let raw = bytes.map { $0.map { String(format: "%02X", $0) }.joined(separator: " ") } ?? "—"
+            let raw = bytes?.hexString() ?? "—"
             let key = "\(candidate.header) 22\(candidate.did)"
             let changed = diagLast[key].map { $0 != raw && raw != "—" } ?? false
             diagLast[key] = raw
             rows.append(SelectorDiag(id: key, raw: raw, changed: changed))
         }
         return rows
-    }
-
-    private func makeSample(speed: Double?, selector: ELM327.Selector?, gear: Int?) -> OBDSample {
-        OBDSample(speed: speed, gear: gear, selector: selector)
     }
 
     // MARK: Lights frame: turn signals and the wiper lever (listening to the bus)
@@ -775,7 +768,12 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         let checkListen = AppConfig.TurnSignals.checkListen
         let firstFrameTimeout = AppConfig.TurnSignals.firstFrameTimeout
         let within = max(AppConfig.TurnSignals.maxListen, checkListen)
-        let heard = await listen(to: id, showingIDs: firstLook || turnShowIDs, within: within) {
+        // Without the IDs every hex line counts as the frame, so a line that isn't one (a reply that came
+        // in late) could look like a lit indicator or another wiper position: only lines as long as the
+        // frame was in a look that showed the IDs count.
+        let showIDs = firstLook || turnShowIDs
+        let heard = await listen(to: id, showingIDs: showIDs, within: within,
+                                 expectedLength: showIDs ? nil : lightsFrameLength) {
             [weak self] frames, started, now in
             guard let self else { return false }
             if firstLook { return now.timeIntervalSince(started) < checkListen }
@@ -784,6 +782,17 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         }
         // Couldn't listen (no answer, refused): nothing heard. A flash then still ends after holdLimit.
         let frames = heard?.frames ?? []
+        if let heard, heard.showsIDs, !frames.isEmpty {
+            // The frame's length, from frames checked by ID (the most common one: a line cut short when
+            // the look stops doesn't count).
+            let counts = Dictionary(frames.map { ($0.data.count, 1) }, uniquingKeysWith: +)
+            lightsFrameLength = counts.max { $0.value < $1.value }?.key
+        }
+        if let heard, !heard.strays.isEmpty, strayLooksLogged < 5 {
+            strayLooksLogged += 1
+            logLine("OBD: left out while listening for \(id) (not \(lightsFrameLength ?? 0) bytes, so not the "
+                    + "frame): " + heard.strays.joined(separator: " / "))
+        }
         if let heard, firstLook {
             turnLooked = true
             turnShowIDs = !heard.otherIDs.isEmpty          // other frames got through: sort them out by ID
@@ -820,7 +829,7 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         }
         let newlySteady = turnDetector.steadyBits & ~steadyBefore
         if newlySteady != 0 {
-            logLine("Turn signals: \(id) byte \(AppConfig.TurnSignals.lampByte) bit " + TurnSignals.hex([newlySteady])
+            logLine("Turn signals: \(id) byte \(AppConfig.TurnSignals.lampByte) bit " + newlySteady.hex
                     + " stays lit: taken as a steady light (lights on?), not an indicator")
         }
         return true
@@ -831,7 +840,7 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     /// is off meanwhile, so a broadcast frame shows all its data bytes, and on again afterwards; the
     /// receive filter stays on `id` until the next useHeader puts it back. nil if the adapter refused
     /// (listening is then off for this session, see refuseListening).
-    private func listen(to id: String, showingIDs: Bool, within: TimeInterval,
+    private func listen(to id: String, showingIDs: Bool, within: TimeInterval, expectedLength: Int? = nil,
                         keepListening: @escaping ([CANFrame], Date, Date) -> Bool) async -> Listening? {
         guard await listenSetting(ELM327.formattingOff) else {
             if !turnListenUnsupported { await endListening(showingIDs: false) }   // no answer: make sure it's on
@@ -846,7 +855,8 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
             return nil
         }
         currentReceive = id
-        let run = Listening(id: id.uppercased(), showsIDs: showingIDs, keepListening: keepListening)
+        let run = Listening(id: id.uppercased(), showsIDs: showingIDs, expectedLength: expectedLength,
+                            keepListening: keepListening)
         listening = run
         let ticker = Task { [weak self] in
             while !Task.isCancelled {
@@ -903,6 +913,10 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
             run.otherIDs.insert(id)
             return
         }
+        if frame.id == nil, let expected = run.expectedLength, frame.data.count != expected {
+            if run.strays.count < 3 { run.strays.append(ELM327.readable(line)) }
+            return
+        }
         run.frames.append(CANFrame(time: Date(), data: frame.data))
         checkListening(run)
     }
@@ -948,7 +962,7 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
             return
         }
         var line = "OBD: lights frame \(heard.id) heard (\(heard.frames.count) in \(seconds) s, "
-            + TurnSignals.hex(last.data) + ")"
+            + last.data.hexString() + ")"
         if !others.isEmpty {
             line += "; the adapter lets other frames through while listening (\(others.count) IDs), sorted out by ID"
         }
@@ -961,7 +975,7 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         let bytes = frames.suffix(12).compactMap { frame -> UInt8? in
             frame.data.count > index ? frame.data[index] : nil
         }
-        return bytes.isEmpty ? "--" : TurnSignals.hex(bytes)
+        return bytes.isEmpty ? "--" : bytes.hexString()
     }
 
     /// Live data stopped or the adapter went away: the indicators are unknown now.
@@ -1014,23 +1028,27 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
 
     /// A mode 01 request; asked again without the reply count if the adapter doesn't take it.
     private func request(_ pids: [UInt8], timeout: TimeInterval = AppConfig.OBD.replyTimeout) async -> String? {
-        let reply = await send(ELM327.request(pids, replyCount: useReplyCount), timeout: timeout)
-        guard let reply, useReplyCount, ELM327.isUnknownCommand(reply) else { return reply }
-        useReplyCount = false
-        logLine("OBD: adapter doesn't take a reply count, asking without it")
-        return await send(ELM327.request(pids, replyCount: false), timeout: timeout)
+        await sendCounted(timeout: timeout) { ELM327.request(pids, replyCount: $0) }
     }
 
     /// A UDS service-22 request ("221E12"). The reply count is left off when `complete` (a reply of
     /// several frames is then read to the end) and dropped for good if the adapter answers "?".
     private func send22(_ did: String, complete: Bool = false,
                         timeout: TimeInterval = AppConfig.OBD.replyTimeout) async -> String? {
-        let withCount = useReplyCount && !complete
-        let reply = await send(ELM327.request22(did, replyCount: withCount), timeout: timeout)
+        await sendCounted(counted: !complete, timeout: timeout) { ELM327.request22(did, replyCount: $0) }
+    }
+
+    /// Sends the request `command` builds, with the reply count ("…1": one reply is enough) when `counted`
+    /// and the adapter takes it. If the adapter answers "?", the count is dropped for good and the request
+    /// is asked again without it.
+    private func sendCounted(counted: Bool = true, timeout: TimeInterval,
+                             _ command: (_ replyCount: Bool) -> String) async -> String? {
+        let withCount = useReplyCount && counted
+        let reply = await send(command(withCount), timeout: timeout)
         guard let reply, withCount, ELM327.isUnknownCommand(reply) else { return reply }
         useReplyCount = false
         logLine("OBD: adapter doesn't take a reply count, asking without it")
-        return await send(ELM327.request22(did, replyCount: false), timeout: timeout)
+        return await send(command(false), timeout: timeout)
     }
 
     /// Sends one command and waits for the ">" prompt. nil on timeout or when not connected.
@@ -1193,7 +1211,7 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         received += String(decoding: value, as: UTF8.self)
         if let run = listening { deliverMonitoredLines(to: run) }     // frames, as they come in
         guard let end = received.firstIndex(of: ELM327.prompt) else {
-            if received.count > 1024 { received = "" }    // never a prompt: don't grow forever
+            if received.utf8.count > 1024 { received = "" }    // never a prompt: don't grow forever
             return
         }
         let reply = String(received[..<end])

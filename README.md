@@ -34,10 +34,11 @@ assistant when the phone connects to CarPlay.
   lever is there (see [Wipers](#wipers-rain-mode)); the dashboard's *Rain* button stands in for both,
   and its *Wiper finder* finds this car's bits.
 - **Turn signals and hazard lights → current mode colour flash** (OBD2 adapter, see
-  [Turn signals](#turn-signals)): while the indicators or hazard lights flash, the lamp does a purple
-  burst flash in normal driving mode or a red burst flash in Power Mode. It follows mode changes while
-  the indicators stay on. When they stop, the lamp goes back to what it should show then: red breathing
-  if still in M, the red Power Mode switch flash if it is still in its 3 seconds, or purple steady in D.
+  [Turn signals](#turn-signals)): while the indicators or hazard lights flash, the lamp does a red
+  burst flash in Power Mode, a cyan one in rain mode (so the colour still says rain mode is on), or a
+  purple one in normal driving. It follows mode changes while the indicators stay on. When they stop, the
+  lamp goes back to what it should show then: red breathing if still in M, the red Power Mode switch flash
+  if it is still in its 3 seconds, cyan breathing while it rains, or purple steady in D.
   The dashboard's *Left* / *Hazard* / *Right* buttons stand in for them (tap to start, tap again to stop).
 - **A/C temperature flash**: the temperature dial turned colder → *Blue Burst Flash*, warmer →
   *Red Burst Flash*, until 3 s after the last click. Another click the same way starts the 3 s
@@ -92,7 +93,8 @@ assistant when the phone connects to CarPlay.
   count and distance, and what feeds the model — air flow, EGR, intake shutter, boost, fuel rate,
   temperatures, pressures — plus every raw PCM reply with the time it came in, and a slow sweep through
   the PCM's DIDs. A *parked check* reads it all back to back for 3 min (e.g. at 3,000 rpm). *Export
-  data* shares it all (CSV + JSON)
+  data* asks how far back to go — the last week, 2 weeks, month, 3 months, year, or everything — and
+  shares that (CSV + JSON)
 
 ### Voice
 - "Power Mode Activated" / "Power Mode Deactivated" in the assistant's female voice, spoken navigation-style: other audio is ducked,
@@ -161,8 +163,10 @@ weekday commute check. Hours, days and radius are in `AppConfig.Commute`.
 4. Optional: in Settings → Accessibility → Spoken Content → Voices, download an enhanced or
    premium English (US) female voice (e.g. Zoe or Ava) for clearer voices.
 
-The dashboard has test buttons for the welcome flow, both Power Mode voices, every door, reverse,
-the turn signals and rain mode.
+The dashboard's first screen is the live status, a large **microphone button** (starts the welcome
+flow by hand; it pulses while a welcome runs) and the *DPF monitor* / *Saved places* rows. Scroll down
+for the M finder, the test buttons (both Power Mode voices, every door, reverse, the turn signals and
+rain mode) and the log.
 
 ## Shortcuts
 
@@ -219,7 +223,8 @@ detection together. The progress ring then waits at three checkpoints (`AppConfi
 | 60 % | the OBD2 adapter (KONNWEI, Bluetooth link up; the engine ECU doesn't have to answer yet) |
 | 90 % | car audio (CarPlay) |
 
-Only with all three connected does it run to 100 % and open the dashboard. The chips under the ring
+Only with all three connected does it run to 100 % and open the dashboard. **Saved places** under
+the title opens the list straight from the start screen, without ENGINE START. The chips under the ring
 show each connection, and the line below them what the one being waited for is doing. In test mode
 (`AppConfig.TestMode`) all three are simulated as connected.
 
@@ -252,8 +257,8 @@ Frame: `2E | type | len | data… | checksum`, where
 | Query | `90` | `7C, 00 brightness / 01 colour / 02 mode` → reply type `7C` |
 
 Modes used: `0` steady, `2` breathing (parameter `1` = red, `2` = yellow, `4` = cyan gradient), `3` burst flash
-(parameter `1` = red, `5` = blue, `6` = purple; the firmware's list also has 0 colourful, 2 yellow, 3 green,
-4 cyan and 7 white). A single-byte reply `FF` is an ACK; `F0` checksum error, `F3` not supported, `FC` busy.
+(parameter `1` = red, `4` = cyan, `5` = blue, `6` = purple; the firmware's list also has 0 colourful,
+2 yellow, 3 green and 7 white). A single-byte reply `FF` is an ACK; `F0` checksum error, `F3` not supported, `FC` busy.
 
 The firmware also knows "original car" functions (turn signal, doors, overspeed… and a
 *Temperature adjustment Reminder*, 气候模式). The app only offers them when the controller reports
@@ -367,7 +372,7 @@ it off.
 | Wiper lever | Rain mode |
 |---|---|
 | OFF | off (the washer running the wipers with the lever OFF isn't rain) |
-| LO, HI | on, once two readings in a row agree (a MIST flick doesn't count) |
+| LO, HI | on, once two readings in a row agree (a MIST flick doesn't count); back to OFF only after three (`offConfirmReadings`) |
 | AUTO / INT | on once the wipers really wipe, until they've stayed parked for 30 s with no next wipe (`AppConfig.Rain.autoHold`; only time the motor was really watched counts, see below). Not counted: the one wipe moving the lever OFF → AUTO makes (`autoSettle`) and the washer's wipes (`washerHold`). From LO / HI into AUTO it stays on |
 
 **The lever comes from frame `0x09A`**, the turn signals' frame, heard every round anyway — so it
@@ -402,6 +407,16 @@ every 2nd round and rain mode ended 90 s after the last wipe *seen*: in light ra
 between two reads, so it kept switching off and back on. The wipers are not read at all while the gear
 lever is in M or R (`pauseMotorInPowerModeAndReverse`; the lamp shows Power Mode / reverse then anyway, and rain mode keeps its state until D). In OFF, LO and HI nothing is
 read. Without a found motor bit AUTO / INT doesn't count (`autoCountsWithoutMotor = false`).
+
+**Gaps don't end it.** If the lights frame stops coming for a while (looks that miss it, the OBD session
+starting again after the car stopped answering for a moment), the lever is kept as it was for 30 s
+(`leverLostHold`) before it counts as unknown; before, rain mode dropped to purple at once and only came
+back once the frame was heard again (looks for a lost frame run only every 30 rounds). Back to OFF while it
+rains needs three OFF readings in a row (`offConfirmReadings`), and while the look hides the CAN IDs only
+lines as long as the frame itself (8 bytes, learned from a look that showed the IDs) count as the frame: a
+reply that came in late, read as the frame, could otherwise show OFF or a lit indicator. Such lines are
+logged (`OBD: left out while listening for 09A …`). The log also names the feature behind every colour
+change (`Lighting: Rain mode → Cyan gradient · breathing`, `Lighting: Normal → Purple · steady`).
 
 What the OBD2 port can't give: the rain sensor's own reading (rain amount, AUTO sensitivity) travels
 over LIN between the sensor and the FBCM, never over CAN.
@@ -685,7 +700,14 @@ version has other columns (the old file is kept and exported). `state.json` keep
 current cycle and the sweep between launches. **Export data (send to me)** on the DPF screen shares the
 CSV file(s), `autobot-dpf-info.json` (column dictionary with DIDs and formulas; drives with their
 supported PIDs, IDs and unanswered values; events; what the sweep found; the regeneration log; the PCM
-history finder) and the history finder's raw scan if there is one. *Clear recorded data* deletes the
+history finder) and the history finder's raw scan if there is one. It first asks how far back to go
+(`DPFExportRange`): *Last week*, *Last 2 weeks*, *Last month*, *Last 3 months*, *Last year* or
+*Everything*, counted back on the calendar from now. The CSV rows are the ones sampled since then (by
+their `unix` column): a file with all its rows in the range is shared as it is, one with some of them as
+a copy with only those rows (same name, written to a temporary folder), one with none is left out. The
+JSON says which (`range`, `from`), and its drives and events are cut to it too; the regeneration log,
+the PCM history, the sweep and the engine health are always whole. The recorded files themselves aren't
+touched; nothing recorded in the range: a note on the screen and nothing is shared. *Clear recorded data* deletes the
 samples, drives and events; what the sweep found stays. Nothing is recorded in test mode.
 
 ### Engine health (fuel in the oil)
@@ -780,9 +802,11 @@ Autobot/
 ├── Places/      SavedPlace, SavedPlacesStore
 ├── Backup/      AppBackup (JSON format), BackupManager
 ├── UI/          ContentView (dashboard), SavedPlacesView, DPFMonitorView (live DPF charts),
-│                EngineHealthView
+│                EngineHealthView, MFinderView, WiperFinderView, DoorFinderView (the finders' screens)
 └── Support/     AppConfig (all phrases and tuning values), Concurrency helpers,
-                 ReconnectTimer (once-a-minute Bluetooth retry for the lamp and the OBD2 adapter)
+                 ReconnectTimer (once-a-minute Bluetooth retry for the lamp and the OBD2 adapter),
+                 Hex (bytes as hex text and back), Persistence (Codable values in UserDefaults),
+                 Streak (the same reading several times in a row)
 ```
 
 Everything you might want to tweak — the Power Mode trigger, OBD2 settings, phrases, voice character,

@@ -41,10 +41,8 @@ nonisolated struct BitSignal: Codable, Equatable {
 
     /// "7E1 221E03 byte 0 mask 10 (D 00 / M 10)" with the given names for off and on.
     func label(off: String, on: String) -> String {
-        "\(header) 22\(did) byte \(byteIndex) mask \(Self.hex(mask)) (\(off) \(Self.hex(valueOff)) / \(on) \(Self.hex(valueOn)))"
+        "\(header) 22\(did) byte \(byteIndex) mask \(mask.hex) (\(off) \(valueOff.hex) / \(on) \(valueOn.hex))"
     }
-
-    private static func hex(_ byte: UInt8) -> String { String(format: "%02X", byte) }
 }
 
 nonisolated enum SignalDiff {

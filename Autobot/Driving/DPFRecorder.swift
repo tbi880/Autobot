@@ -42,7 +42,9 @@
 //   -> state.json: drives (supported PIDs, IDs, what wasn't answered), events, this regeneration cycle
 //      (for the rates), the sweep's progress
 //   -> export: the CSV file(s) + autobot-dpf-info.json (column dictionary, drives, events, the sweep, the
-//      regeneration log, the PCM history finder)
+//      regeneration log, the PCM history finder), written when asked for. The DPF screen's Export menu
+//      picks how far back it goes (DPFExportRange: last week / 2 weeks / month / 3 months / year /
+//      everything): the CSV rows sampled since then, and the drives and events since then
 //
 // Nothing is recorded in test mode. Values, scaling and sources: README "DPF data recorder".
 
@@ -548,6 +550,39 @@ nonisolated enum DPFRecordPlan {
     }
 }
 
+// MARK: - Export range
+
+/// How far back an export goes (the DPF screen's Export menu).
+nonisolated enum DPFExportRange: String, CaseIterable, Identifiable, Sendable {
+    case week, twoWeeks, month, threeMonths, year, all
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .week: return "Last week"
+        case .twoWeeks: return "Last 2 weeks"
+        case .month: return "Last month"
+        case .threeMonths: return "Last 3 months"
+        case .year: return "Last year"
+        case .all: return "Everything"
+        }
+    }
+
+    /// The oldest sample time exported, counted back from `now` on the calendar; nil: everything.
+    func start(from now: Date = Date()) -> Date? {
+        let calendar = Calendar.current
+        switch self {
+        case .week: return calendar.date(byAdding: .day, value: -7, to: now)
+        case .twoWeeks: return calendar.date(byAdding: .day, value: -14, to: now)
+        case .month: return calendar.date(byAdding: .month, value: -1, to: now)
+        case .threeMonths: return calendar.date(byAdding: .month, value: -3, to: now)
+        case .year: return calendar.date(byAdding: .year, value: -1, to: now)
+        case .all: return nil
+        }
+    }
+}
+
 // MARK: - The recorder
 
 final class DPFRecorder: ObservableObject {
@@ -612,8 +647,6 @@ final class DPFRecorder: ObservableObject {
     @Published private(set) var lastSample: Date?
     /// Size of the recorded CSV file(s), bytes.
     @Published private(set) var fileBytes = 0
-    /// What the export shares: the CSV file(s) and the info JSON.
-    @Published private(set) var exportFiles: [URL] = []
     /// "312 answer · 410 not there · 46 not tried yet"
     @Published private(set) var sweepSummary = ""
     /// The parked check (DPF screen): until when it runs, its samples so far, the latest sample's values
@@ -737,8 +770,6 @@ final class DPFRecorder: ObservableObject {
     private var driveInfoRead = false
     private var lastNormal: Date?
     private var lastSlow: Date?
-    /// The DPF screen is showing: the export is kept up to date after every sample.
-    private var screenOpen = false
 
     private static let csvName = "autobot-dpf-samples.csv"
     private static let infoName = "autobot-dpf-info.json"
@@ -809,15 +840,26 @@ final class DPFRecorder: ObservableObject {
 
     // MARK: Actions
 
-    /// The DPF screen opened: from now on the export is kept up to date after every sample.
+    /// The DPF screen opened.
     func screenOpened() {
-        screenOpen = true
         health.refresh(regenEntries: regenLog.entries)
-        refreshExport()
     }
 
-    func screenClosed() {
-        screenOpen = false
+    /// What the DPF screen's Export shares for `range`: the CSV file(s) with the rows sampled in it and the
+    /// info JSON. Empty when nothing was recorded in the range.
+    func makeExport(_ range: DPFExportRange) async -> [URL] {
+        var files = csvFiles()
+        let start = range.start()
+        if let start {
+            let recorded = files
+            let folder = FileManager.default.temporaryDirectory.appendingPathComponent("DPFExport", isDirectory: true)
+            files = await Task.detached(priority: .userInitiated) {
+                DPFRecorder.cut(recorded, from: start, into: folder)
+            }.value
+            if files.isEmpty { return [] }
+        }
+        let info = writeInfo(range: range, from: start, csvFiles: files.map(\.lastPathComponent))
+        return files + [info].compactMap { $0 }
     }
 
     /// Starts the parked check: back-to-back samples of AppConfig.DPF.recordCheck… for a few minutes.
@@ -848,7 +890,6 @@ final class DPFRecorder: ObservableObject {
         checkEnds = nil
         checkNote = note
         onLog?("DPF recorder: parked check ended · \(checkSamples) samples")
-        if screenOpen { refreshExport() }
     }
 
     /// Deletes the recorded samples, drives and events. What the sweep found about the PCM is kept.
@@ -873,7 +914,6 @@ final class DPFRecorder: ObservableObject {
         rate = Rate()
         saveState()
         updateFiles()
-        refreshExport()
         onLog?("DPF recorder: recorded data cleared")
     }
 
@@ -926,7 +966,6 @@ final class DPFRecorder: ObservableObject {
         isRecording = false
         status = idleStatus
         saveState()
-        if screenOpen { refreshExport() }
     }
 
     private func updateDrive(_ change: (inout Drive) -> Void) {
@@ -1036,9 +1075,9 @@ final class DPFRecorder: ObservableObject {
             switch item.reply {
             case .data(let bytes):
                 data[item.did] = bytes
-                rawParts.append(item.did + ":" + Self.hex(bytes, separator: "") + Self.offset(item.time, from: started))
+                rawParts.append(item.did + ":" + bytes.hexString(separator: "") + Self.offset(item.time, from: started))
                 if item.sweep {
-                    state.sweepAnswered[item.did] = Self.hex(bytes)
+                    state.sweepAnswered[item.did] = bytes.hexString()
                     state.sweepSilent[item.did] = nil
                     state.sweepAbsent.remove(item.did)
                 } else {
@@ -1160,7 +1199,6 @@ final class DPFRecorder: ObservableObject {
                             fast ? Tuning.recordIntervalDuringRegen : Tuning.recordInterval)
         }
         saveState()
-        if screenOpen { refreshExport() }
     }
 
     /// Reads everything in short gos between two live-data rounds, each at most `budget` (a single-frame read
@@ -1260,7 +1298,7 @@ final class DPFRecorder: ObservableObject {
             let text: String
             switch item.reply {
             case .data(let bytes):
-                text = Self.hex(bytes)
+                text = bytes.hexString()
                 if DPFRecordPlan.supportDIDs.contains(item.did), bytes.count >= 4,
                    let base = UInt8(item.did.dropFirst(2), radix: 16) {
                     bitmaps[base] = Array(bytes.prefix(4))
@@ -1398,8 +1436,8 @@ final class DPFRecorder: ObservableObject {
         guard let last = state.last else { return [] }
         var events: [String] = []
         if let request, let old = last.regenReq, request != old {
-            events.append("0380 request " + Self.hex([UInt8(truncatingIfNeeded: old)]) + "->"
-                          + Self.hex([UInt8(truncatingIfNeeded: request)]))
+            events.append("0380 request " + UInt8(truncatingIfNeeded: old).hex + "->"
+                          + UInt8(truncatingIfNeeded: request).hex)
         }
         if let count, let old = last.count, count != old {
             events.append("count \(old)->\(count)")
@@ -1535,21 +1573,30 @@ final class DPFRecorder: ObservableObject {
 
     private func append(_ line: String) {
         guard let url = csvURL, let data = (line + "\n").data(using: .utf8) else { return }
-        if !FileManager.default.fileExists(atPath: url.path(percentEncoded: false)) { prepareCSV() }
+        // The files are only listed again when the list changes (a new or archived file): the usual
+        // sample just adds its own bytes to the total.
+        var filesChanged = false
+        if !FileManager.default.fileExists(atPath: url.path(percentEncoded: false)) {
+            prepareCSV()
+            filesChanged = true
+        }
+        var size = 0
         do {
             let handle = try FileHandle(forWritingTo: url)
             defer { try? handle.close() }
-            try handle.seekToEnd()
+            size = try Int(handle.seekToEnd()) + data.count
             try handle.write(contentsOf: data)
+            fileBytes += data.count
         } catch {
             onLog?("DPF recorder: couldn't write the sample (\(error.localizedDescription))")
         }
-        if Self.size(of: url) > Tuning.recordMaxFileBytes {
+        if size > Tuning.recordMaxFileBytes {
             archive(url)
             prepareCSV()
             pruneArchives()
+            filesChanged = true
         }
-        updateFiles()
+        if filesChanged { updateFiles() }
     }
 
     /// Moves a CSV aside under a dated name (it stays in the export).
@@ -1561,8 +1608,9 @@ final class DPFRecorder: ObservableObject {
 
     /// Deletes the oldest archived CSVs while all of them together are over AppConfig.DPF.recordMaxTotalBytes.
     private func pruneArchives() {
-        var files = csvFiles().filter { $0.lastPathComponent != Self.csvName }
-        var total = csvFiles().reduce(0) { $0 + Self.size(of: $1) }
+        let all = csvFiles()
+        var files = all.filter { $0.lastPathComponent != Self.csvName }
+        var total = all.reduce(0) { $0 + Self.size(of: $1) }
         while total > Tuning.recordMaxTotalBytes, let oldest = files.first {
             total -= Self.size(of: oldest)
             try? FileManager.default.removeItem(at: oldest)
@@ -1580,16 +1628,100 @@ final class DPFRecorder: ObservableObject {
     }
 
     private func updateFiles() {
-        let files = csvFiles()
-        fileBytes = files.reduce(0) { $0 + Self.size(of: $1) }
-        let info = exportFiles.first { $0.lastPathComponent == Self.infoName }
-        exportFiles = files + [info].compactMap { $0 }
+        fileBytes = csvFiles().reduce(0) { $0 + Self.size(of: $1) }
     }
 
-    /// Writes the info JSON and lists everything to share.
-    private func refreshExport() {
-        let info = writeInfo()
-        exportFiles = csvFiles() + [info].compactMap { $0 }
+    /// The rows of one CSV file sampled at or after a time: where the header line and the kept rows are in
+    /// the file's bytes.
+    private nonisolated struct CSVScan: Sendable {
+        var header: Range<Int>
+        var kept: [Range<Int>] = []
+        var rows = 0
+        var dropped = 0
+    }
+
+    /// `files` cut to the rows sampled at or after `start`, for an export: a file with every row in the range
+    /// is shared as it is, one with some of them as a copy under the same name in `folder` (emptied first),
+    /// one with none is left out. Off the main thread: the files can be tens of MB.
+    private nonisolated static func cut(_ files: [URL], from start: Date, into folder: URL) -> [URL] {
+        let manager = FileManager.default
+        try? manager.removeItem(at: folder)
+        try? manager.createDirectory(at: folder, withIntermediateDirectories: true)
+        var result: [URL] = []
+        for file in files {
+            guard let data = try? Data(contentsOf: file, options: .mappedIfSafe) else { continue }
+            guard let found = DPFRecorder.scan(data, from: start.timeIntervalSince1970) else {
+                // No unix column to go by: all of it, if it was written to in the range.
+                let written = (try? file.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+                if let written, written >= start { result.append(file) }
+                continue
+            }
+            if found.rows == 0 { continue }
+            if found.dropped == 0 {
+                result.append(file)
+                continue
+            }
+            var part = Data(capacity: found.kept.reduce(found.header.count) { $0 + $1.count })
+            part.append(data.subdata(in: found.header))
+            for range in found.kept { part.append(data.subdata(in: range)) }
+            let copy = folder.appendingPathComponent(file.lastPathComponent)
+            if (try? part.write(to: copy, options: .atomic)) != nil { result.append(copy) }
+        }
+        return result
+    }
+
+    /// Goes through a CSV file's rows by their `unix` column. A row without a readable time goes with the
+    /// row before it; a last line still being written (no line end yet) is left out. nil: no header line, or
+    /// no `unix` column in it.
+    private nonisolated static func scan(_ data: Data, from cutoff: TimeInterval) -> CSVScan? {
+        data.withUnsafeBytes { (buffer: UnsafeRawBufferPointer) -> CSVScan? in
+            guard let base = buffer.baseAddress else { return nil }
+            let count = buffer.count
+            let newline = UInt8(ascii: "\n"), comma = UInt8(ascii: ",")
+
+            // Where the next `byte` is, from `index` up to `end`.
+            func find(_ byte: UInt8, from index: Int, to end: Int) -> Int? {
+                guard index < end, let found = memchr(base + index, Int32(byte), end - index) else { return nil }
+                return base.distance(to: UnsafeRawPointer(found))
+            }
+
+            guard let headerEnd = find(newline, from: 0, to: count).map({ $0 + 1 }) else { return nil }
+            let header = String(decoding: buffer[0..<headerEnd - 1], as: UTF8.self)
+            guard let column = header.split(separator: ",", omittingEmptySubsequences: false).firstIndex(of: "unix") else {
+                return nil
+            }
+
+            // The `unix` cell of the row in start..<end.
+            func unixTime(_ start: Int, _ end: Int) -> Double? {
+                var index = start
+                for _ in 0..<column {
+                    guard let next = find(comma, from: index, to: end) else { return nil }
+                    index = next + 1
+                }
+                let stop = find(comma, from: index, to: end) ?? end - 1
+                guard index < stop else { return nil }
+                return Double(String(decoding: buffer[index..<stop], as: UTF8.self))
+            }
+
+            var result = CSVScan(header: 0..<headerEnd)
+            var keeping = false
+            var position = headerEnd
+            while let end = find(newline, from: position, to: count).map({ $0 + 1 }) {
+                if let sampled = unixTime(position, end) { keeping = sampled >= cutoff }
+                if keeping {
+                    result.rows += 1
+                    if let last = result.kept.last, last.upperBound == position {
+                        result.kept[result.kept.count - 1] = last.lowerBound..<end
+                    } else {
+                        result.kept.append(position..<end)
+                    }
+                } else {
+                    result.dropped += 1
+                }
+                position = end
+            }
+            return result
+        }
     }
 
     private func saveState() {
@@ -1646,6 +1778,10 @@ final class DPFRecorder: ObservableObject {
         let car: String
         let exportedAt: Date
         let timeZone: String
+        /// The Export menu's choice ("Last week" … "Everything") and the time it starts at (none: everything).
+        /// csvFiles' rows, drives and events are cut to it; the rest is whole.
+        let range: String
+        let from: Date?
         /// AppConfig.Odometer.offsetKm: odometer_km = odometer_shown_km + this.
         let odometerOffsetKm: Double
         let csvFiles: [String]
@@ -1663,7 +1799,8 @@ final class DPFRecorder: ObservableObject {
         let engineHealth: EngineHealth.Export
     }
 
-    private func writeInfo() -> URL? {
+    /// Writes the info JSON of an export of `csvFiles` going back to `from` (nil: everything).
+    private func writeInfo(range: DPFExportRange, from: Date?, csvFiles: [String]) -> URL? {
         let fieldsByColumn = Dictionary(DPFRecordPlan.fields.flatMap { field in field.columns.map { ($0, field) } },
                                         uniquingKeysWith: { first, _ in first })
         var columns: [Info.Column] = Self.metaNotes.map { Info.Column(name: $0.0, did: nil, tier: nil, note: $0.1) }
@@ -1689,15 +1826,22 @@ final class DPFRecorder: ObservableObject {
             learned: history.learned.map { DPFHistoryFinder.title($0.header, $0.did, $0.span) },
             confirmed: history.learned?.confirmed,
             kmNewestFirst: history.history,
-            raw: history.historyRaw.map { Self.hex($0) },
+            raw: history.historyRaw?.hexString(),
             read: history.historyRead)
+        // Drives that ended in the range (the one being recorded always), events in it.
+        let current = drive?.id
+        let drives = from.map { from in
+            state.drives.filter { drive in drive.end.map { $0 >= from } ?? (drive.start >= from || drive.id == current) }
+        } ?? state.drives
+        let events = from.map { from in state.events.filter { $0.time >= from } } ?? state.events
         let info = Info(car: "Mazda CX-5 2015 (KE) 2.2 SKYACTIV-D, automatic",
                         exportedAt: Date(), timeZone: TimeZone.current.identifier,
+                        range: range.title, from: from,
                         odometerOffsetKm: AppConfig.Odometer.offsetKm,
-                        csvFiles: csvFiles().map(\.lastPathComponent),
+                        csvFiles: csvFiles,
                         notes: Self.exportNotes, columns: columns, fields: fields,
                         supportDIDs: DPFRecordPlan.supportDIDs, idDIDs: DPFRecordPlan.idDIDs,
-                        drives: state.drives, events: state.events, rateNow: rate, sweep: sweep,
+                        drives: drives, events: events, rateNow: rate, sweep: sweep,
                         regenerationLog: regenLog.entries, pcmHistory: pcmHistory, engineHealth: health.export)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -1734,6 +1878,12 @@ final class DPFRecorder: ObservableObject {
     ]
 
     private static let exportNotes: [String] = [
+        """
+        range / from: how far back this export goes, picked in the Export menu (last week, 2 weeks, month, 3 \
+        months, year, or everything: no from). The CSV rows are the ones sampled at or after from (by unix), and \
+        drives and events are cut to it too; the regeneration log, the PCM history, the sweep and engineHealth are \
+        always whole.
+        """,
         """
         Mazda DIDs (04xx, 03xx, DAxx, DD01) and their scaling: FORScan Viewer 1.5.31's SKYACTIV-D PCM definitions \
         where it has them, community reverse engineering otherwise; not Mazda documents. The raw column has every \
@@ -1796,10 +1946,6 @@ final class DPFRecorder: ObservableObject {
     private static func didText(_ value: Int) -> String {
         let text = String(value, radix: 16, uppercase: true)
         return String(repeating: "0", count: max(0, 4 - text.count)) + text
-    }
-
-    private static func hex(_ bytes: [UInt8], separator: String = " ") -> String {
-        bytes.map { String(format: "%02X", $0) }.joined(separator: separator)
     }
 
     /// Printable ASCII of an ID ("SH7M-18881-J"), dots for the rest.

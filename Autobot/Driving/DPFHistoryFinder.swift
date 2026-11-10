@@ -151,9 +151,9 @@ final class DPFHistoryFinder: ObservableObject {
     init(obd: OBDAdapter) {
         self.obd = obd
         extendedSession = UserDefaults.standard.bool(forKey: Self.extendedKey)
-        candidates = Self.load([Candidate].self, key: Self.candidatesKey) ?? []
-        learned = Self.load(Learned.self, key: Self.learnedKey)
-        scanState = Self.load(ScanState.self, key: Self.scanKey)
+        candidates = UserDefaults.standard.codable([Candidate].self, forKey: Self.candidatesKey) ?? []
+        learned = UserDefaults.standard.codable(Learned.self, forKey: Self.learnedKey)
+        scanState = UserDefaults.standard.codable(ScanState.self, forKey: Self.scanKey)
         if let raw = UserDefaults.standard.data(forKey: Self.rawKey), let learned {
             historyRaw = [UInt8](raw)
             history = Self.decode([UInt8](raw), learned)
@@ -355,7 +355,7 @@ final class DPFHistoryFinder: ObservableObject {
         if !state.refused.isEmpty {
             let codes = Dictionary(grouping: state.refused.values, by: { $0 }).mapValues(\.count)
             onLog?("DPF history: refused " + codes.keys.sorted()
-                .map { String(format: "%02X", $0) + " ×\(codes[$0] ?? 0)" }.joined(separator: ", "))
+                .map { $0.hex + " ×\(codes[$0] ?? 0)" }.joined(separator: ", "))
         }
         if obd.isReady, !candidates.isEmpty {
             await runRefresh()         // rules out the ones that changed since they were scanned
@@ -696,7 +696,7 @@ final class DPFHistoryFinder: ObservableObject {
     static func describe(_ reply: OBDAdapter.UDSReply, service: UInt8) -> String {
         switch reply {
         case .data(let bytes):
-            return bytes.isEmpty ? "answered, no data" : hex(bytes) + "  (\(bytes.count) B)"
+            return bytes.isEmpty ? "answered, no data" : bytes.hexString() + "  (\(bytes.count) B)"
         case .refused(let code):
             return String(format: "refused: 7F %02X %02X ", service, code) + ELM327.negativeResponseName(code)
         case .silent:
@@ -708,7 +708,7 @@ final class DPFHistoryFinder: ObservableObject {
 
     private func setLearned(_ value: Learned, bytes: [UInt8]) {
         learned = value
-        Self.store(value, key: Self.learnedKey)
+        UserDefaults.standard.setCodable(value, forKey: Self.learnedKey)
         showHistory(bytes, value)
         message = nextStep
     }
@@ -885,10 +885,6 @@ final class DPFHistoryFinder: ObservableObject {
         return (0..<span).map { String(format: "%04X", first + $0) }
     }
 
-    static func hex(_ bytes: [UInt8]) -> String {
-        bytes.map { String(format: "%02X", $0) }.joined(separator: " ")
-    }
-
     private static func readCount(_ adapter: OBDAdapter) async -> Int? {
         let data = await adapter.readDID(MazdaDPF.Value.regenCount.did, from: MazdaDPF.header, complete: false,
                                          timeout: AppConfig.OBD.replyTimeout)
@@ -896,11 +892,11 @@ final class DPFHistoryFinder: ObservableObject {
     }
 
     private func save() {
-        Self.store(candidates, key: Self.candidatesKey)
+        UserDefaults.standard.setCodable(candidates, forKey: Self.candidatesKey)
     }
 
     private func saveScan() {
-        if let scanState { Self.store(scanState, key: Self.scanKey) }
+        if let scanState { UserDefaults.standard.setCodable(scanState, forKey: Self.scanKey) }
         exportURL = writeExport()
     }
 
@@ -908,8 +904,8 @@ final class DPFHistoryFinder: ObservableObject {
     private func writeExport() -> URL? {
         guard let state = scanState else { return nil }
         let answers = state.answers.keys.sorted().map { key in
-            DPFScanExport.Answer(did: key, reply: Self.hex(state.answers[key] ?? []),
-                                 secondRead: state.unsteady[key].map { Self.hex($0) })
+            DPFScanExport.Answer(did: key, reply: (state.answers[key] ?? []).hexString(),
+                                 secondRead: state.unsteady[key]?.hexString())
         }
         let refused = state.refused.keys.sorted().map { key in
             DPFScanExport.Refusal(did: key, reply: String(format: "7F 22 %02X ", state.refused[key] ?? 0)
@@ -923,7 +919,7 @@ final class DPFHistoryFinder: ObservableObject {
             case nil: verdict = "undecided"
             }
             let title = Self.title(candidate.header, candidate.did, candidate.span)
-            return "\(title) [\(verdict)] \(Self.plausibility(candidate)): \(Self.hex(candidate.bytes))"
+            return "\(title) [\(verdict)] \(Self.plausibility(candidate)): \(candidate.bytes.hexString())"
         }
         let export = DPFScanExport(car: "Mazda CX-5 2.2D 2015",
                                    takenAt: ISO8601DateFormatter().string(from: Date()),
@@ -934,15 +930,6 @@ final class DPFHistoryFinder: ObservableObject {
         guard let data = try? JSONEncoder.pretty.encode(export) else { return nil }
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("autobot-dpf-history-scan.json")
         do { try data.write(to: url); return url } catch { return nil }
-    }
-
-    private static func load<T: Decodable>(_ type: T.Type, key: String) -> T? {
-        guard let data = UserDefaults.standard.data(forKey: key) else { return nil }
-        return try? JSONDecoder().decode(type, from: data)
-    }
-
-    private static func store<T: Encodable>(_ value: T, key: String) {
-        if let data = try? JSONEncoder().encode(value) { UserDefaults.standard.set(data, forKey: key) }
     }
 }
 

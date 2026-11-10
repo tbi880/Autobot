@@ -58,6 +58,10 @@ final class DoorFinder: ObservableObject {
     @Published private(set) var learned: [Opening: BitSignal] = [:]
     /// What to do next / what happened, for the screen.
     @Published private(set) var message = ""
+    /// All raw snapshots as a shareable JSON file, written again after every snapshot (not on every
+    /// redraw of the screen), for working out the door bits by hand when the automatic search can't.
+    /// nil until there are snapshots.
+    @Published private(set) var exportURL: URL?
 
     /// Results for the dashboard log.
     var onLog: ((String) -> Void)?
@@ -90,6 +94,7 @@ final class DoorFinder: ObservableObject {
     func resetSnapshots() {
         snapshots = []
         counts = [:]
+        exportURL = nil
         best = [:]
         message = nextStep
     }
@@ -103,13 +108,12 @@ final class DoorFinder: ObservableObject {
         resetSnapshots()
     }
 
-    /// All raw snapshots as a shareable JSON file, for working out the door bits by hand when the
-    /// automatic search can't. nil until there are snapshots.
-    func exportFile() -> URL? {
+    /// Writes the file behind exportURL.
+    private func writeExport() -> URL? {
         guard !snapshots.isEmpty else { return nil }
         let shots = snapshots.map { entry -> DoorExport.Shot in
             let reads = entry.snapshot.mapValues { perRead in
-                perRead.map { $0.map { String(format: "%02X", $0) }.joined(separator: " ") }
+                perRead.map { $0.hexString() }
             }
             return DoorExport.Shot(scene: entry.scene.label, reads: reads)
         }
@@ -183,6 +187,7 @@ final class DoorFinder: ObservableObject {
         }
         snapshots.append((scene, snapshot))
         counts[scene, default: 0] += 1
+        exportURL = writeExport()
         onLog?("Door finder: snapshot \"\(label)\", \(snapshot.count) DIDs answered")
         solve()
     }
@@ -274,14 +279,13 @@ final class DoorFinder: ObservableObject {
 
     private func save() {
         let byName = Dictionary(uniqueKeysWithValues: learned.map { ($0.key.rawValue, $0.value) })
-        if let data = try? JSONEncoder().encode(byName) {
-            UserDefaults.standard.set(data, forKey: Self.learnedKey)
-        }
+        UserDefaults.standard.setCodable(byName, forKey: Self.learnedKey)
     }
 
     private static func loadLearned() -> [Opening: BitSignal] {
-        guard let data = UserDefaults.standard.data(forKey: learnedKey),
-              let byName = try? JSONDecoder().decode([String: BitSignal].self, from: data) else { return [:] }
+        guard let byName = UserDefaults.standard.codable([String: BitSignal].self, forKey: learnedKey) else {
+            return [:]
+        }
         var result: [Opening: BitSignal] = [:]
         for (name, signal) in byName {
             if let opening = Opening(rawValue: name) { result[opening] = signal }

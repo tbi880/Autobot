@@ -177,9 +177,7 @@ final class MFinder: ObservableObject {
         let plenty = d.count > Tuning.snapshotsToConfirm && m.count > Tuning.snapshotsToConfirm
         if enough, SignalDiff.isUnambiguous(candidates) || plenty {
             let signal = best.signal
-            if let data = try? JSONEncoder().encode(signal) {
-                UserDefaults.standard.set(data, forKey: Self.learnedKey)
-            }
+            UserDefaults.standard.setCodable(signal, forKey: Self.learnedKey)
             learned = signal
             obd.mFlag = signal
             message = "Found the M flag: \(signal.label(off: "D", on: "M")). Power Mode now follows M ↔ D."
@@ -216,8 +214,7 @@ final class MFinder: ObservableObject {
     }
 
     private static func loadLearned() -> BitSignal? {
-        guard let data = UserDefaults.standard.data(forKey: learnedKey) else { return nil }
-        return try? JSONDecoder().decode(BitSignal.self, from: data)
+        UserDefaults.standard.codable(BitSignal.self, forKey: learnedKey)
     }
 
     /// The scan result, if it was made with the current scan plan.

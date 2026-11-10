@@ -36,6 +36,8 @@ import UIKit
 final class WelcomeAssistant: ObservableObject {
 
     @Published private(set) var status = "Waiting for car"
+    /// A Welcome is running (the dashboard's microphone button pulses, and waits for it to finish).
+    @Published private(set) var isRunning = false
     @Published private(set) var lastHeard: String?
     @Published private(set) var lastDestination: String?
     /// Diagnostics: result of the weekday-commute check, and the last shortcut run (name + input).
@@ -72,6 +74,8 @@ final class WelcomeAssistant: ObservableObject {
 
     /// Entry point. Call through VoiceCoordinator so nothing else speaks at the same time.
     func run() async {
+        isRunning = true
+        defer { isRunning = false }
         if Self.isAppInForeground {
             await runConversation()
         } else {

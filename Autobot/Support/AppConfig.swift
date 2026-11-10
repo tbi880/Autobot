@@ -589,6 +589,14 @@ nonisolated enum AppConfig {
         /// A lever reading counts once it has held for this many readings in a row (one a round), so a
         /// quick MIST flick, or passing a position on the way to another, doesn't count.
         static let confirmReadings = 2
+        /// Back to OFF while it rains (lever LO / HI, or wiping in AUTO / INT): the OFF reading has to hold for
+        /// this many readings in a row (about 1.5 s apart), so one or two stray frames never end rain mode.
+        /// Switching the wipers off ends it this many readings later.
+        static let offConfirmReadings = 3
+        /// The lights frame stopped coming (looks without it, the OBD session starting again, the adapter
+        /// gone for a moment): the lever is kept as it was for this long before it counts as unknown, so a
+        /// short gap doesn't drop rain mode. Live data running without the frame for longer ends it.
+        static let leverLostHold: TimeInterval = 30
         /// Lever in AUTO / INT: rain mode ends once the wipers have stayed parked this long with no next wipe
         /// seen. It counts from the first reading that shows them parked again after a wipe, and only time
         /// the motor was really watched counts (see `wipeLength`): a stretch where it wasn't read (the

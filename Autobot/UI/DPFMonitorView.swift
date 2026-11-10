@@ -5,6 +5,7 @@
 
 import Charts
 import SwiftUI
+import UIKit
 
 private typealias Tuning = AppConfig.DPF
 
@@ -56,6 +57,10 @@ struct DPFMonitorView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var showingFinder = false
     @State private var confirmingClear = false
+    /// The export being prepared, what's ready for the share sheet, and why there was nothing to share.
+    @State private var exporting: DPFExportRange?
+    @State private var exported: ExportedFiles?
+    @State private var exportNote = ""
     @State private var window: TimeInterval = Tuning.chartWindows.first ?? 60
     @State private var selected: Date?
 
@@ -63,6 +68,7 @@ struct DPFMonitorView: View {
     private let rpmColor = Color.teal
 
     var body: some View {
+        let chart = ChartWindow(points: monitor.points, window: window, selected: selected)
         NavigationStack {
             ScrollView {
                 VStack(spacing: 16) {
@@ -70,8 +76,8 @@ struct DPFMonitorView: View {
                     if regenerating { regenBanner }
                     if !healthNotes.isEmpty { healthCard }
                     engineHealthCard
-                    liveCharts
-                    pressureVersusRPM
+                    liveCharts(chart)
+                    pressureVersusRPM(chart)
                     dpfCard
                     pmGenCard
                     recorderCard
@@ -98,7 +104,6 @@ struct DPFMonitorView: View {
         }
         .onDisappear {
             monitor.stop()
-            recorder.screenClosed()
         }
         .sheet(isPresented: $showingFinder) {
             DPFHistoryFinderView(finder: finder)
@@ -213,42 +218,43 @@ struct DPFMonitorView: View {
 
     // MARK: Charts
 
-    /// The points inside the chosen window, ending at the latest read.
-    private var visible: [DPFMonitor.Point] {
-        let start = domain.lowerBound
-        return monitor.points.filter { $0.time >= start }
-    }
+    /// What the charts draw, worked out once per render: both time charts, the shading, the selection and
+    /// the scatter plot all read the same window, so the points are gone through once, not once per use.
+    private struct ChartWindow {
+        /// The time axis: the chosen window, ending at the latest read.
+        let domain: ClosedRange<Date>
+        /// The points inside it.
+        let points: [DPFMonitor.Point]
+        /// Stretches of it during which a regeneration was running, for shading.
+        let regenSpans: [(start: Date, end: Date)]
+        /// The read closest to where the chart is being touched.
+        let selected: DPFMonitor.Point?
 
-    private var domain: ClosedRange<Date> {
-        let end = monitor.points.last?.time ?? Date()
-        return end.addingTimeInterval(-window)...end
-    }
-
-    /// The read closest to where the chart is being touched.
-    private var selectedPoint: DPFMonitor.Point? {
-        guard let selected else { return nil }
-        return visible.min { abs($0.time.timeIntervalSince(selected)) < abs($1.time.timeIntervalSince(selected)) }
-    }
-
-    /// Stretches of the window during which a regeneration was running, for shading.
-    private var regenSpans: [(start: Date, end: Date)] {
-        var spans: [(start: Date, end: Date)] = []
-        var start: Date?
-        var last: Date?
-        for point in visible {
-            if point.regenerating {
-                if start == nil { start = point.time }
-            } else if let s = start {
-                spans.append((s, point.time))
-                start = nil
+        init(points all: [DPFMonitor.Point], window: TimeInterval, selected moment: Date?) {
+            let end = all.last?.time ?? Date()
+            let start = end.addingTimeInterval(-window)
+            let points = all.filter { $0.time >= start }
+            var spans: [(start: Date, end: Date)] = []
+            var spanStart: Date?
+            for point in points {
+                if point.regenerating {
+                    if spanStart == nil { spanStart = point.time }
+                } else if let began = spanStart {
+                    spans.append((began, point.time))
+                    spanStart = nil
+                }
             }
-            last = point.time
+            if let spanStart, let last = points.last { spans.append((spanStart, last.time)) }
+            domain = start...end
+            self.points = points
+            regenSpans = spans
+            selected = moment.flatMap { moment in
+                points.min { abs($0.time.timeIntervalSince(moment)) < abs($1.time.timeIntervalSince(moment)) }
+            }
         }
-        if let start, let last { spans.append((start, last)) }
-        return spans
     }
 
-    private var liveCharts: some View {
+    private func liveCharts(_ chart: ChartWindow) -> some View {
         card("Live") {
             Picker("Window", selection: $window) {
                 ForEach(Tuning.chartWindows, id: \.self) { seconds in
@@ -258,7 +264,7 @@ struct DPFMonitorView: View {
             .pickerStyle(.segmented)
 
             Group {
-                if let point = selectedPoint {
+                if let point = chart.selected {
                     Text(selectionText(point))
                 } else {
                     Text("Touch and drag a chart to read a moment")
@@ -267,10 +273,10 @@ struct DPFMonitorView: View {
             .font(.caption.monospacedDigit())
             .foregroundStyle(.secondary)
 
-            timeChart(title: "Back pressure (kPa)", color: pressureColor, value: \.pressure, format: "%.2f")
-            timeChart(title: "Engine speed (rpm)", color: rpmColor, value: \.rpm, format: "%.0f")
+            timeChart(chart, title: "Back pressure (kPa)", color: pressureColor, value: \.pressure, format: "%.2f")
+            timeChart(chart, title: "Engine speed (rpm)", color: rpmColor, value: \.rpm, format: "%.0f")
 
-            if !regenSpans.isEmpty {
+            if !chart.regenSpans.isEmpty {
                 Label("Shaded: regeneration running", systemImage: "flame")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
@@ -288,22 +294,22 @@ struct DPFMonitorView: View {
         return parts.joined(separator: "  ·  ")
     }
 
-    private func timeChart(title: String, color: Color, value: KeyPath<DPFMonitor.Point, Double?>,
-                           format: String) -> some View {
+    private func timeChart(_ chart: ChartWindow, title: String, color: Color,
+                           value: KeyPath<DPFMonitor.Point, Double?>, format: String) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title).font(.caption.bold())
             Chart {
-                ForEach(Array(regenSpans.enumerated()), id: \.offset) { item in
+                ForEach(Array(chart.regenSpans.enumerated()), id: \.offset) { item in
                     RectangleMark(xStart: .value("Start", item.element.start),
                                   xEnd: .value("End", item.element.end))
                         .foregroundStyle(Color.orange.opacity(0.15))
                 }
-                ForEach(visible.filter { $0[keyPath: value] != nil }) { point in
+                ForEach(chart.points.filter { $0[keyPath: value] != nil }) { point in
                     LineMark(x: .value("Time", point.time), y: .value(title, point[keyPath: value] ?? 0))
                         .foregroundStyle(color)
                         .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
                 }
-                if let point = selectedPoint {
+                if let point = chart.selected {
                     RuleMark(x: .value("Time", point.time))
                         .foregroundStyle(Color.secondary.opacity(0.5))
                     if let y = point[keyPath: value] {
@@ -313,7 +319,7 @@ struct DPFMonitorView: View {
                     }
                 }
             }
-            .chartXScale(domain: domain)
+            .chartXScale(domain: chart.domain)
             .chartXSelection(value: $selected)
             .chartXAxis {
                 AxisMarks(values: .automatic(desiredCount: 4)) { _ in
@@ -329,7 +335,7 @@ struct DPFMonitorView: View {
             }
             .frame(height: 160)
             .overlay {
-                if visible.allSatisfy({ $0[keyPath: value] == nil }) {
+                if chart.points.allSatisfy({ $0[keyPath: value] == nil }) {
                     Text(monitor.isRunning ? "Waiting for data…" : "Not monitoring")
                         .font(.caption).foregroundStyle(.secondary)
                 }
@@ -337,9 +343,9 @@ struct DPFMonitorView: View {
         }
     }
 
-    private var pressureVersusRPM: some View {
+    private func pressureVersusRPM(_ chart: ChartWindow) -> some View {
         card("Back pressure vs RPM") {
-            let pairs = visible.filter { $0.rpm != nil && $0.pressure != nil }
+            let pairs = chart.points.filter { $0.rpm != nil && $0.pressure != nil }
             Chart(pairs) { point in
                 PointMark(x: .value("rpm", point.rpm ?? 0), y: .value("kPa", point.pressure ?? 0))
                     .foregroundStyle(by: .value("State", point.regenerating ? "Regenerating" : "Normal"))
@@ -545,8 +551,9 @@ struct DPFMonitorView: View {
             %.0f s also intake shutter, rail pressure and more (whatever this PCM answers), with every raw \
             reply and when it came in. With the ignition off nothing is recorded and \
             nothing is dropped. A slow sweep through the PCM's 0300–04FF and DA00–DAFF DIDs looks for where \
-            it keeps the exhaust temperatures, the DPF pressure and the injected fuel. Export shares the CSV \
-            and a JSON with the drives, events and regeneration log.
+            it keeps the exhaust temperatures, the DPF pressure and the injected fuel. Export asks how far \
+            back to go (the last week up to everything), then shares the CSV and a JSON with the drives, \
+            events and regeneration log.
             """, Tuning.recordInterval, Tuning.recordIntervalDuringRegen, Tuning.recordNormalInterval)
     }
 
@@ -584,10 +591,21 @@ struct DPFMonitorView: View {
             row("Recorded", ByteCountFormatter.string(fromByteCount: Int64(recorder.fileBytes), countStyle: .file),
                 value: nil)
             row("PCM DID sweep", recorder.sweepSummary, value: nil)
-            ShareLink(items: shareItems) {
-                Label("Export data (send to me)", systemImage: "square.and.arrow.up")
+            Menu {
+                ForEach(DPFExportRange.allCases) { range in
+                    Button(range.title) { export(range) }
+                }
+            } label: {
+                Label(exporting == nil ? "Export data (send to me)" : "Preparing the export…",
+                      systemImage: "square.and.arrow.up")
             }
-            .disabled(shareItems.isEmpty)
+            .menuOrder(.fixed)
+            .disabled(exporting != nil)
+            if !exportNote.isEmpty {
+                Text(exportNote)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Button("Clear recorded data", role: .destructive) { confirmingClear = true }
                 .font(.caption)
             Text(recorderExplanation)
@@ -597,11 +615,27 @@ struct DPFMonitorView: View {
         .confirmationDialog("Delete all recorded samples?", isPresented: $confirmingClear, titleVisibility: .visible) {
             Button("Delete", role: .destructive) { recorder.clear() }
         }
+        .sheet(item: $exported) { files in
+            ShareSheet(items: files.urls)
+                .presentationDetents([.medium, .large])
+        }
     }
 
-    /// The recorder's files, plus the history finder's raw scan when there is one.
-    private var shareItems: [URL] {
-        recorder.exportFiles + [finder.exportURL].compactMap { $0 }
+    /// Has the recorder write its files for `range`, then opens the share sheet with them, plus the history
+    /// finder's raw scan when there is one.
+    private func export(_ range: DPFExportRange) {
+        guard exporting == nil else { return }
+        exporting = range
+        exportNote = ""
+        Task {
+            let files = await recorder.makeExport(range)
+            exporting = nil
+            if files.isEmpty {
+                exportNote = range == .all ? "Nothing to export." : "Nothing recorded in the \(range.title.lowercased())."
+            } else {
+                exported = ExportedFiles(urls: files + [finder.exportURL].compactMap { $0 })
+            }
+        }
     }
 
     // MARK: Parked check
@@ -864,7 +898,7 @@ struct DPFMonitorView: View {
     private func rawText(_ value: MazdaDPF.Value) -> String {
         if monitor.unanswered.contains(value) { return "not answered" }
         guard let bytes = monitor.reading.raw[value.did] else { return "--" }
-        return bytes.map { String(format: "%02X", $0) }.joined(separator: " ")
+        return bytes.hexString()
     }
 
     // MARK: Helpers
@@ -893,6 +927,24 @@ struct DPFMonitorView: View {
     private func number(_ value: Double?, _ format: String, _ unit: String = "") -> String {
         value.map { String(format: format, $0) + unit } ?? "--"
     }
+}
+
+/// An export ready to share.
+private struct ExportedFiles: Identifiable {
+    let id = UUID()
+    let urls: [URL]
+}
+
+/// The system share sheet (AirDrop, Save to Files, WeChat, …) for files written when the export is asked for;
+/// ShareLink wants its items up front.
+private struct ShareSheet: UIViewControllerRepresentable {
+    let items: [URL]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
 }
 
 /// Finds where the PCM keeps its last 10 regeneration distances (DPFHistoryFinder): scan once (in
@@ -1064,7 +1116,7 @@ struct DPFHistoryFinderView: View {
                                      ? .green : .secondary)
             }
             Text(DPFHistoryFinder.plausibility(candidate)).font(.caption).foregroundStyle(.secondary)
-            Text(DPFHistoryFinder.hex(candidate.bytes))
+            Text(candidate.bytes.hexString())
                 .font(.system(.caption2, design: .monospaced))
             Text(DPFHistoryFinder.kmPreview(candidate))
                 .font(.system(.caption2, design: .monospaced))

@@ -74,7 +74,7 @@ enum ELM327 {
     /// A mode 01 request for one or more PIDs, e.g. [0x0D] -> "010D". `replyCount` adds a "1":
     /// one reply is enough, so the adapter answers without waiting for other ECUs.
     static func request(_ pids: [UInt8], replyCount: Bool) -> String {
-        "01" + pids.map { String(format: "%02X", $0) }.joined() + (replyCount ? "1" : "")
+        "01" + pids.hexString(separator: "") + (replyCount ? "1" : "")
     }
 
     // MARK: Gear selector (UDS service 22)
@@ -113,7 +113,7 @@ enum ELM327 {
             case .neutral: return "N"
             case .drive: return "D"
             case .manual: return "M"
-            case .unknown(let b): return String(format: "0x%02X", b)
+            case .unknown(let b): return "0x" + b.hex
             }
         }
     }
@@ -162,19 +162,16 @@ enum ELM327 {
     static func monitoredFrame(_ line: String, headers: Bool) -> (id: String?, data: [UInt8])? {
         let text = line.uppercased().filter { !$0.isWhitespace && $0 != prompt && $0 != "\0" }
         guard !text.isEmpty, text.allSatisfy({ $0.isHexDigit }) else { return nil }
-        var digits = Array(text)
+        var digits = Substring(text)
         var id: String?
         if headers {
             guard digits.count > 3 else { return nil }
-            id = String(digits[0..<3])
-            digits.removeFirst(3)
+            id = String(digits.prefix(3))
+            digits = digits.dropFirst(3)
         }
         guard (2...16).contains(digits.count), digits.count % 2 == 0 else { return nil }
-        var data: [UInt8] = []
-        for i in stride(from: 0, to: digits.count, by: 2) {
-            guard let byte = UInt8(String(digits[i...(i + 1)]), radix: 16) else { return nil }
-            data.append(byte)
-        }
+        let data = [UInt8](hexPrefix: digits)
+        guard data.count * 2 == digits.count else { return nil }
         return (id, data)
     }
 
@@ -183,17 +180,11 @@ enum ELM327 {
     /// The values in a mode 01 reply, by PID: "410C0BB80D32" -> [0x0C: [0x0B, 0xB8], 0x0D: [0x32]].
     /// Starts at "41" + the first PID asked for and reads PID after PID while the length is known.
     static func values(in reply: String, first: UInt8) -> [UInt8: [UInt8]] {
-        let marker = "41" + String(format: "%02X", first)
+        let marker = "41" + first.hex
         var result: [UInt8: [UInt8]] = [:]
         for line in lines(reply) {
             guard let range = line.range(of: marker) else { continue }
-            let hex = Array(line[range.lowerBound...].dropFirst(2))     // from the first PID on
-            var bytes: [UInt8] = []
-            var i = 0
-            while i + 1 < hex.count, let byte = UInt8(String(hex[i...(i + 1)]), radix: 16) {
-                bytes.append(byte)
-                i += 2
-            }
+            let bytes = [UInt8](hexPrefix: line[range.lowerBound...].dropFirst(2))     // from the first PID on
             var j = 0
             while j < bytes.count, let length = dataLength[bytes[j]], j + length < bytes.count {
                 result[bytes[j]] = Array(bytes[(j + 1)...(j + length)])
@@ -240,13 +231,7 @@ enum ELM327 {
         }
         for text in (frames.isEmpty ? [] : [frames]) + all {
             guard let range = text.range(of: marker) else { continue }
-            let hex = Array(text[range.upperBound...])
-            var bytes: [UInt8] = []
-            var i = 0
-            while i + 1 < hex.count, let byte = UInt8(String(hex[i...(i + 1)]), radix: 16) {
-                bytes.append(byte)
-                i += 2
-            }
+            var bytes = [UInt8](hexPrefix: text[range.upperBound...])
             if !frames.isEmpty, text == frames, let statedLength, statedLength >= 3 {
                 bytes = Array(bytes.prefix(statedLength - 3))      // minus "62" and the 2-byte DID
             }
@@ -281,7 +266,7 @@ enum ELM327 {
     /// The negative response code in a reply to `service` ("7F2231" -> 0x31 for service 22); nil if
     /// the reply holds none. 31 means "no such DID" (in the current session).
     static func negativeResponseCode(service: UInt8, in reply: String) -> UInt8? {
-        let marker = String(format: "7F%02X", service)
+        let marker = "7F" + service.hex
         for line in lines(reply) {
             guard let range = line.range(of: marker) else { continue }
             let code = line[range.upperBound...].prefix(2)
@@ -293,16 +278,9 @@ enum ELM327 {
     /// The data after a positive response to `service` + `subFunction` ("1003" -> "5003…"); nil if
     /// the reply holds none.
     static func positiveResponse(service: UInt8, subFunction: UInt8, in reply: String) -> [UInt8]? {
-        let marker = String(format: "%02X%02X", service &+ 0x40, subFunction)
+        let marker = (service &+ 0x40).hex + subFunction.hex
         for line in lines(reply) where line.hasPrefix(marker) {
-            let hex = Array(line.dropFirst(marker.count))
-            var bytes: [UInt8] = []
-            var i = 0
-            while i + 1 < hex.count, let byte = UInt8(String(hex[i...(i + 1)]), radix: 16) {
-                bytes.append(byte)
-                i += 2
-            }
-            return bytes
+            return [UInt8](hexPrefix: line.dropFirst(marker.count))
         }
         return nil
     }

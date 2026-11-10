@@ -79,6 +79,7 @@ final class LampController: NSObject, ObservableObject, CBCentralManagerDelegate
         case .redBurstFlash: redBurstFlash()
         case .blueBurstFlash: blueBurstFlash()
         case .purpleBurstFlash: purpleBurstFlash()
+        case .cyanBurstFlash: cyanBurstFlash()
         case .yellowBreathing: yellowBreathing()
         case .cyanBreathing: cyanBreathing()
         }
@@ -137,6 +138,12 @@ final class LampController: NSObject, ObservableObject, CBCentralManagerDelegate
     /// purple used by the normal steady scene before switching modes.
     func purpleBurstFlash() {
         setModeVerified(mode2: 3, param: 6, prepare: [{ LampProtocol.setColor(0x80, 0x00, 0xFF) }])
+    }
+
+    /// Cyan Burst Flash, while the indicators flash in rain mode: the same firmware strobe with parameter 4
+    /// (cyan in ColorModeItem.modeParamStrobe), the custom colour set to rain mode's cyan first.
+    func cyanBurstFlash() {
+        setModeVerified(mode2: 3, param: 4, prepare: [{ LampProtocol.setColor(0x00, 0xFF, 0xFF) }])
     }
 
     /// Purple steady: monocolor mode, purple, Zone 1 = 50, Zone 2 = 100
@@ -201,7 +208,7 @@ final class LampController: NSObject, ObservableObject, CBCentralManagerDelegate
         let next = builder()
         waiting = true
         p.writeValue(next, for: c, type: .withoutResponse)
-        addLog("→ \(LampProtocol.hex(next))")
+        addLog("→ \(next.hexString())")
 
         let work = DispatchWorkItem { [weak self] in
             self?.waiting = false
@@ -311,7 +318,7 @@ final class LampController: NSObject, ObservableObject, CBCentralManagerDelegate
     func peripheral(_ p: CBPeripheral, didUpdateValueFor c: CBCharacteristic, error: Error?) {
         guard let v = c.value, !v.isEmpty else { return }
         let b = [UInt8](v)
-        addLog("← \(LampProtocol.hex(v))")
+        addLog("← \(v.hexString())")
 
         // "Busy" (FC) or "checksum error" (F0): resend the same packet shortly
         if b.count == 1, b[0] == 0xFC || b[0] == 0xF0,

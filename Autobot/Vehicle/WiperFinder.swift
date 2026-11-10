@@ -97,8 +97,8 @@ final class WiperFinder: ObservableObject {
         self.obd = obd
         self.rain = rain
         for key in Self.oldKeys { UserDefaults.standard.removeObject(forKey: key) }
-        learnedLever = Self.load(WiperLeverLayout.self, key: Self.leverKey)
-        learnedMotor = Self.load(WiperMotorSignal.self, key: Self.motorKey)
+        learnedLever = UserDefaults.standard.codable(WiperLeverLayout.self, forKey: Self.leverKey)
+        learnedMotor = UserDefaults.standard.codable(WiperMotorSignal.self, forKey: Self.motorKey)
         if let found = Self.loadMotorDIDs() {
             scanned = true
             motorDIDs = found
@@ -114,7 +114,7 @@ final class WiperFinder: ObservableObject {
     /// Saves the layout the check found; rain mode reads the lever with it from now on.
     func useLever() {
         guard let layout = leverResult.layout else { return }
-        Self.save(layout, key: Self.leverKey)
+        UserDefaults.standard.setCodable(layout, forKey: Self.leverKey)
         learnedLever = layout
         rain.leverLayout = layout
         message = "Saved: rain mode reads the lever with these bits now."
@@ -173,8 +173,8 @@ final class WiperFinder: ObservableObject {
         leverTakes[step, default: 0] += 1
         leverResult = WiperLeverLayout.learn(frames, ignored: Self.ignoredFrameBits)
         exportURL = writeExport()
-        onLog?("Wiper finder: lever \(step.label) · \(id) = " + Wipers.hex(last.data) + " (\(heard.count) frames)")
-        message = "\(step.label): \(heard.count) frames, last " + Wipers.hex(last.data)
+        onLog?("Wiper finder: lever \(step.label) · \(id) = " + last.data.hexString() + " (\(heard.count) frames)")
+        message = "\(step.label): \(heard.count) frames, last " + last.data.hexString()
     }
 
     // MARK: Wiper motor
@@ -188,7 +188,7 @@ final class WiperFinder: ObservableObject {
     /// Saves the motor bit the traces found; rain mode reads it while the lever is in AUTO / INT.
     func useMotor() {
         guard let signal = motorResult.signal else { return }
-        Self.save(signal, key: Self.motorKey)
+        UserDefaults.standard.setCodable(signal, forKey: Self.motorKey)
         learnedMotor = signal
         rain.motorSignal = signal
         message = "Saved: in AUTO / INT rain mode follows the wiper motor now."
@@ -377,15 +377,15 @@ final class WiperFinder: ObservableObject {
         var lever: [WiperExport.LeverTake] = []
         for step in WiperLeverLayout.Step.allCases {
             for take in frames[step] ?? [] {
-                lever.append(WiperExport.LeverTake(step: step.label, frames: take.map { Wipers.hex($0) }))
+                lever.append(WiperExport.LeverTake(step: step.label, frames: take.map { $0.hexString() }))
             }
         }
         func motorSnapshot(_ snapshot: SignalDiff.Snapshot, _ label: String) -> WiperExport.MotorSnapshot {
-            WiperExport.MotorSnapshot(label: label, reads: snapshot.mapValues { reads in reads.map { Wipers.hex($0) } })
+            WiperExport.MotorSnapshot(label: label, reads: snapshot.mapValues { reads in reads.map { $0.hexString() } })
         }
         let motor = parked.map { motorSnapshot($0, "Parked (OFF)") } + wiping.map { motorSnapshot($0, "Wiping (LO)") }
         let traced = traces.map { trace in
-            trace.map { WiperExport.TraceRead(t: ($0.time * 1000).rounded() / 1000, key: $0.key, data: Wipers.hex($0.data)) }
+            trace.map { WiperExport.TraceRead(t: ($0.time * 1000).rounded() / 1000, key: $0.key, data: $0.data.hexString()) }
         }
         let export = WiperExport(car: "Mazda CX-5 2.2D 2015", takenAt: ISO8601DateFormatter().string(from: Date()),
                                  lever: lever, motor: motor, traces: traced)
@@ -397,17 +397,6 @@ final class WiperFinder: ObservableObject {
         } catch {
             return nil
         }
-    }
-
-    private static func save<T: Encodable>(_ value: T, key: String) {
-        if let data = try? JSONEncoder().encode(value) {
-            UserDefaults.standard.set(data, forKey: key)
-        }
-    }
-
-    private static func load<T: Decodable>(_ type: T.Type, key: String) -> T? {
-        guard let data = UserDefaults.standard.data(forKey: key) else { return nil }
-        return try? JSONDecoder().decode(type, from: data)
     }
 
     /// The scan result, if there is one made with the current scan plan.

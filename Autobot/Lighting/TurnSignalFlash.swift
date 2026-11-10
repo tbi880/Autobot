@@ -1,10 +1,12 @@
 // TurnSignalFlash.swift
-// Flashes in the current Power Mode colour while the turn signals or hazard lights flash: purple in
-// normal driving, red in Power Mode. When they stop, the request is withdrawn and the lamp shows
-// what it should show by then:
+// Flashes in the current mode's colour while the turn signals or hazard lights flash: red in Power Mode,
+// cyan in rain mode, purple in normal driving (rain mode's cyan never turns purple while indicating, so
+// the colour always tells whether rain mode is on). When they stop, the request is withdrawn and the
+// lamp shows what it should show by then:
 //
 //   - lever in M (Power Mode)               -> red gradient breathing again
 //   - Power Mode switching                  -> its red burst flash, until the 3-second buffer ends
+//   - lever in D, raining                   -> cyan gradient breathing
 //   - lever in D                            -> purple steady
 //
 // The indicators come from the car: the indicator lamp frame 09A on HS-CAN, which OBDAdapter listens
@@ -30,13 +32,16 @@ final class TurnSignalFlash: ObservableObject {
 
     private let lighting: LightingArbiter
     private let powerMode: PowerModeController
+    private let rain: RainMode
     private var fromCar: TurnSignals.State = .off
     private var subscription: AnyCancellable?
     private var powerModeSubscription: AnyCancellable?
+    private var rainSubscription: AnyCancellable?
 
-    init(obd: OBDAdapter, lighting: LightingArbiter, powerMode: PowerModeController) {
+    init(obd: OBDAdapter, lighting: LightingArbiter, powerMode: PowerModeController, rain: RainMode) {
         self.lighting = lighting
         self.powerMode = powerMode
+        self.rain = rain
         subscription = obd.$turnSignal
             .map { $0 ?? .off }                     // unknown (not heard, no live data) counts as off
             .removeDuplicates()
@@ -45,6 +50,10 @@ final class TurnSignalFlash: ObservableObject {
         powerModeSubscription = powerMode.$committed
             .dropFirst()
             .sink { [weak self] _ in self?.updateLighting() }
+        rainSubscription = rain.$isOn
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] isOn in self?.updateLighting(rainOn: isOn) }   // sent before it's stored
     }
 
     /// Debug: as if the indicators on that side (or the hazard lights) started flashing; the same
@@ -71,13 +80,16 @@ final class TurnSignalFlash: ObservableObject {
         updateLighting()
     }
 
-    private func updateLighting() {
+    /// `rainOn`: rain mode's new state while it's changing (its publisher sends before storing it).
+    private func updateLighting(rainOn: Bool? = nil) {
         guard state.isOn else {
             lighting.clear(.turnSignal)                 // back to Power Mode or its switch flash
             return
         }
         if powerMode.committed == .redBreathing {
             lighting.request(.redBurstFlash, from: .turnSignal)
+        } else if rainOn ?? rain.isOn {
+            lighting.request(.cyanBurstFlash, from: .turnSignal)
         } else {
             lighting.request(.purpleBurstFlash, from: .turnSignal)
         }

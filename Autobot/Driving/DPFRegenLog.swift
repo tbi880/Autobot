@@ -45,7 +45,8 @@ final class DPFRegenLog: ObservableObject {
         var sootBefore: Double?
         /// How long it ran, when its start was seen (minutes).
         var durationMinutes: Double?
-        /// The last reading before it was long before (another drive): the distance is a lower bound.
+        /// The last reading before it was long before (another drive), or it was found running with the car
+        /// already moving after a gap in live data: the distance (and the duration) are lower bounds.
         var approximate: Bool
         /// Regenerations the count skipped (happened while nothing was read); their distances are unknown.
         var missed: Int = 0
@@ -103,6 +104,9 @@ final class DPFRegenLog: ObservableObject {
         var engineOffAt: Date?
         /// Its start was seen (not just found running after a gap).
         var watched: Bool
+        /// Found running with the car already moving when live data came back (the phone lost the adapter
+        /// mid-drive): it started, and part of it ran, while nothing was read. nil when watched.
+        var foundMoving: Bool? = nil
     }
 
     /// Newest first.
@@ -173,8 +177,8 @@ final class DPFRegenLog: ObservableObject {
     init(obd: OBDAdapter) {
         self.obd = obd
         if persist {
-            entries = Self.load([Entry].self, key: Self.entriesKey) ?? []
-            state = Self.load(State.self, key: Self.stateKey) ?? State()
+            entries = UserDefaults.standard.codable([Entry].self, forKey: Self.entriesKey) ?? []
+            state = UserDefaults.standard.codable(State.self, forKey: Self.stateKey) ?? State()
             convertSaved()
             lastCount = state.count
             lastDistance = state.distance
@@ -250,12 +254,14 @@ final class DPFRegenLog: ObservableObject {
 
         // Started?
         if r.regenerating == true, s.active == nil {
+            let watched = previousSeen.map { date.timeIntervalSince($0) < Tuning.logApproximateAfter } ?? false
             s.active = Active(start: date, countAtStart: r.regenCount ?? s.count,
                               distanceBefore: s.peakDistance ?? s.distance ?? r.regenDistance,
                               sootBefore: r.soot ?? s.soot, sootDesiredBefore: r.sootDesired ?? s.sootDesired,
                               sootGeneratedBefore: r.sootGenerated ?? s.sootGenerated,
                               odometerStart: r.odometer ?? s.odometer, oilDilutionBefore: r.oilDilution ?? s.oilDilution,
-                              watched: previousSeen.map { date.timeIntervalSince($0) < Tuning.logApproximateAfter } ?? false)
+                              watched: watched,
+                              foundMoving: watched ? nil : ((speed ?? 0) >= Tuning.movingSpeed))
             var line = "DPF log: regeneration started"
             if let generated = r.sootGenerated ?? s.sootGenerated { line += String(format: " · PM_GEN %.2f g/L", generated) }
             if let soot = r.soot ?? s.soot { line += String(format: " · PM_ACC %.2f g/L", soot) }
@@ -330,9 +336,14 @@ final class DPFRegenLog: ObservableObject {
         var stale = true
         if let previousSeen { stale = date.timeIntervalSince(previousSeen) > Tuning.logApproximateAfter }
         let end = a?.engineOffAt ?? date
+        // Found running with the car moving after a gap: it started somewhere in the gap, so the distance
+        // before it (the last one read) and the duration are lower bounds, however recent the last reading
+        // is now. Found running at a drive's start (the PCM carrying on after an engine-off) isn't: the car
+        // didn't move in between.
+        let foundMoving = a?.foundMoving == true
         var entry = Entry(date: end, count: count, intervalKm: interval,
                           sootBefore: a?.sootBefore ?? s.soot,
-                          approximate: !(a?.watched ?? false) && stale, missed: max(missed, 0))
+                          approximate: foundMoving || (!(a?.watched ?? false) && stale), missed: max(missed, 0))
         entry.outcome = .completed
         if let a {
             entry.started = a.start
@@ -490,7 +501,9 @@ final class DPFRegenLog: ObservableObject {
         } else if let soot = entry.sootBefore, entry.started != nil {
             parts.append(String(format: "PM_ACC %.2f at start", soot))
         }
-        if let minutes = entry.durationMinutes { parts.append(String(format: "%.1f min", minutes)) }
+        if let minutes = entry.durationMinutes {
+            parts.append(String(format: entry.approximate ? "≥ %.1f min" : "%.1f min", minutes))
+        }
         if let count = entry.count { parts.append("#\(count)") }
         return parts.joined(separator: " · ")
     }
@@ -520,7 +533,7 @@ final class DPFRegenLog: ObservableObject {
     /// Converts what was saved in other units (Units), once: 0434 distances by the ratio of the scales,
     /// odometer readings by the change in AppConfig.Odometer.offsetKm.
     private func convertSaved() {
-        let saved = Self.load(Units.self, key: Self.unitsKey) ?? .before
+        let saved = UserDefaults.standard.codable(Units.self, forKey: Self.unitsKey) ?? .before
         if saved != .current {
             let factor = saved.regenUnitsPer100Km / Units.current.regenUnitsPer100Km
             let shift = Units.current.odometerOffsetKm - saved.odometerOffsetKm
@@ -541,21 +554,12 @@ final class DPFRegenLog: ObservableObject {
             }
             save()
         }
-        Self.store(Units.current, key: Self.unitsKey)
+        UserDefaults.standard.setCodable(Units.current, forKey: Self.unitsKey)
     }
 
     private func save() {
         guard persist else { return }
-        Self.store(entries, key: Self.entriesKey)
-        Self.store(state, key: Self.stateKey)
-    }
-
-    private static func load<T: Decodable>(_ type: T.Type, key: String) -> T? {
-        guard let data = UserDefaults.standard.data(forKey: key) else { return nil }
-        return try? JSONDecoder().decode(type, from: data)
-    }
-
-    private static func store<T: Encodable>(_ value: T, key: String) {
-        if let data = try? JSONEncoder().encode(value) { UserDefaults.standard.set(data, forKey: key) }
+        UserDefaults.standard.setCodable(entries, forKey: Self.entriesKey)
+        UserDefaults.standard.setCodable(state, forKey: Self.stateKey)
     }
 }

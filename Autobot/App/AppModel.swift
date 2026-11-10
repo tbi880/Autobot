@@ -19,7 +19,8 @@
 //     ──scene (rain: cyan breathing, above the normal purple, below Power Mode)──▶ LightingArbiter
 //   (purple steady itself is the `.base` request, under everything else)
 //   OBDAdapter (indicator lamp frame 09A, listened for on HS-CAN) ──turnSignal──▶ TurnSignalFlash
-//     ──scene (turnSignal: current Power Mode colour flash)──▶ LightingArbiter
+//     ──scene (turnSignal: flash in the current mode's colour: red Power Mode, cyan rain, purple)──▶
+//     LightingArbiter
 //   OBDAdapter (PCM 7E0: RPM, DPF pressure 22F47A, soot, regeneration, exhaust temperatures), only
 //     while the DPF screen is open, between live-data rounds ──▶ DPFMonitor ──▶ DPF screen (charts)
 //   OBDAdapter (220380 flag every 15 s; count, distance, soot once a minute; temperatures while a
@@ -82,7 +83,9 @@ final class AppModel: ObservableObject {
         let speed = SpeedMonitor()
 
         let lamp = LampController()
-        speaker.onLog = { [weak lamp] message in lamp?.addLog(message) }
+        // Every component's log lines go to the lamp's log, which the dashboard shows.
+        let log: (String) -> Void = { [weak lamp] message in lamp?.addLog(message) }
+        speaker.onLog = log
 
         self.lamp = lamp
         self.speed = speed
@@ -96,44 +99,44 @@ final class AppModel: ObservableObject {
         self.doors = doors
         self.doorAlert = DoorSafetyAlert(doors: doors, lighting: lighting, voice: voice)
         let climate = ClimateTempFlash(lighting: lighting)
-        climate.onLog = { [weak lamp] message in lamp?.addLog(message) }
+        climate.onLog = log
         self.climate = climate
         let obd = OBDAdapter()
-        obd.onLog = { [weak lamp] message in lamp?.addLog(message) }
+        obd.onLog = log
         let manual = ManualShiftDetector(obd: obd)
-        manual.onLog = { [weak lamp] message in lamp?.addLog(message) }
+        manual.onLog = log
         self.obd = obd
         let dpf = DPFMonitor(obd: obd)
-        dpf.onLog = { [weak lamp] message in lamp?.addLog(message) }
+        dpf.onLog = log
         self.dpf = dpf
         let dpfLog = DPFRegenLog(obd: obd)
-        dpfLog.onLog = { [weak lamp] message in lamp?.addLog(message) }
+        dpfLog.onLog = log
         dpf.onValues = { [weak dpfLog, weak obd] values in
             dpfLog?.observe(values, speed: obd?.sample?.speed)
         }
         dpfLog.onRegenerationStarted = { [weak voice] in voice?.announce(AppConfig.Phrases.dpfRegenStarted) }
         self.dpfLog = dpfLog
         let dpfHistory = DPFHistoryFinder(obd: obd)
-        dpfHistory.onLog = { [weak lamp] message in lamp?.addLog(message) }
+        dpfHistory.onLog = log
         self.dpfHistory = dpfHistory
         let dpfRecorder = DPFRecorder(obd: obd, regenLog: dpfLog, history: dpfHistory)
-        dpfRecorder.onLog = { [weak lamp] message in lamp?.addLog(message) }
+        dpfRecorder.onLog = log
         self.dpfRecorder = dpfRecorder
         let reverse = ReverseLight(obd: obd, lighting: lighting)
-        reverse.onLog = { [weak lamp] message in lamp?.addLog(message) }
+        reverse.onLog = log
         self.reverse = reverse
         let rain = RainMode(obd: obd, lighting: lighting)
-        rain.onLog = { [weak lamp] message in lamp?.addLog(message) }
+        rain.onLog = log
         self.rain = rain
         let wiperFinder = WiperFinder(obd: obd, rain: rain)
-        wiperFinder.onLog = { [weak lamp] message in lamp?.addLog(message) }
+        wiperFinder.onLog = log
         self.wiperFinder = wiperFinder
         self.manual = manual
         let mFinder = MFinder(obd: obd)
-        mFinder.onLog = { [weak lamp] message in lamp?.addLog(message) }
+        mFinder.onLog = log
         self.mFinder = mFinder
         let doorFinder = DoorFinder(obd: obd)
-        doorFinder.onLog = { [weak lamp] message in lamp?.addLog(message) }
+        doorFinder.onLog = log
         self.doorFinder = doorFinder
         let trigger: any PowerModeTrigger
         switch AppConfig.PowerMode.trigger {
@@ -142,8 +145,8 @@ final class AppModel: ObservableObject {
         }
         let powerMode = PowerModeController(trigger: trigger, lighting: lighting, voice: voice)
         self.powerMode = powerMode
-        let turnSignals = TurnSignalFlash(obd: obd, lighting: lighting, powerMode: powerMode)
-        turnSignals.onLog = { [weak lamp] message in lamp?.addLog(message) }
+        let turnSignals = TurnSignalFlash(obd: obd, lighting: lighting, powerMode: powerMode, rain: rain)
+        turnSignals.onLog = log
         self.turnSignals = turnSignals
         let places = SavedPlacesStore()
         self.places = places
@@ -177,7 +180,12 @@ final class AppModel: ObservableObject {
         Self.warmUpSpeech()
         assistant.prepare()
 
-        lighting.onSceneChange = { [weak self] scene in self?.lamp.setDesired(scene) }
+        lighting.onSceneChange = { [weak self] scene in
+            guard let self else { return }
+            // Which feature the lamp follows now, so the log tells why it changed colour.
+            self.lamp.addLog("Lighting: " + (self.lighting.active?.source.label ?? "none") + " → " + scene.label)
+            self.lamp.setDesired(scene)
+        }
         lighting.request(.purpleSteady, from: .base)   // the normal lighting, under everything else
         powerMode.start()
         speed.start()

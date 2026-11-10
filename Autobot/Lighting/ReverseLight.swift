@@ -29,8 +29,7 @@ final class ReverseLight: ObservableObject {
     var onLog: ((String) -> Void)?
 
     private let lighting: LightingArbiter
-    private var candidate: Bool?                 // in R or not, in the latest readings…
-    private var candidateCount = 0               // …and in how many in a row
+    private var readings = Streak<Bool>()        // in R or not in the latest readings, and in how many in a row
     private var subscription: AnyCancellable?
 
     init(obd: OBDAdapter, lighting: LightingArbiter) {
@@ -49,21 +48,14 @@ final class ReverseLight: ObservableObject {
 
     private func handle(_ sample: OBDSample?) {
         guard let sample else {                  // no live data: not in R, as far as anyone knows
-            candidate = nil
-            candidateCount = 0
+            readings.reset()
             carChanged(to: false)
             return
         }
         guard let lever = sample.selector else { return }        // this round without the TCM: no news
         if case .unknown = lever { return }                      // unrecognised code: no news
         let inReverse = lever == .reverse
-        if inReverse == candidate {
-            candidateCount += 1
-        } else {
-            candidate = inReverse
-            candidateCount = 1
-        }
-        guard candidateCount >= max(AppConfig.Reverse.confirmReadings, 1) else { return }
+        guard readings.record(inReverse) >= max(AppConfig.Reverse.confirmReadings, 1) else { return }
         carChanged(to: inReverse)
     }
 

@@ -20,8 +20,7 @@ final class SpeedMonitor: NSObject, ObservableObject, CLLocationManagerDelegate,
     var onStateChange: ((LampState) -> Void)?
 
     private let manager = CLLocationManager()
-    private var candidate: LampState?
-    private var candidateCount = 0
+    private var readings = Streak<LampState>()     // the state the latest GPS readings call for
 
     override init() {
         super.init()
@@ -79,20 +78,12 @@ final class SpeedMonitor: NSObject, ObservableObject, CLLocationManagerDelegate,
     /// Switches state only after the same target is seen in several consecutive readings.
     private func confirm(_ target: LampState) {
         guard target != state else {
-            candidate = nil
-            candidateCount = 0
+            readings.reset()
             return
         }
-        if candidate == target {
-            candidateCount += 1
-        } else {
-            candidate = target
-            candidateCount = 1
-        }
-        if candidateCount >= AppConfig.Speed.confirmReadings {
+        if readings.record(target) >= AppConfig.Speed.confirmReadings {
             state = target
-            candidate = nil
-            candidateCount = 0
+            readings.reset()
             onStateChange?(target)
         }
     }

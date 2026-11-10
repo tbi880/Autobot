@@ -46,14 +46,6 @@ import Foundation
 
 // MARK: - Shared
 
-/// Small helpers for the wiper code.
-nonisolated enum Wipers {
-    /// "06"
-    static func hex(_ byte: UInt8) -> String { String(format: "%02X", byte) }
-    /// "00 00 08 00 04 00 00 00"
-    static func hex(_ bytes: [UInt8]) -> String { bytes.map { String(format: "%02X", $0) }.joined(separator: " ") }
-}
-
 /// The windshield wiper lever.
 nonisolated enum WiperLever: String, Codable, CaseIterable, Identifiable {
     case off, auto, low, high
@@ -81,7 +73,7 @@ nonisolated struct FrameBits: Codable, Equatable {
     }
 
     var label: String {
-        "byte \(byte) & " + Wipers.hex(mask) + " = " + Wipers.hex(value)
+        "byte \(byte) & " + mask.hex + " = " + value.hex
     }
 }
 
@@ -140,19 +132,19 @@ nonisolated struct WiperLeverLayout: Codable, Equatable {
 
     /// The lever bits of a frame as hex ("04"), for logs and screens.
     func codeText(_ data: [UInt8]) -> String {
-        code(in: data).map { Wipers.hex($0) } ?? "--"
+        code(in: data)?.hexString() ?? "--"
     }
 
     /// Where the lever bits are: "byte 4 & 06".
     var placeLabel: String {
-        fields.map { "byte \($0.byte) & " + Wipers.hex($0.mask) }.joined(separator: ", ")
+        fields.map { "byte \($0.byte) & " + $0.mask.hex }.joined(separator: ", ")
     }
 
     /// For the screens: "byte 4 & 06: OFF 00 · AUTO / INT 04 · LO 02 · HI 06", "Washer: byte 3 & 01 = 01".
     var descriptions: [String] {
         let values = WiperLever.allCases.compactMap { lever -> String? in
             guard let code = codes.first(where: { $0.lever == lever }) else { return nil }
-            return lever.label + " " + Wipers.hex(code.values)
+            return lever.label + " " + code.values.hexString()
         }
         var lines = [placeLabel + ": " + values.joined(separator: " · ")]
         if let washer, !washer.isEmpty {
@@ -444,7 +436,7 @@ nonisolated struct WiperMotorSignal: Codable, Equatable {
 
     /// "726 22DA0B byte 2 & 10 (parked 00)"
     var label: String {
-        "\(header) 22\(did) byte \(byteIndex) & " + Wipers.hex(mask) + " (parked " + Wipers.hex(parked) + ")"
+        "\(header) 22\(did) byte \(byteIndex) & " + mask.hex + " (parked " + parked.hex + ")"
     }
 }
 
@@ -478,7 +470,7 @@ nonisolated enum WiperMotorAnalysis {
         var header: String { String(key.prefix { $0 != " " }) }
         var did: String { String(key.drop { $0 != " " }.dropFirst()) }
         /// "726 DA0B byte 2 bit 10"
-        var label: String { "\(key) byte \(byteIndex) bit " + Wipers.hex(bit) }
+        var label: String { "\(key) byte \(byteIndex) bit " + bit.hex }
     }
 
     /// What one candidate bit did during one trace.

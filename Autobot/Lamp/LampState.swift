@@ -11,6 +11,7 @@ enum LampState: Equatable {
     case redBurstFlash   // Power Mode turn signals/switching, a door alert, or A/C set warmer
     case blueBurstFlash  // A/C set colder (ClimateTempFlash)
     case purpleBurstFlash // turn signals or hazard lights flashing in normal driving mode
+    case cyanBurstFlash  // turn signals or hazard lights flashing while it rains (rain mode)
     case yellowBreathing // lever in R, reversing (ReverseLight)
     case cyanBreathing   // wipers on: rain mode (RainMode)
 
@@ -21,6 +22,7 @@ enum LampState: Equatable {
         case .redBurstFlash: return "Red · burst flash"
         case .blueBurstFlash: return "Blue · burst flash"
         case .purpleBurstFlash: return "Purple · burst flash"
+        case .cyanBurstFlash: return "Cyan · burst flash"
         case .yellowBreathing: return "Yellow gradient · breathing"
         case .cyanBreathing: return "Cyan gradient · breathing"
         }

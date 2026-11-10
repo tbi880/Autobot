@@ -46,11 +46,6 @@ nonisolated enum TurnSignals {
             }
         }
     }
-
-    /// "00 00 20 00 00 00 00 00"
-    static func hex(_ bytes: [UInt8]) -> String {
-        bytes.map { String(format: "%02X", $0) }.joined(separator: " ")
-    }
 }
 
 /// Follows the indicator lamp bits through OBDAdapter's listening windows ("looks"). While listening
