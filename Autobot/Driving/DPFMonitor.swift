@@ -347,11 +347,3 @@ final class DPFMonitor: ObservableObject {
         }
     }
 }
-
-private extension Duration {
-    /// The duration in seconds, as a Double.
-    var inSeconds: Double {
-        let parts = components
-        return Double(parts.seconds) + Double(parts.attoseconds) / 1e18
-    }
-}
