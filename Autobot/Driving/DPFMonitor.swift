@@ -10,6 +10,8 @@
 //   screen closes -> stop()
 //
 // Nothing is read while the screen is closed, so normal driving keeps its full live-data rate.
+// A value that is switched off (MonitorSwitches) isn't read; during a regeneration every value that has
+// to do with it is, and the regeneration flag and count always are.
 // In test mode (AppConfig.TestMode, no OBD session) it shows simulated values instead, built as raw
 // bytes and decoded by MazdaDPF like real replies.
 
@@ -50,6 +52,7 @@ final class DPFMonitor: ObservableObject {
     var onValues: ((DPFReading) -> Void)?
 
     private let obd: OBDAdapter
+    private let switches: MonitorSwitches
     private var task: Task<Void, Never>?
     private var nextID = 0
     private var misses: [MazdaDPF.Value: Int] = [:]
@@ -58,8 +61,15 @@ final class DPFMonitor: ObservableObject {
     private var rotationIndex = 0
     private var recentReads: [Date] = []
 
-    init(obd: OBDAdapter) {
+    init(obd: OBDAdapter, switches: MonitorSwitches = .shared) {
         self.obd = obd
+        self.switches = switches
+    }
+
+    /// Whether `value` is read now: switched on, wanted for the regeneration under way, or one of the two a
+    /// regeneration is noticed by.
+    private func isWanted(_ value: MazdaDPF.Value) -> Bool {
+        switches.selection.polls(did: value.did, regenActive: reading.regenerating == true)
     }
 
     // MARK: Actions
@@ -118,7 +128,7 @@ final class DPFMonitor: ObservableObject {
                 continue
             }
             let slow = nextSlowValue()
-            let readPressure = !unanswered.contains(.pressure)
+            let readPressure = !unanswered.contains(.pressure) && isWanted(.pressure)
             let started = ContinuousClock.now
             let round = await obd.runBetweenRounds { adapter in
                 await Self.read(adapter, pressure: readPressure, slow: slow)
@@ -156,7 +166,7 @@ final class DPFMonitor: ObservableObject {
         for _ in 0..<rotation.count {
             let value = rotation[rotationIndex % rotation.count]
             rotationIndex += 1
-            if !unanswered.contains(value) { return value }
+            if !unanswered.contains(value), isWanted(value) { return value }
         }
         return nil
     }
@@ -249,6 +259,7 @@ final class DPFMonitor: ObservableObject {
         var parts = ["Live"]
         if let readRate { parts.append(String(format: "%.1f reads/s", readRate)) }
         if unanswered.contains(.pressure) { parts.append("back pressure not answered by the PCM") }
+        if !isWanted(.pressure) { parts.append("back pressure switched off") }
         status = parts.joined(separator: "  ·  ")
     }
 
@@ -267,7 +278,7 @@ final class DPFMonitor: ObservableObject {
             let step = sim.step(seconds: Tuning.simulationInterval.inSeconds)
             var next = reading
             next.rpm = step.rpm
-            for (value, data) in step.raw { next.apply(value, data: data) }
+            for (value, data) in step.raw where isWanted(value) { next.apply(value, data: data) }
             var fresh = next
             fresh.raw = [:]
             onValues?(fresh)

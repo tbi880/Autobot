@@ -56,6 +56,7 @@ struct DPFMonitorView: View {
     @ObservedObject var recorder: DPFRecorder
     @Environment(\.dismiss) private var dismiss
     @State private var showingFinder = false
+    @State private var showingSwitches = false
     @State private var confirmingClear = false
     /// The export being prepared, what's ready for the share sheet, and why there was nothing to share.
     @State private var exporting: DPFExportRange?
@@ -107,6 +108,9 @@ struct DPFMonitorView: View {
         }
         .sheet(isPresented: $showingFinder) {
             DPFHistoryFinderView(finder: finder)
+        }
+        .sheet(isPresented: $showingSwitches) {
+            MonitorSwitchesView(switches: .shared, recorder: recorder)
         }
     }
 
@@ -545,7 +549,8 @@ struct DPFMonitorView: View {
 
     private var recorderExplanation: String {
         String(format: """
-            Every %.0f s while live data runs, screen open or not (every %.0f s around a regeneration): \
+            About every %.0f s while live data runs, screen open or not (%.0f s around a regeneration; the pace \
+            follows what is switched on under Monitored values and how fast the adapter answers): \
             PM_GEN, PM_ACC, PM_ACC_DSD, the regeneration flag, count and distance, exhaust and DPF \
             temperatures and pressure, air flow, EGR, boost, coolant, oil temperature and pressure; every \
             %.0f s also intake shutter, rail pressure and more (whatever this PCM answers), with every raw \
@@ -591,6 +596,15 @@ struct DPFMonitorView: View {
             row("Recorded", ByteCountFormatter.string(fromByteCount: Int64(recorder.fileBytes), countStyle: .file),
                 value: nil)
             row("PCM DID sweep", recorder.sweepSummary, value: nil)
+            if let pace = recorder.pace {
+                row("Pace", String(format: "every %.0f s · slower values %.0f s / %.0f s", pace.fast, pace.normal,
+                                   pace.slow), value: nil)
+            }
+            Button {
+                showingSwitches = true
+            } label: {
+                Label("Monitored values (switches)", systemImage: "switch.2")
+            }
             Menu {
                 ForEach(DPFExportRange.allCases) { range in
                     Button(range.title) { export(range) }
