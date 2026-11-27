@@ -744,6 +744,38 @@ the PCM history, the sweep and the engine health are always whole. The recorded 
 touched; nothing recorded in the range: a note on the screen and nothing is shared. *Clear recorded data* deletes the
 samples, drives and events; what the sweep found stays. Nothing is recorded in test mode.
 
+#### Monitored values: switches, pace, regeneration
+
+*Monitored values (switches)* on the data recorder card (`MonitorSwitchesView`, `MonitorSwitches`) has a
+switch for every group of values — soot and regeneration, DPF pressure, exhaust temperatures, air / EGR,
+boost, fuel, oil, engine, odometer and outside air, battery and trouble codes, learned values, gearbox
+candidates — and, under *Each value*, one for every single value, plus one for the DID sweep. Switched
+off means **not read from the car and not recorded**: its CSV columns stay empty and it is missing from
+`raw`. The DPF screen's live reads and the regeneration log follow the same switches. They are kept in
+UserDefaults; everything is on to start with.
+
+- **Regeneration**: while one is starting or running (a request bit of `0380` on, the 20 min after the
+  count `0432` went up, or the regeneration log has one open), every value of a group that has to do with
+  it — all but odometer / outside air, battery / codes, learned values and the gearbox — is read and
+  recorded whatever its switches say. The switches themselves aren't changed, so they are back in force
+  the moment it is over. `0380` and `0432` are always read, so a regeneration is noticed with everything
+  off; switched off they are only looked at, not recorded.
+- **Pace** (`PollPacer`): the adapter answers one request at a time, and the recorder shares it with the
+  turn signals, the selector and the road speed. The recorder measures what a read really takes (a
+  sample's time ÷ its reads, live data's rounds in between included, smoothed) and uses at most
+  `recordLinkShare` (60 %) of the link. The 10 s / 30 s / 2 min intervals are where it starts: when the
+  values switched on need more, every interval is stretched by the same factor (a sample at least every
+  `recordMaxInterval`, 60 s); when they need less, samples come more often, down to `recordMinInterval`
+  (3 s; 2 s around a regeneration). A slow link (heat, distance) stretches them the same way. The card
+  and the switches screen show the pace in use; the export's JSON has it under `monitoring`, with the
+  switches.
+- **Added 27 Nov 2026** (columns after the older ones, so the CSV starts a new file once): standard PIDs
+  the PCM is only asked for when its bitmap lists them — absolute load (43), commanded lambda (44), the
+  wide-band oxygen sensor (24 / 34, raw 8C), catalyst temperatures (3C / 3E), manifold pressure (87),
+  glow plug lamp (65), engine run / idle hours (7F), monitor status (41), minutes with the check-engine
+  light on / since the codes were cleared (4D / 4E) — and two community candidates for the gearbox fluid
+  temperature, asked from the TCM (7E1 `1E1C`, `1674`), raw only until one is confirmed on this car.
+
 ### Engine health (fuel in the oil)
 
 `EngineHealth` watches what puts diesel into the engine oil, and what makes the DPF regenerate often, which
@@ -830,6 +862,7 @@ Autobot/
 │                DPFMonitor (DPF back pressure, soot, regeneration while its screen is open)
 │                DPFRegenLog (records each regeneration), DPFHistoryFinder (the PCM's last-10 history),
 │                DPFRecorder (10 s samples of the soot model and its inputs, PM_GEN growth, export),
+│                MonitorSwitches (what is monitored: a switch per group and value; PollPacer: the pace),
 │                EngineHealth (fuel in the oil: ranges and early warnings)
 ├── Climate/     ClimateTempFlash (A/C set colder / warmer → blue / red burst flash)
 ├── Voice/       AudioSessionManager, Speaker, MetallicVoiceEffect, VoiceCoordinator (queue)
@@ -838,13 +871,15 @@ Autobot/
 ├── Places/      SavedPlace, SavedPlacesStore
 ├── Backup/      AppBackup (JSON format), BackupManager
 ├── UI/          ContentView (dashboard), SavedPlacesView, DPFMonitorView (live DPF charts),
+│                MonitorSwitchesView (the monitoring switches),
 │                EngineHealthView, MFinderView, WiperFinderView, DoorFinderView (the finders' screens)
 └── Support/     AppConfig (all phrases and tuning values), Concurrency helpers,
                  ReconnectTimer (once-a-minute Bluetooth retry for the lamp and the OBD2 adapter),
                  Hex (bytes as hex text and back), Persistence (Codable values in UserDefaults),
                  Streak (the same reading several times in a row)
 AutobotTests/    OBDLinkTests (ELMLink against a scripted adapter, the turn signals' hold limit, the
-                 timing lines); run with ⌘U
+                 timing lines), MonitorSwitchesTests (the switches, the regeneration override, the
+                 pace); run with ⌘U
 ```
 
 Everything you might want to tweak — the Power Mode trigger, OBD2 settings, phrases, voice character,

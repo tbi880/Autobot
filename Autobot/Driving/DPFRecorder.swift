@@ -46,6 +46,13 @@
 //      picks how far back it goes (DPFExportRange: last week / 2 weeks / month / 3 months / year /
 //      everything): the CSV rows sampled since then, and the drives and events since then
 //
+//   switches (MonitorSwitches, DPF screen > Monitored values): a value or group that is switched off isn't
+//   read and isn't recorded (empty columns); while a regeneration is starting or running, every value that has
+//   to do with one is, whatever the switches say; 0380 and 0432 are always read, to notice one
+//   pace (PollPacer): the intervals above are where it starts. The recorder measures how long its reads take
+//   and may use AppConfig.DPF.recordLinkShare of the link: more switched on than fits -> every interval
+//   stretched; less -> samples more often (down to recordMinInterval)
+//
 // Nothing is recorded in test mode. Values, scaling and sources: README "DPF data recorder".
 
 import Combine
@@ -70,6 +77,8 @@ nonisolated struct DPFRecordField: Sendable {
 
     /// "042D", or "F45E": the standard mode 01 PID 5E mirrored as a DID.
     let did: String
+    /// The ECU asked: the PCM (7E0) for all but the gearbox candidates (TCM, 7E1).
+    var header = MazdaDPF.header
     let tier: Tier
     /// The CSV columns it fills; empty: kept raw only (the `raw` column).
     let columns: [String]
@@ -85,6 +94,19 @@ nonisolated struct DPFRecordField: Sendable {
         guard did.count == 4, did.hasPrefix("F4") else { return nil }
         return UInt8(did.dropFirst(2), radix: 16)
     }
+
+    /// The group whose switch it is under (MonitorSwitches).
+    var group: MonitorGroup? { MonitorGroup.of(did: did) }
+
+    /// What a read of it costs: a single-frame reply 1, one of several frames 3.
+    var cost: Int { multiFrame ? 3 : 1 }
+
+    /// A short name for its switch: the note up to its first colon ("PM_GEN", "PID 5E engine fuel rate…").
+    var title: String {
+        let head = note.split(separator: ":", maxSplits: 1).first.map(String.init) ?? note
+        let line = head.split(whereSeparator: \.isNewline).first.map(String.init) ?? head
+        return line.count > 48 ? String(line.prefix(47)) + "…" : line
+    }
 }
 
 /// What the recorder reads, and how (README "DPF data recorder").
@@ -94,6 +116,9 @@ nonisolated enum DPFRecordPlan {
     /// J1979 PIDs 00, 20 … C0 mirrored as DIDs). A standard PID left out of an answered bitmap isn't
     /// asked on that drive.
     static let supportDIDs = ["F400", "F420", "F440", "F460", "F480", "F4A0", "F4C0"]
+
+    /// The transmission module (MazdaTCM.header), for the gearbox candidates.
+    static let tcmHeader = "7E1"
 
     /// Read once a drive, raw (ASCII in the export): the PCM's software / part number (UDS F188 / F187)
     /// and its calibration ID / verification number (mode 09 PIDs 04 / 06 mirrored as F804 / F806).
@@ -478,7 +503,64 @@ nonisolated enum DPFRecordPlan {
         },
         raw("C968", .once, "INJ_LRN_F1: injector learning mode failure code 1 (raw)"),
         raw("C969", .once, "INJ_LRN_F2: injector learning mode failure code 2 (raw)"),
+        // Added 27 Nov 2026 (their columns come after the older ones). Standard PIDs as SAE J1979 has them:
+        // only asked when the PCM's bitmap lists them, so the ones this PCM leaves out cost nothing.
+        field("F443", .normal, ["load_abs_pct"],
+              "PID 43 absolute load: (A·256+B)·100/255 % (air per stroke; over 100 with boost)") {
+            [word($0, 0).map { $0 * 100 / 255 }]
+        },
+        field("F444", .normal, ["lambda_cmd"],
+              "PID 44 commanded air-fuel equivalence ratio (lambda): (A·256+B)/32768") {
+            [word($0, 0).map { $0 / 32768 }]
+        },
+        field("F434", .normal, ["o2_lambda", "o2_current_ma"],
+              "PID 34 oxygen sensor 1 (wide band): lambda (A·256+B)/32768, pump current (C·256+D)/256 − 128 mA") { d in
+            [word(d, 0).map { $0 / 32768 }, word(d, 2).map { $0 / 256 - 128 }]
+        },
+        field("F424", .normal, ["o2_lambda_v", "o2_v"],
+              "PID 24 oxygen sensor 1 (wide band): lambda (A·256+B)/32768, voltage (C·256+D)·8/65536 V") { d in
+            [word(d, 0).map { $0 / 32768 }, word(d, 2).map { $0 * 8 / 65536 }]
+        },
+        field("F43C", .normal, ["cat1_c"], "PID 3C catalyst temperature bank 1 sensor 1: (A·256+B)/10 − 40 °C") {
+            [word($0, 0).map { $0 / 10 - 40 }]
+        },
+        field("F43E", .normal, ["cat2_c"], "PID 3E catalyst temperature bank 1 sensor 2: (A·256+B)/10 − 40 °C") {
+            [word($0, 0).map { $0 / 10 - 40 }]
+        },
+        field("F487", .normal, ["map_a_kpa"], "PID 87 intake manifold absolute pressure A: (B·256+C)/32 kPa",
+              multiFrame: true) { d in
+            [flagged(d, 0x01, word(d, 1).map { $0 / 32 })]
+        },
+        field("F465", .slow, ["glow_lamp"],
+              "PID 65 auxiliary inputs: glow plug lamp, bit 3 of B (when bit 3 of A says it is reported)") { d in
+            [flagged(d, 0x08, byte(d, 1).map { Double(Int($0) >> 3 & 1) })]
+        },
+        field("F47F", .slow, ["engine_run_h", "engine_idle_h"], """
+              PID 7F engine run time: total B–E and at idle F–I, seconds → hours (bits 0 / 1 of A: reported). The \
+              share at idle matters for soot: PM_GEN grows there without distance
+              """, multiFrame: true) { d in
+            [flagged(d, 0x01, unsigned32(d, 1).map { $0 / 3600 }), flagged(d, 0x02, unsigned32(d, 5).map { $0 / 3600 })]
+        },
+        raw("F48C", .slow, "PID 8C oxygen sensor (wide range) data (raw)", multiFrame: true),
+        raw("F441", .slow, "PID 41 monitor status this drive cycle (raw)"),
+        field("F44D", .once, ["min_with_mil"], "PID 4D time run with the check-engine light on: A·256+B min") {
+            [word($0, 0)]
+        },
+        field("F44E", .once, ["min_since_codes_cleared"],
+              "PID 4E time since the trouble codes were cleared: A·256+B min") {
+            [word($0, 0)]
+        },
+        // Gearbox (TCM, 7E1): two community candidates for the fluid temperature, unconfirmed on this car,
+        // raw only. One the TCM refuses isn't asked again on that drive.
+        raw("1E1C", .slow, "TCM 7E1 221E1C: transmission fluid temperature? (Ford-style: signed (A·256+B)/16 °C; one list)",
+            header: tcmHeader),
+        raw("1674", .slow, "TCM 7E1 221674: transmission fluid temperature? (A − 40 °C; one list)",
+            header: tcmHeader),
     ]
+
+    /// The field that reads `did`.
+    static let fieldByDID: [String: DPFRecordField] = Dictionary(fields.map { ($0.did, $0) },
+                                                                 uniquingKeysWith: { first, _ in first })
 
     /// Read in a parked check, back to back (AppConfig.DPF.recordCheck…): the soot model and what its
     /// pressure / air numbers depend on at a fixed engine speed.
@@ -487,6 +569,30 @@ nonisolated enum DPFRecordPlan {
         "F470", "F40B", "F47A", "F478", "F469", "F411", "F46C", "F405", "F45C", "F423", "F46D", "F45D", "F473",
         "042B", "0415",
     ]
+
+    /// What the values switched on cost per sample of each tier (PollPacer), every go's RPM read included.
+    /// `asked`: false for a field that isn't read anyway (not supported, refused on this drive);
+    /// `sweepReads`: the sweep's reads per 30 s sample.
+    static func costs(_ selection: MonitorSelection, regenActive: Bool, sweepReads: Int, perGo: Int,
+                      asked: (DPFRecordField) -> Bool = { _ in true }) -> PollPacer.Costs {
+        var costs = PollPacer.Costs()
+        for field in fields where selection.polls(did: field.did, regenActive: regenActive) && asked(field) {
+            switch field.tier {
+            case .fast: costs.fast += Double(field.cost)
+            case .normal: costs.normal += Double(field.cost)
+            case .slow: costs.slow += Double(field.cost)
+            case .once: break
+            }
+        }
+        if !selection.sweepOff { costs.normal += Double(sweepReads) }
+        let withRPM = 1 + 1 / Double(max(perGo - 1, 1))
+        return PollPacer.Costs(fast: costs.fast * withRPM, normal: costs.normal * withRPM, slow: costs.slow * withRPM)
+    }
+
+    /// Whether a regeneration would bring back values that are switched off.
+    static func regenOverrides(_ selection: MonitorSelection) -> Bool {
+        fields.contains { !selection.monitors(did: $0.did) && selection.records(did: $0.did, regenActive: true) }
+    }
 
     /// Refusals (7F 22 xx) meaning the DID isn't there (or not without security access). Others (busy,
     /// conditions not correct…) are taken like no reply.
@@ -502,8 +608,9 @@ nonisolated enum DPFRecordPlan {
 
     /// A value kept raw only (the `raw` column).
     private static func raw(_ did: String, _ tier: DPFRecordField.Tier, _ note: String,
-                            multiFrame: Bool = false) -> DPFRecordField {
-        DPFRecordField(did: did, tier: tier, columns: [], note: note, multiFrame: multiFrame, decode: { _ in [] })
+                            multiFrame: Bool = false, header: String = MazdaDPF.header) -> DPFRecordField {
+        DPFRecordField(did: did, header: header, tier: tier, columns: [], note: note, multiFrame: multiFrame,
+                       decode: { _ in [] })
     }
 
     private static func byte(_ data: [UInt8], _ index: Int) -> Double? {
@@ -655,6 +762,12 @@ final class DPFRecorder: ObservableObject {
     @Published private(set) var checkSamples = 0
     @Published private(set) var checkValues: [String: Double] = [:]
     @Published private(set) var checkNote = ""
+    /// The intervals in use now (PollPacer): they follow what is switched on and how fast the link answers.
+    @Published private(set) var pace: PollPacer.Plan?
+    /// Seconds one read takes at the moment, live data's rounds included (nil: not measured on this drive).
+    @Published private(set) var secondsPerRead: TimeInterval?
+    /// A regeneration is under way and values that are switched off are being recorded for it.
+    @Published private(set) var regenOverride = false
 
     var onLog: ((String) -> Void)?
 
@@ -770,6 +883,10 @@ final class DPFRecorder: ObservableObject {
     private var driveInfoRead = false
     private var lastNormal: Date?
     private var lastSlow: Date?
+    /// The switches (what is read and recorded) and the pace that follows from them.
+    private let switches: MonitorSwitches
+    private var pacer = PollPacer(secondsPerRead: Tuning.recordSecondsPerRead)
+    private var regenActive = false
 
     private static let csvName = "autobot-dpf-samples.csv"
     private static let infoName = "autobot-dpf-info.json"
@@ -803,10 +920,11 @@ final class DPFRecorder: ObservableObject {
         return formatter
     }()
 
-    init(obd: OBDAdapter, regenLog: DPFRegenLog, history: DPFHistoryFinder) {
+    init(obd: OBDAdapter, regenLog: DPFRegenLog, history: DPFHistoryFinder, switches: MonitorSwitches = .shared) {
         self.obd = obd
         self.regenLog = regenLog
         self.history = history
+        self.switches = switches
         let recording = Tuning.recordEnabled && !AppConfig.TestMode.enabled
         health = EngineHealth(persist: recording, regenEntries: regenLog.entries)
         directory = recording ? DPFRecorder.makeDirectory() : nil
@@ -950,11 +1068,18 @@ final class DPFRecorder: ObservableObject {
         driveInfoRead = false
         lastNormal = nil
         lastSlow = nil
+        pacer = PollPacer(secondsPerRead: Tuning.recordSecondsPerRead)
+        secondsPerRead = nil
+        regenActive = false
+        regenOverride = false
         driveSamples = 0
         isRecording = true
         status = "Starting…"
         saveState()
-        onLog?(String(format: "DPF recorder: recording every %.0f s (every %.0f s around a regeneration)",
+        let selection = switches.selection
+        let on = DPFRecordPlan.fields.filter { selection.monitors(did: $0.did) }.count
+        onLog?(String(format: "DPF recorder: recording about every %.0f s (%.0f s around a regeneration), "
+                      + "\(on) of \(DPFRecordPlan.fields.count) values switched on; the pace follows the link",
                       Tuning.recordInterval, Tuning.recordIntervalDuringRegen))
     }
 
@@ -991,10 +1116,13 @@ final class DPFRecorder: ObservableObject {
             let started = Date()
             let checking = checkEnds != nil
             let fast = isFast(at: started)
-            await sample(fast: fast, check: checking, at: started)
+            // A regeneration (its request on, just counted, or carrying on while stopped: the log knows)
+            // brings every value that has to do with it, whatever the switches say.
+            let regen = fast || regenLog.active != nil
+            noteRegeneration(regen)
+            await sample(fast: fast, regen: regen, plan: plan(fast: fast, regen: regen), check: checking, at: started)
             guard !Task.isCancelled else { return }
-            let interval = checkEnds != nil ? Tuning.recordCheckInterval
-                : (fast ? Tuning.recordIntervalDuringRegen : Tuning.recordInterval)
+            let interval = checkEnds != nil ? Tuning.recordCheckInterval : plan(fast: fast, regen: regen).fast
             // In short steps, so that a parked check starts at once.
             let wakeAt = started.addingTimeInterval(interval)
             while !Task.isCancelled, Date() < wakeAt {
@@ -1011,7 +1139,43 @@ final class DPFRecorder: ObservableObject {
         return false
     }
 
-    private func sample(fast: Bool, check requested: Bool, at started: Date) async {
+    /// The intervals for what is switched on now, at the pace the link has shown (PollPacer).
+    private func plan(fast: Bool, regen: Bool) -> PollPacer.Plan {
+        // Not read anyway: refused or silent on this drive, or a standard PID the PCM's bitmap leaves out.
+        let unasked = Set(DPFRecordPlan.fields.filter { field in
+            skipped.contains(field.did) || silentSkipped.contains(field.did)
+                || field.standardPID.map { supports($0) == false } ?? false
+        }.map(\.did))
+        let costs = DPFRecordPlan.costs(switches.selection, regenActive: regen,
+                                        sweepReads: Tuning.recordSweepPerSample + Tuning.recordSweepRecheck,
+                                        perGo: Tuning.recordJobBudget) { !unasked.contains($0.did) }
+        let limits = PollPacer.Limits(
+            fast: fast ? Tuning.recordIntervalDuringRegen : Tuning.recordInterval,
+            normal: Tuning.recordNormalInterval, slow: Tuning.recordSlowInterval,
+            minFast: fast ? Tuning.recordMinIntervalDuringRegen : Tuning.recordMinInterval,
+            maxFast: Tuning.recordMaxInterval, maxStretch: Tuning.recordMaxStretch, share: Tuning.recordLinkShare)
+        let plan = pacer.plan(costs, limits: limits)
+        if plan != pace { pace = plan }
+        return plan
+    }
+
+    /// A regeneration began or ended: says so when it changes what is recorded. The switches stay as they
+    /// are, so nothing has to be put back.
+    private func noteRegeneration(_ regen: Bool) {
+        let overriding = regen && DPFRecordPlan.regenOverrides(switches.selection)
+        if regen != regenActive {
+            regenActive = regen
+            if overriding {
+                onLog?("DPF recorder: regeneration: recording every value that has to do with it, switched off or not")
+            } else if !regen, regenOverride {
+                onLog?("DPF recorder: regeneration over: back to the values switched on")
+            }
+        }
+        if overriding != regenOverride { regenOverride = overriding }
+    }
+
+    private func sample(fast: Bool, regen: Bool, plan: PollPacer.Plan, check requested: Bool,
+                        at started: Date) async {
         guard drive != nil else { return }
         if !driveInfoRead {
             guard await readDriveInfo() else { return }          // live data stopped meanwhile
@@ -1030,22 +1194,35 @@ final class DPFRecorder: ObservableObject {
         }
         // While the PCM is silent (ignition off?), one read per sample to see whether it's back.
         if inGap {
-            guard let probe = await readAll([.did("042D", multiFrame: false, sweep: false)]),
+            guard let probe = await readAll([.did("0380", multiFrame: false, sweep: false)]),
                   Self.anyAnswer(probe.0) else { return }
             inGap = false
             onLog?("DPF recorder: the PCM is answering again")
         }
-        let normal = !check && (lastNormal.map { started.timeIntervalSince($0) >= Tuning.recordNormalInterval - 1 } ?? true)
-        let slow = !check && (lastSlow.map { started.timeIntervalSince($0) >= Tuning.recordSlowInterval - 1 } ?? true)
+        let normal = !check && (lastNormal.map { started.timeIntervalSince($0) >= plan.normal - 1 } ?? true)
+        let slow = !check && (lastSlow.map { started.timeIntervalSince($0) >= plan.slow - 1 } ?? true)
+        // What is switched on (or wanted for the regeneration); 0380 and 0432 are read whatever the switches
+        // say, to notice a regeneration, but only recorded when they are on.
+        let selection = switches.selection
         var reads: [Read] = []
-        for field in DPFRecordPlan.fields where wanted(field, normal: normal, slow: slow, check: check) {
+        var asked: Set<String> = []
+        var recorded: Set<String> = []
+        var readCost = 0
+        for field in DPFRecordPlan.fields
+        where selection.polls(did: field.did, regenActive: regen) && wanted(field, normal: normal, slow: slow, check: check) {
             reads.append(.did(field.did, multiFrame: field.multiFrame, sweep: false))
+            asked.insert(field.did)
+            readCost += field.cost
+            if selection.records(did: field.did, regenActive: regen) { recorded.insert(field.did) }
         }
-        let sweep = normal ? nextSweep(Tuning.recordSweepPerSample) : []
+        let sweep = normal && !selection.sweepOff ? nextSweep(Tuning.recordSweepPerSample) : []
         reads += sweep.map { Read.did($0, multiFrame: false, sweep: true) }
+        readCost += sweep.count
 
         let budget = check ? Tuning.recordCheckJobBudget : Tuning.recordJobBudget
+        let readStarted = ContinuousClock.now
         guard let (chunk, cut) = await readAll(reads, budget: budget) else { return }
+        let readSeconds = (ContinuousClock.now - readStarted).inSeconds
 
         // Nothing at all from the PCM (ignition off, adapter busy): a gap. Nothing counts against the
         // values, and no row is written.
@@ -1059,11 +1236,19 @@ final class DPFRecorder: ObservableObject {
         if normal { lastNormal = started }
         if slow { lastSlow = started }
         if !check {
-            for field in DPFRecordPlan.fields where field.tier == .once { onceDone.insert(field.did) }
+            for field in DPFRecordPlan.fields where field.tier == .once && asked.contains(field.did) {
+                onceDone.insert(field.did)
+            }
+            // How long the link took per read, live data's rounds in between included: the pace follows it.
+            if !cut {
+                pacer.observe(seconds: readSeconds, reads: Double(readCost + chunk.marks.count))
+                secondsPerRead = pacer.secondsPerRead
+            }
         }
 
         // What came back, each with when it came in ("@1.4" = 1.4 s after the sample's time).
         var data: [String: [UInt8]] = [:]
+        var watched: [String: [UInt8]] = [:]         // read to notice a regeneration, switched off: not recorded
         var rawParts: [String] = []
         for mark in chunk.marks {
             let at = Self.offset(mark.time, from: started)
@@ -1074,8 +1259,12 @@ final class DPFRecorder: ObservableObject {
         for item in chunk.replies {
             switch item.reply {
             case .data(let bytes):
-                data[item.did] = bytes
-                rawParts.append(item.did + ":" + bytes.hexString(separator: "") + Self.offset(item.time, from: started))
+                if item.sweep || recorded.contains(item.did) {
+                    data[item.did] = bytes
+                    rawParts.append(item.did + ":" + bytes.hexString(separator: "") + Self.offset(item.time, from: started))
+                } else {
+                    watched[item.did] = bytes
+                }
                 if item.sweep {
                     state.sweepAnswered[item.did] = bytes.hexString()
                     state.sweepSilent[item.did] = nil
@@ -1110,7 +1299,14 @@ final class DPFRecorder: ObservableObject {
             onLog?("DPF recorder: not answered, asked less often or not again this drive: " + newlySkipped.joined(separator: ", "))
         }
         updateSweepSummary()
-        guard !data.isEmpty || chunk.rpm != nil else {
+        // Nothing that is switched on was read (everything off, or only the 30 s / 2 min values on and not
+        // due): no row. The regeneration requests and count are still kept track of.
+        guard !data.isEmpty || (chunk.rpm != nil && !(recorded.isEmpty && sweep.isEmpty)) else {
+            watch(request: watched["0380"]?.first.map { Int($0) },
+                  count: watched["0432"].flatMap { MazdaDPF.regenCount($0) }, drive: driveID, at: started)
+            if recorded.isEmpty, sweep.isEmpty, !watched.isEmpty {
+                status = "Nothing due that is switched on: watching for a regeneration"
+            }
             saveState()
             return
         }
@@ -1123,8 +1319,8 @@ final class DPFRecorder: ObservableObject {
                 if let value, value.isFinite { values[column] = value }
             }
         }
-        let request = data["0380"]?.first.map { Int($0) }
-        let count = values["regen_count"].map { Int($0) }
+        let request = (data["0380"] ?? watched["0380"])?.first.map { Int($0) }
+        let count = values["regen_count"].map { Int($0) } ?? watched["0432"].flatMap { MazdaDPF.regenCount($0) }
         let regenKm = values["regen_km"]
         let pmGen = values["pm_gen"]
         let pmDsd = values["pm_acc_dsd"]
@@ -1195,10 +1391,32 @@ final class DPFRecorder: ObservableObject {
             checkValues = shown
             status = "Parked check: every value back to back"
         } else {
-            status = String(format: fast ? "Recording every %.0f s (regeneration)" : "Recording every %.0f s",
-                            fast ? Tuning.recordIntervalDuringRegen : Tuning.recordInterval)
+            var text = String(format: fast ? "Recording every %.0f s (regeneration)" : "Recording every %.0f s",
+                              self.plan(fast: fast, regen: regen).fast)
+            if regenOverride { text += " · regeneration: values switched off recorded too" }
+            status = text
         }
         saveState()
+    }
+
+    /// A sample without a row (nothing switched on was read): the regeneration requests and count are still
+    /// followed, so a regeneration is noticed, logged and switches everything it needs back on.
+    private func watch(request: Int?, count: Int?, drive driveID: String, at date: Date) {
+        guard request != nil || count != nil else { return }
+        let events = changes(request: request, count: count, regenKm: nil, pmGen: nil, pmDsd: nil, at: date)
+        let previous = state.last
+        if previous?.fuelRate != nil { state.cycleFuelComplete = false }     // the fuel rate isn't recorded any more
+        state.last = Last(time: date, drive: driveID, regenReq: request ?? previous?.regenReq,
+                          count: count ?? previous?.count, regenKm: previous?.regenKm, pmGen: previous?.pmGen,
+                          pmDsd: previous?.pmDsd, fuelRate: nil)
+        guard !events.isEmpty else { return }
+        for text in events {
+            state.events.append(Event(time: date, drive: driveID, sample: state.sampleNumber, text: text))
+        }
+        if state.events.count > Tuning.recordMaxEvents {
+            state.events.removeFirst(state.events.count - Tuning.recordMaxEvents)
+        }
+        onLog?("DPF recorder: " + events.joined(separator: " · ") + " (seen, not recorded: switched off)")
     }
 
     /// Reads everything in short gos between two live-data rounds, each at most `budget` (a single-frame read
@@ -1265,7 +1483,8 @@ final class DPFRecorder: ObservableObject {
                 let rpm = await adapter.readRPM()
                 chunk.marks.append(Mark(time: Date(), rpm: rpm, speed: speed))
             case .did(let did, let multiFrame, let sweep):
-                let reply = await adapter.probeDID(did, from: MazdaDPF.header, complete: multiFrame,
+                let header = sweep ? MazdaDPF.header : DPFRecordPlan.fieldByDID[did]?.header ?? MazdaDPF.header
+                let reply = await adapter.probeDID(did, from: header, complete: multiFrame,
                                                    timeout: sweep ? Tuning.recordSweepTimeout : AppConfig.OBD.replyTimeout)
                 chunk.replies.append(Reply(did: did, sweep: sweep, reply: reply, time: Date()))
             }
@@ -1797,6 +2016,32 @@ final class DPFRecorder: ObservableObject {
         let regenerationLog: [DPFRegenLog.Entry]
         let pcmHistory: PCMHistory
         let engineHealth: EngineHealth.Export
+        /// The switches as they were at the export and the pace the recorder was keeping (since 27 Nov 2026).
+        let monitoring: Monitoring
+
+        struct Monitoring: Encodable {
+            struct Group: Encodable {
+                let id: String
+                let title: String
+                let on: Bool
+                let regenRelated: Bool
+                let dids: [String]
+            }
+            let groups: [Group]
+            let didsSwitchedOff: [String]
+            let sweepOn: Bool
+            let alwaysRead: [String]
+            /// Seconds per read as measured (live data's rounds included); nil: not measured on this drive.
+            let secondsPerRead: Double?
+            let linkShare: Double
+            /// The intervals in use at the export (s), and the ones they start from.
+            let everySample: Double?
+            let normal: Double?
+            let slow: Double?
+            let baseEverySample: Double
+            let baseNormal: Double
+            let baseSlow: Double
+        }
     }
 
     /// Writes the info JSON of an export of `csvFiles` going back to `from` (nil: everything).
@@ -1834,6 +2079,17 @@ final class DPFRecorder: ObservableObject {
             state.drives.filter { drive in drive.end.map { $0 >= from } ?? (drive.start >= from || drive.id == current) }
         } ?? state.drives
         let events = from.map { from in state.events.filter { $0.time >= from } } ?? state.events
+        let selection = switches.selection
+        let monitoring = Info.Monitoring(
+            groups: MonitorGroup.allCases.map { group in
+                Info.Monitoring.Group(id: group.rawValue, title: group.title, on: selection.isOn(group),
+                                      regenRelated: group.regenRelated, dids: MonitorGroup.dids[group] ?? [])
+            },
+            didsSwitchedOff: selection.offDIDs.sorted(), sweepOn: !selection.sweepOff,
+            alwaysRead: MonitorGroup.sentinelDIDs.sorted(), secondsPerRead: secondsPerRead,
+            linkShare: Tuning.recordLinkShare, everySample: pace?.fast, normal: pace?.normal, slow: pace?.slow,
+            baseEverySample: Tuning.recordInterval, baseNormal: Tuning.recordNormalInterval,
+            baseSlow: Tuning.recordSlowInterval)
         let info = Info(car: "Mazda CX-5 2015 (KE) 2.2 SKYACTIV-D, automatic",
                         exportedAt: Date(), timeZone: TimeZone.current.identifier,
                         range: range.title, from: from,
@@ -1842,7 +2098,8 @@ final class DPFRecorder: ObservableObject {
                         notes: Self.exportNotes, columns: columns, fields: fields,
                         supportDIDs: DPFRecordPlan.supportDIDs, idDIDs: DPFRecordPlan.idDIDs,
                         drives: drives, events: events, rateNow: rate, sweep: sweep,
-                        regenerationLog: regenLog.entries, pcmHistory: pcmHistory, engineHealth: health.export)
+                        regenerationLog: regenLog.entries, pcmHistory: pcmHistory, engineHealth: health.export,
+                        monitoring: monitoring)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
@@ -1861,7 +2118,7 @@ final class DPFRecorder: ObservableObject {
         ("unix", "The same, seconds since 1970"),
         ("drive", "Drive (live data from start to stop), named after when it started"),
         ("sample", "Sample number since the data was last cleared"),
-        ("kind", "normal: every 10 s (30 s before 6 Nov 2026), the .normal fields every 30 s and .slow every 2 min (fields[].tier); regen: every 5 s while a 0380 request bit (0 forced, 1 automatic) is on or for 20 min after 0432 went up; check: the parked check, back to back"),
+        ("kind", "normal: about every 10 s (30 s before 6 Nov 2026; since 27 Nov 2026 the pace follows what is switched on, see monitoring), the .normal fields every 30 s and .slow every 2 min (fields[].tier); regen: every 5 s while a 0380 request bit (0 forced, 1 automatic) is on or for 20 min after 0432 went up; check: the parked check, back to back"),
         ("speed_kmh", "Road speed from live data (PID 0D) when the sample started"),
         ("rpm", "Engine speed (mode 01 PID 0C) at the start of the sample's first go; every go's RPM and road speed are in raw (RPM:…@t SPD:…@t)"),
     ]
@@ -1917,6 +2174,17 @@ final class DPFRecorder: ObservableObject {
         gas temperature sensors; PM_ACC from the DPF differential pressure and exhaust gas amount (Mazda manual).
         """,
         "Standard PIDs (F4xx) are only asked when the PCM's supported-PID bitmap (drives[].support) lists them.",
+        """
+        monitoring (since 27 Nov 2026): every group of values and every value has a switch on the DPF screen. \
+        Switched off = not read and not recorded: its columns are empty and it is missing from raw. While a \
+        regeneration is starting or running (kind regen, or the regeneration log has one open) every value of a \
+        regenRelated group is recorded whatever its switches say. 0380 and 0432 are always read, to notice a \
+        regeneration; switched off they are not recorded. The intervals follow what is switched on and how fast the \
+        adapter answers: the recorder uses at most linkShare of the link's time, stretching every interval when the \
+        values need more and sampling more often when they need less, so the time between rows varies (the tiers \
+        in fields[].tier name the intervals they start from). The columns from load_abs_pct on were added then; \
+        1E1C and 1674 are asked from the gearbox (TCM, 7E1), raw only.
+        """,
         """
         engineHealth: the engine health watch (EngineHealth, AppConfig.EngineHealth): every item tied to fuel in the \
         oil with its level (unknown / normal / watch / high), value and normal range; its per-drive figures (warm-up, \

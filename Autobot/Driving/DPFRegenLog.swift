@@ -443,7 +443,14 @@ final class DPFRegenLog: ObservableObject {
 
     private func read(_ wanted: [MazdaDPF.Value]) async {
         var values: [MazdaDPF.Value] = []
-        for value in wanted where !values.contains(value) && !skipped.contains(value) { values.append(value) }
+        // Switched off (MonitorSwitches): not read, unless a regeneration is running; the flag and the count
+        // always are.
+        let selection = MonitorSwitches.shared.selection
+        let regenActive = state.active != nil
+        for value in wanted where !values.contains(value) && !skipped.contains(value)
+            && selection.polls(did: value.did, regenActive: regenActive) {
+            values.append(value)
+        }
         guard !values.isEmpty else { return }
         let toRead = values
         let replies: [MazdaDPF.Value: [UInt8]]? = await obd.runBetweenRounds { adapter in

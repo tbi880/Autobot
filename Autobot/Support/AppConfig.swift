@@ -362,6 +362,20 @@ nonisolated enum AppConfig {
         static let recordFastAfterCountUp: TimeInterval = 1200
         /// The slow values (odometer, outside air, fuel level, oil dilution, community candidates…).
         static let recordSlowInterval: TimeInterval = 120
+        /// The pace follows what is switched on (MonitorSwitches, PollPacer): the recorder may use this part
+        /// of the link's time, the rest is live data's (road speed, selector, turn signals). The intervals
+        /// above are where it starts from; when the values switched on need more they are all stretched,
+        /// every sample to at most `recordMaxInterval` and the 30 s / 2 min values by at most
+        /// `recordMaxStretch`; when they need less, samples come more often, down to `recordMinInterval`
+        /// (`recordMinIntervalDuringRegen` around a regeneration).
+        static let recordLinkShare = 0.6
+        static let recordMinInterval: TimeInterval = 3
+        static let recordMinIntervalDuringRegen: TimeInterval = 2
+        static let recordMaxInterval: TimeInterval = 60
+        static let recordMaxStretch = 4.0
+        /// What one read is taken to cost (seconds, live data's round between two goes included) until the
+        /// recorder has measured it on this drive: 5 Nov 2026, ~70–90 reads took 13–48 s.
+        static let recordSecondsPerRead: TimeInterval = 0.25
         /// The first sample after the engine ECU starts answering (seconds).
         static let recordFirstDelay: TimeInterval = 15
         /// How much is read per go between two live-data rounds, so Power Mode, reverse and the turn signals
