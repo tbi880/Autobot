@@ -729,20 +729,28 @@ included in the export (`engineHealth`). Ranges and thresholds: `AppConfig.Engin
 | Since the oil change | `0519` | under 7,500 km / to 10,000 km | — |
 | Coolant warm-up, thermostat | `F405` | Mazda: opens 80–84 °C, fully 95 °C / under 80 °C after 15 min of driving, or under 78 °C on the move once warm | — |
 | Oil hot enough to boil the fuel off | `F45C` | ≥ 85 °C for 10 min on most drives / 3 drives in a row under 80 °C | — |
-| Temperature sensors after ≥ 6 h off | `F405` `F45C` `F40F` `F446` | coolant ≈ oil, intake ≈ outside, engine not colder than the air / 6 °C off, high 10 (the engine may still be warmer than the air) | — |
+| Temperature sensors after ≥ 6 h off | `F405` `F45C` `F40F` `F446` | coolant ≈ oil, intake ≈ outside / 6 °C off, high 10 (engine vs air not judged: the block lags the air, and the air sensors warm up in the sun) | — |
 | Rail pressure follows the command | `F46D` | Mazda: ~40 MPa idle, ~80 MPa at 4,000 rpm; average gap ≤ 3 MPa / high from 6 | — |
-| Injector corrections at a warm idle | `098A`–`098D` (median of the last 10 warm idles) | Mazda reference about ±0.3 mm³/stroke / ±0.8, high ±1.5 | — |
+| Injector corrections at a warm idle | `098A`–`098D` (median of the last 10 warm idles away from a regeneration) | Mazda reference about ±0.3 mm³/stroke / ±0.8, high ±1.5 | — |
 | Injector learning drift | `0436`–`0439` | change since the first reading under 40 µs / high from 80 | — |
 | Warm idle vs target | RPM, `0308` | Mazda: 800 rpm within 50 rpm / 30 % of samples off, high 50 % | — |
 | Distance between regenerations | regeneration log | 250 km or more / under 250, high under 150 | — |
 | Interrupted regenerations | regeneration log | 0–1 of the last 10 / 2, high 4 | — |
 | PM_GEN growth | recorder | up to 2.5 g/L per 100 km / high above 3.5 | — |
 | Soot left right after a regeneration | lowest `044B` in the 5 min after the count `0432` goes up (from the recorder's samples) | Mazda approx. 0 (P243C), ~0.1 typical / 0.3, high 0.5 g/L (ash, clogged DPF) | — |
+| DPF back pressure when clean | `F47A` ÷ `0430` in cruising (flow 2.5–5), median over the first 20 km after each regeneration | no Mazda figure; this car 1.0–1.05 after the clean (22 Nov 2026), 1.1–2.0 (about 1.6) before / 1.3× the lowest seen, high 1.6× (ash) | — |
 | Pressure-based soot vs the model | `044B` / `042D` (PM_GEN ≥ 1 g/L) | up to 1.3× / high from 2× | Mazda's P243C check: 2× or more at 3,000 rpm |
 
 `044B` (PM_ACC_DSD) behaves like the pressure-based estimate: it rises with exhaust flow and, in the burn
 of 7 Nov 2026, stopped at ~0.9 g/L while `042C` (PM_ACC) fell smoothly to 0.2 and PM_GEN to 0. Injector
-corrections are only kept at warm idles without a regeneration (they swung to ±1 mm³ during that burn).
+corrections are only kept at warm idles away from a regeneration: not during one (they swung to ±1 mm³ in
+that burn), not while PM_GEN or PM_ACC is 5 g/L or more, and not in the half hour after a request (5–24 Nov
+2026: injector 3 read −1.1 to −1.8 mm³ there, −0.2 as the median away from them).
+
+The DPF back pressure is the differential pressure over the exhaust flow, so speed drops out. In the first
+20 km after a regeneration the soot is burnt and it shows the filter itself plus its ash; ash doesn't burn,
+so this clean level creeping up over months is the early sign of a DPF needing a clean. While the soot builds
+up it climbs towards about 4, where this car regenerates.
 After a regeneration that didn't complete (PM_GEN burnt down, `0434` not reset) the recorder's PM_GEN rate
 counts from where PM_GEN was lowest. A cold start needs the first coolant reading at 40 °C or less (the car
 may have been driven without Autobot in between).

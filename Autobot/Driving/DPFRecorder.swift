@@ -1144,6 +1144,7 @@ final class DPFRecorder: ObservableObject {
                        drive: driveID,
                        pmGenPer100Km: (newRate.sinceKm ?? 0) >= Tuning.pmGenVerdictMinKm ? newRate.sinceRegen : nil,
                        regenEntries: regenLog.entries)
+        if let odometer = values["odometer_km"] { regenLog.noteOdometer(odometer, at: started) }
 
         // The row.
         var cells: [String] = [

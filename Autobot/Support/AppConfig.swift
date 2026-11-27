@@ -460,8 +460,8 @@ nonisolated enum AppConfig {
         static let coldDrivesWatch = 3
         static let coldDrivesHigh = 6
         /// After this long off: coolant and oil within coldStartSpreadWatch of each other, intake and outside
-        /// air too, and the engine not colder than the air by that much (it may well be warmer: after 10 h on
-        /// 6 Nov 2026 coolant / oil read 28 / 25 °C with the air at 19 °C, 47 s after the start).
+        /// air too. Engine against air isn't judged: warmer after a night (6 Nov 2026: coolant / oil 28 / 25 °C,
+        /// air 19 °C after 10 h), colder on a sunny morning (11 Nov 2026: 30 / 25 °C, air 32 °C after 16 h).
         static let coldStartOffHours = 6.0
         /// …and the first coolant reading at most this (a drive without Autobot in between leaves it warm).
         static let coldStartMaxCoolant = 40.0
@@ -484,6 +484,11 @@ nonisolated enum AppConfig {
         static let idleMaxRPM = 900.0
         /// Warm-idle readings of each injector correction kept (the item shows their median).
         static let injectorIdleReadings = 10
+        /// Injector corrections aren't kept close to a regeneration: PM_GEN or PM_ACC at this or more (the
+        /// PCM about to start one), or within injectorAfterRegen of its request bit (a burn paused at the
+        /// lights, and its tail). 5–24 Nov 2026: injector 3 read −1.1 to −1.8 mm³ there, −0.2 (median) away.
+        static let injectorNearRegenSoot = 5.0
+        static let injectorAfterRegen: TimeInterval = 30 * 60
         static let idleOffShareWatch = 0.3
         static let idleOffShareHigh = 0.5
         // Regeneration. Owners report 250–400 km between regenerations in mixed driving.
@@ -517,6 +522,23 @@ nonisolated enum AppConfig {
         static let pressureVsModelMinGen = 1.0
         static let pressureVsModelWatch = 1.3
         static let pressureVsModelHigh = 2.0
+        /// The DPF's own resistance: its differential pressure (F47A, kPa) over the PCM's exhaust flow (0430),
+        /// in steady cruising (flow in backPressureFlow, about 80–110 km/h), over the first backPressureCleanKm
+        /// after a regeneration, when the soot is burnt: what's left is the filter and the ash in it. The
+        /// median of those readings is that regeneration's clean level. Mazda gives no figure; this car:
+        /// 1.1–2.0 (about 1.6 typical, 2.8 after an incomplete burn) before the DPF was cleaned (22 Nov 2026),
+        /// 1.0–1.05 after; a regeneration came at about 4.
+        /// Judged as the median of the last backPressureRecentLevels against the lowest seen (the clean
+        /// filter): ash builds up over tens of thousands of km and doesn't burn.
+        static let backPressureFlow: ClosedRange<Double> = 2.5...5
+        static let backPressureCleanKm = 20.0
+        static let backPressureMinSamples = 8
+        static let backPressureKept = 10
+        static let backPressureRecentLevels = 3
+        static let backPressureRiseWatch = 1.3
+        static let backPressureRiseHigh = 1.6
+        /// Cruise readings behind the "now" figure.
+        static let backPressureNowSamples = 20
         // Drives.
         static let drivesKept = 10
         static let movingSpeed = 5.0
@@ -785,8 +807,8 @@ nonisolated enum AppConfig {
     /// Home, on a weekday in these hours, the destination question is skipped and navigation to the
     /// place marked Work starts through the Directions shortcut below.
     enum Commute {
-        /// Local hours when it applies: 7:00 to 9:59.
-        static let hours = 7..<10
+        /// Local hours when it applies: 7:00 to 11:59.
+        static let hours = 7..<12
         /// Days it applies (Calendar weekday: 1 = Sunday, 2 = Monday … 7 = Saturday): Monday to Friday.
         static let weekdays: Set<Int> = [2, 3, 4, 5, 6]
         /// Counts as "at Home" within this many metres of Home's address.

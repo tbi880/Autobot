@@ -139,9 +139,16 @@ final class DPFRegenLog: ObservableObject {
         var sootDesired: Double?
         var sootGenerated: Double?
         var odometer: Double?
+        /// When `odometer` was read: older than AppConfig.DPF.logApproximateAfter, it isn't used for a
+        /// regeneration's start or end (it stayed from an earlier drive).
+        var odometerSeen: Date?
         var oilDilution: Double?
         var seen: Date?
         var active: Active?
+        /// The last regeneration was interrupted: the count it would have raised and the distance it started
+        /// at. The PCM carries on with it next drive; that one's distance is this one, not where it resumed.
+        var interruptedCount: Int?
+        var interruptedDistance: Double?
     }
 
     private let obd: OBDAdapter
@@ -255,11 +262,14 @@ final class DPFRegenLog: ObservableObject {
         // Started?
         if r.regenerating == true, s.active == nil {
             let watched = previousSeen.map { date.timeIntervalSince($0) < Tuning.logApproximateAfter } ?? false
-            s.active = Active(start: date, countAtStart: r.regenCount ?? s.count,
-                              distanceBefore: s.peakDistance ?? s.distance ?? r.regenDistance,
+            let countNow = r.regenCount ?? s.count
+            let resumed = countNow != nil && s.interruptedCount == countNow ? s.interruptedDistance : nil
+            s.active = Active(start: date, countAtStart: countNow,
+                              distanceBefore: resumed ?? s.peakDistance ?? s.distance ?? r.regenDistance,
                               sootBefore: r.soot ?? s.soot, sootDesiredBefore: r.sootDesired ?? s.sootDesired,
                               sootGeneratedBefore: r.sootGenerated ?? s.sootGenerated,
-                              odometerStart: r.odometer ?? s.odometer, oilDilutionBefore: r.oilDilution ?? s.oilDilution,
+                              odometerStart: r.odometer ?? Self.freshOdometer(s, at: date),
+                              oilDilutionBefore: r.oilDilution ?? s.oilDilution,
                               watched: watched,
                               foundMoving: watched ? nil : ((speed ?? 0) >= Tuning.movingSpeed))
             var line = "DPF log: regeneration started"
@@ -317,7 +327,10 @@ final class DPFRegenLog: ObservableObject {
         if let soot = r.soot { s.soot = soot }
         if let soot = r.sootDesired { s.sootDesired = soot }
         if let soot = r.sootGenerated { s.sootGenerated = soot }
-        if let odometer = r.odometer { s.odometer = odometer }
+        if let odometer = r.odometer {
+            s.odometer = odometer
+            s.odometerSeen = date
+        }
         if let oil = r.oilDilution { s.oilDilution = oil }
         s.seen = date
         state = s
@@ -352,12 +365,14 @@ final class DPFRegenLog: ObservableObject {
         }
         entry.sootDesiredAfter = r.sootDesired
         entry.sootAfter = r.soot
-        entry.odometerEnd = r.odometer ?? s.odometer
+        entry.odometerEnd = r.odometer ?? Self.freshOdometer(s, at: date)
         entry.oilDilutionAfter = r.oilDilution
         add(entry)
         onLog?("DPF log: regeneration completed · " + Self.describe(entry))
         s.active = nil
         s.peakDistance = nil
+        s.interruptedCount = nil
+        s.interruptedDistance = nil
     }
 
     private func record(interrupted a: Active, at end: Date, reason: String, in s: inout State) {
@@ -369,11 +384,34 @@ final class DPFRegenLog: ObservableObject {
         fill(&entry, from: a)
         entry.sootDesiredAfter = s.sootDesired
         entry.sootAfter = s.soot
-        entry.odometerEnd = s.odometer
+        entry.odometerEnd = Self.freshOdometer(s, at: end)
         entry.oilDilutionAfter = s.oilDilution
         add(entry)
         onLog?("DPF log: regeneration interrupted (\(reason)) · " + Self.describe(entry))
         s.active = nil
+        s.interruptedCount = a.countAtStart
+        s.interruptedDistance = a.distanceBefore
+    }
+
+    /// The last odometer read, if it was read around `date` (not left from an earlier drive).
+    private static func freshOdometer(_ s: State, at date: Date) -> Double? {
+        guard let seen = s.odometerSeen, abs(date.timeIntervalSince(seen)) <= Tuning.logApproximateAfter else {
+            return nil
+        }
+        return s.odometer
+    }
+
+    /// The odometer as read elsewhere (the DPF recorder reads DD01 every couple of minutes), so a
+    /// regeneration's start and end get one even while the log itself doesn't read it.
+    func noteOdometer(_ km: Double, at date: Date = Date()) {
+        state.odometer = km
+        state.odometerSeen = date
+        if var a = state.active, a.odometerStart == nil {
+            a.odometerStart = km
+            state.active = a
+            active = a
+        }
+        save()
     }
 
     private func fill(_ entry: inout Entry, from a: Active) {
@@ -400,7 +438,9 @@ final class DPFRegenLog: ObservableObject {
         guard ready else {
             announcedThisOne = false          // engine off: a regeneration carrying on next drive is said again
             if var a = state.active, a.engineOffAt == nil {
-                a.engineOffAt = Date()        // finished or not: the next count read tells
+                // Finished or not: the next count read tells. The last reading, not now: when the phone stops
+                // reading mid-drive (the app suspended), live data is only noticed gone later.
+                a.engineOffAt = min(state.seen ?? Date(), Date())
                 state.active = a
                 active = a
                 save()

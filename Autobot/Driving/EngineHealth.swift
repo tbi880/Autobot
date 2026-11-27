@@ -113,6 +113,15 @@ final class EngineHealth: ObservableObject {
         var afterRegenUntil: Date?
         var afterRegenMin: Double?
         var sootAfter: [SootAfter]?
+        /// DPF back pressure (differential pressure ÷ exhaust flow): the window over the first km after a
+        /// regeneration (the count it's for, whether the distance has been seen reset, its readings), the
+        /// clean level of each regeneration, the lowest one seen, and the latest cruise readings.
+        var cleanWindowCount: Int?
+        var cleanWindowStarted: Bool?
+        var cleanWindowReadings: [Double]?
+        var cleanLevels: [CleanLevel]?
+        var cleanLowest: CleanLevel?
+        var backPressureNow: [Double]?
         /// The first reading of every injector learning value (FI_LRN, µs), for the drift.
         var learningFirst: [String: Double] = [:]
         var learningFirstAt: Date?
@@ -127,6 +136,14 @@ final class EngineHealth: ObservableObject {
         var pmAccDsd: Double
     }
 
+    /// The DPF's back pressure over the first km after a regeneration (median of the readings).
+    struct CleanLevel: Codable, Equatable {
+        var count: Int
+        var date: Date
+        var ratio: Double
+        var readings: Int
+    }
+
     /// For the export.
     struct Export: Encodable {
         let items: [Item]
@@ -139,6 +156,8 @@ final class EngineHealth: ObservableObject {
         let injectorCorrectionsAtIdle: [String: [Double]]
         let injectorLearningFirst: [String: Double]
         let sootAfterRegenerations: [SootAfter]
+        let dpfBackPressureClean: [CleanLevel]
+        let dpfBackPressureLowest: CleanLevel?
         let latest: [String: Double]
     }
 
@@ -157,6 +176,7 @@ final class EngineHealth: ObservableObject {
                oilPressureRecent: state.pressureRecent, oilPressureHighRPMRecent: state.pressureHighRecent ?? [],
                injectorCorrectionsAtIdle: state.injectorIdle ?? [:], injectorLearningFirst: state.learningFirst,
                sootAfterRegenerations: state.sootAfter ?? [],
+               dpfBackPressureClean: state.cleanLevels ?? [], dpfBackPressureLowest: state.cleanLowest,
                latest: state.latest)
     }
 
@@ -167,6 +187,8 @@ final class EngineHealth: ObservableObject {
     /// The previous sample's PM_GEN: falling means a regeneration is burning (also while its request bit is
     /// off, standing at the lights).
     private var lastPmGen: Double?
+    /// When the regeneration request bit was last seen set.
+    private var lastRegenRequest: Date?
 
     private static let stateKey = "EngineHealth.state"
 
@@ -175,13 +197,14 @@ final class EngineHealth: ObservableObject {
         "oil_dilution_g", "oil_dilution_events", "oil_change_km", "oil_pressure_kpa", "coolant_c", "oil_c",
         "intake_air_c", "ambient_c", "rail_cmd_kpa", "rail_act_kpa", "inj1_cmp_mm3", "inj2_cmp_mm3",
         "inj3_cmp_mm3", "inj4_cmp_mm3", "rpm_desired", "regen_req", "boost_target_kpa", "boost_kpa", "load_pct",
-        "pm_gen", "pm_acc", "pm_acc_dsd",
+        "pm_gen", "pm_acc", "pm_acc_dsd", "regen_count", "regen_km",
     ]
 
     /// The oil pressure reading the baseline is of (see State.pressureProbe), and the injector readings kept
-    /// (State.injectorProbe: since 7 Nov 2026 not while regenerating — they swing to ±1 mm³ then).
+    /// (State.injectorProbe: since 7 Nov 2026 not while regenerating — they swing to ±1 mm³ then; since
+    /// 27 Nov 2026 not close to one either).
     private static let pressureProbe = "hot idle"
-    private static let injectorProbe = "warm idle, not regenerating"
+    private static let injectorProbe = "warm idle, away from regenerations"
 
     init(persist: Bool, regenEntries: [DPFRegenLog.Entry]) {
         self.persist = persist
@@ -236,10 +259,15 @@ final class EngineHealth: ObservableObject {
             }
         }
         noteRegeneration(values, at: date)
-        let burning = (values["regen_req"] ?? 0) != 0
+        let requested = (values["regen_req"] ?? 0) != 0
+        if requested { lastRegenRequest = date }
+        let burning = requested
             || (values["pm_gen"].flatMap { now in lastPmGen.map { now < $0 } } ?? false)
         if let pmGen = values["pm_gen"] { lastPmGen = pmGen }
-        if !burning { noteInjectorCorrections(values, rpmAt: rpmAt, speedAt: speedAt, speed: speed) }
+        noteBackPressure(values, burning: burning, at: date)
+        if !burning && !nearRegeneration(at: date) {
+            noteInjectorCorrections(values, rpmAt: rpmAt, speedAt: speedAt, speed: speed)
+        }
         publish()
         save()
     }
@@ -261,6 +289,10 @@ final class EngineHealth: ObservableObject {
         if let count = values["regen_count"].map({ Int($0) }) {
             if let last = state.lastRegenCount, count > last {
                 closeAfterRegen()
+                closeCleanWindow(at: date)
+                state.cleanWindowCount = count
+                state.cleanWindowStarted = false
+                state.cleanWindowReadings = []
                 state.afterRegenCount = count
                 state.afterRegenUntil = date.addingTimeInterval(Tuning.sootAfterWindow)
                 state.afterRegenMin = nil
@@ -283,6 +315,57 @@ final class EngineHealth: ObservableObject {
         state.afterRegenCount = nil
         state.afterRegenUntil = nil
         state.afterRegenMin = nil
+    }
+
+    /// The PCM about to start a regeneration (PM_GEN or PM_ACC high), or one requested lately (paused at the
+    /// lights, or just ended): the injector corrections swing then.
+    private func nearRegeneration(at date: Date) -> Bool {
+        let soot = max(state.latest["pm_gen"] ?? 0, state.latest["pm_acc"] ?? 0)
+        if soot >= Tuning.injectorNearRegenSoot { return true }
+        if let lastRegenRequest, date.timeIntervalSince(lastRegenRequest) < Tuning.injectorAfterRegen { return true }
+        return false
+    }
+
+    /// Differential pressure over exhaust flow in steady cruising: the latest readings, and those in the first
+    /// Tuning.backPressureCleanKm after a regeneration (the window opens when the count goes up, starts once
+    /// the distance reads reset, and closes past that distance).
+    private func noteBackPressure(_ values: [String: Double], burning: Bool, at date: Date) {
+        if state.cleanWindowCount != nil, let km = values["regen_km"] ?? state.latest["regen_km"] {
+            if km <= Tuning.backPressureCleanKm {
+                state.cleanWindowStarted = true
+            } else if state.cleanWindowStarted == true {
+                closeCleanWindow(at: date)
+            }
+        }
+        guard !burning, let pressure = values["dpf_dp_kpa"], let flow = values["exh_flow"],
+              Tuning.backPressureFlow.contains(flow) else { return }
+        let ratio = pressure / flow
+        var now = state.backPressureNow ?? []
+        now.append(ratio)
+        if now.count > Tuning.backPressureNowSamples { now.removeFirst(now.count - Tuning.backPressureNowSamples) }
+        state.backPressureNow = now
+        if state.cleanWindowCount != nil, state.cleanWindowStarted == true {
+            state.cleanWindowReadings = (state.cleanWindowReadings ?? []) + [ratio]
+        }
+    }
+
+    /// The window's median becomes that regeneration's clean level (with enough readings).
+    private func closeCleanWindow(at date: Date) {
+        defer {
+            state.cleanWindowCount = nil
+            state.cleanWindowStarted = nil
+            state.cleanWindowReadings = nil
+        }
+        guard let count = state.cleanWindowCount, let readings = state.cleanWindowReadings,
+              readings.count >= Tuning.backPressureMinSamples, let ratio = Self.median(readings) else { return }
+        let level = CleanLevel(count: count, date: date, ratio: ratio, readings: readings.count)
+        var levels = state.cleanLevels ?? []
+        levels.append(level)
+        if levels.count > Tuning.backPressureKept { levels.removeFirst(levels.count - Tuning.backPressureKept) }
+        state.cleanLevels = levels
+        if state.cleanLowest.map({ ratio < $0.ratio }) ?? true { state.cleanLowest = level }
+        onLog?(String(format: "Engine health: DPF back pressure after regeneration %d: %.2f kPa per unit of "
+                      + "exhaust flow (%d readings)", count, ratio, readings.count))
     }
 
     /// INJx_CMP only means something around idle (it reads 0 while driving; at idle, in gear or not, it
@@ -395,7 +478,7 @@ final class EngineHealth: ObservableObject {
         [oilDilution(), oilEvents(), oilPressure(), oilChange(),
          warmUp(), oilHeat(), coldStart(),
          rail(), injectorCorrections(), injectorLearning(), idle(),
-         regenInterval(), regenInterrupted(), pmGenRate(), sootAfterRegen(), pressureVsModel(),
+         regenInterval(), regenInterrupted(), pmGenRate(), sootAfterRegen(), backPressure(), pressureVsModel(),
          boost()]
     }
 
@@ -571,16 +654,14 @@ final class EngineHealth: ObservableObject {
         var value = readings.map { $0.0 + " " + String(format: "%.0f", $0.1) }.joined(separator: ", ")
         if !readings.isEmpty { value += " °C" }
         if let hours = drive.offHours { value += String(format: " after %.0f h off", hours) }
-        // The two engine sensors should agree, and so should the two air sensors. The engine may still be
-        // warmer than the air after a night (a big block keeps its heat), but never colder: a coolant or oil
-        // reading below the air is a sensor reading low, the harmful way round.
+        // The two engine sensors should agree, and so should the two air sensors. The engine against the air
+        // isn't compared: a big block lags the air both ways, warmer after a cool night, colder on a warm
+        // morning, and the air sensors warm up in the sun (11 Nov 2026: coolant / oil 30 / 25 °C, intake /
+        // outside 32 °C after 16 h parked, outside 28 °C once moving).
         var level = Level.unknown
         var gaps: [Double] = []
         if let coolant = drive.firstCoolant, let oil = drive.firstOil { gaps.append(abs(coolant - oil)) }
         if let intake = drive.firstIntake, let outside = drive.firstAmbient { gaps.append(abs(intake - outside)) }
-        let air = [drive.firstIntake, drive.firstAmbient].compactMap { $0 }.min()
-        let engine = [drive.firstCoolant, drive.firstOil].compactMap { $0 }.min()
-        if let air, let engine { gaps.append(max(0, air - engine)) }
         if let worst = gaps.max() {
             level = Self.level(worst, watch: Tuning.coldStartSpreadWatch, high: Tuning.coldStartSpreadHigh)
         }
@@ -590,12 +671,12 @@ final class EngineHealth: ObservableObject {
 
     private var coldStartRange: String {
         String(format: "guide: after %.0f h off, coolant and oil within %.0f °C of each other, intake and outside "
-               + "too, and the engine not colder than the air", Tuning.coldStartOffHours, Tuning.coldStartSpreadWatch)
+               + "too", Tuning.coldStartOffHours, Tuning.coldStartSpreadWatch)
     }
     private let coldStartAbout = "Coolant, oil, intake air and outside air at the first sample after the car stood "
-        + "for hours. The engine can still be warmer than the air after a night; a coolant sensor reading low, "
-        + "though, makes the PCM treat the engine as cold: more fuel, longer glow and post injection, failed "
-        + "regenerations."
+        + "for hours. The engine and the air needn't match (the block lags behind the air, and the air sensors "
+        + "warm up in the sun), but coolant and oil should: a coolant sensor reading low makes the PCM treat the "
+        + "engine as cold: more fuel, longer glow and post injection, failed regenerations."
     private let coldStartAdvice = "Compare again on the next cold start; if one sensor keeps reading apart from "
         + "the others, test that sensor (Mazda's ECT sensor inspection)."
 
@@ -631,8 +712,9 @@ final class EngineHealth: ObservableObject {
                     level: Self.level(known.map(abs).max(), watch: Tuning.injectorCorrectionWatch,
                                       high: Tuning.injectorCorrectionHigh),
                     about: "INJx_CMP, injectors 1–4: how much the PCM trims each injector's quantity to even out the "
-                    + "idle (it reads 0 while driving, and swings to ±1 mm³ during a regeneration, so only warm "
-                    + "idles without one count). Negative = the injector "
+                    + "idle (it reads 0 while driving, and swings to ±1 mm³ around a regeneration, so only warm "
+                    + "idles away from one count: not while PM_GEN or PM_ACC is near the start, nor in the half "
+                    + "hour after a request). Negative = the injector "
                     + "gives more than it should. One drifting away from the others is a worn or dripping injector "
                     + "— a dripping one puts fuel in the oil without any regeneration, and makes soot.",
                     advice: "Have the injectors checked (leak-off test, balance); compare with the injector "
@@ -781,6 +863,43 @@ final class EngineHealth: ObservableObject {
                     advice: "Have a forced regeneration done (FORScan / dealer) and read PM_ACC_DSD after it; if it "
                     + "stays up, the DPF needs cleaning or replacing (ash after many km), or check the DPF pressure "
                     + "sensor and its hoses.")
+    }
+
+    /// The DPF's own resistance right after each regeneration, against the lowest seen: ash builds up over
+    /// tens of thousands of km and doesn't burn; it makes the filter fill, and regenerate, sooner.
+    private func backPressure() -> Item {
+        let levels = state.cleanLevels ?? []
+        let recent = Self.median(levels.suffix(Tuning.backPressureRecentLevels).map(\.ratio))
+        var rise: Double?
+        if let recent, let lowest = state.cleanLowest, levels.count >= 2, lowest.ratio > 0 { rise = recent / lowest.ratio }
+        var parts: [String] = []
+        if !levels.isEmpty {
+            parts.append(levels.suffix(3).reversed().map { String(format: "%.2f", $0.ratio) }
+                .joined(separator: " / ") + " after the last regenerations (latest first)")
+        }
+        if let lowest = state.cleanLowest, levels.count >= 2 {
+            parts.append(String(format: "lowest %.2f", lowest.ratio) + " (" +
+                         lowest.date.formatted(date: .abbreviated, time: .omitted) + ")")
+        }
+        if let rise { parts.append(String(format: "%.2f× the lowest", rise)) }
+        if let now = Self.median(state.backPressureNow ?? []) { parts.append(String(format: "now %.2f", now)) }
+        return Item(id: "dpf_back_pressure", group: Self.regenGroup,
+                    title: "DPF back pressure when clean (F47A ÷ 0430)",
+                    value: parts.isEmpty ? "--" : parts.joined(separator: " · "),
+                    range: String(format: "no Mazda figure · this car 1.0–1.05 after the DPF clean (22 Nov 2026), "
+                                  + "about 1.6 before, regeneration at about 4 · guide: watch at %.1f×, high at "
+                                  + "%.1f× the lowest", Tuning.backPressureRiseWatch, Tuning.backPressureRiseHigh),
+                    level: levels.isEmpty ? .unknown
+                        : Self.level(rise ?? 1, watch: Tuning.backPressureRiseWatch, high: Tuning.backPressureRiseHigh),
+                    about: "The DPF's differential pressure (kPa) over the PCM's exhaust flow, in steady cruising "
+                    + "(about 80–110 km/h), over the first 20 km after each regeneration: the soot is burnt then, "
+                    + "so what's left is the filter itself and the ash in it. Dividing by the flow takes the speed "
+                    + "out (1 kPa at idle, 20 at full load). Ash doesn't burn: over tens of thousands of km it "
+                    + "creeps this up, and the filter fills and regenerates sooner. \"now\" is the latest cruise "
+                    + "readings: it climbs with the soot towards about 4, where a regeneration comes.",
+                    advice: "Creeping up over months: ash, plan a DPF clean before the regenerations get short. A "
+                    + "sudden step up after a normal regeneration: check the DPF pressure sensor and its hoses "
+                    + "(water, a crack, a loose end) first.")
     }
 
     /// The pressure-based soot estimate against the model's. Regeneration starts when the PCM's soot
