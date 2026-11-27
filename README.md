@@ -224,7 +224,9 @@ detection together. The progress ring then waits at three checkpoints (`AppConfi
 | 90 % | car audio (CarPlay) |
 
 Only with all three connected does it run to 100 % and open the dashboard. **Saved places** under
-the title opens the list straight from the start screen, without ENGINE START. The chips under the ring
+the title opens the list straight from the start screen, without ENGINE START, and **Export data** next
+to it shares the DPF recorder's files the same way (the same ranges and files as the DPF screen's export;
+no adapter needed). The chips under the ring
 show each connection, and the line below them what the one being waited for is doing. In test mode
 (`AppConfig.TestMode`) all three are simulated as connected.
 
@@ -731,7 +733,7 @@ sample — `time` (local, ISO 8601), `unix`, `drive`, `sample`, `kind` (`normal`
 sample as `DID:HEX@t`, the data after `62 DID` and `t` the seconds after the sample's time, the sweep's
 too, plus `RPM:x@t SPD:x@t` at the start of every go). A new file is started past 20 MB, or when a new
 version has other columns (the old file is kept and exported). `state.json` keeps the drives, events, the
-current cycle and the sweep between launches. **Export data (send to me)** on the DPF screen shares the
+current cycle and the sweep between launches. **Export data (send to me)** on the DPF screen (and **Export data** on the start screen) shares the
 CSV file(s), `autobot-dpf-info.json` (column dictionary with DIDs and formulas; drives with their
 supported PIDs, IDs and unanswered values; events; what the sweep found; the regeneration log; the PCM
 history finder) and the history finder's raw scan if there is one. It first asks how far back to go
@@ -870,6 +872,7 @@ Autobot/
 │                DPFMonitor (DPF back pressure, soot, regeneration while its screen is open)
 │                DPFRegenLog (records each regeneration), DPFHistoryFinder (the PCM's last-10 history),
 │                DPFRecorder (10 s samples of the soot model and its inputs, PM_GEN growth, export),
+│                DPFExporter (the export's files → share sheet: DPF screen and start screen),
 │                MonitorSwitches (what is monitored: a switch per group and value; PollPacer: the pace),
 │                EngineHealth (fuel in the oil: ranges and early warnings)
 ├── Climate/     ClimateTempFlash (A/C set colder / warmer → blue / red burst flash)

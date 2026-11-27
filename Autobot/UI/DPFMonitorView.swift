@@ -58,15 +58,21 @@ struct DPFMonitorView: View {
     @State private var showingFinder = false
     @State private var showingSwitches = false
     @State private var confirmingClear = false
-    /// The export being prepared, what's ready for the share sheet, and why there was nothing to share.
-    @State private var exporting: DPFExportRange?
-    @State private var exported: ExportedFiles?
-    @State private var exportNote = ""
+    /// This screen's export (the start screen has its own): what's being prepared, the share sheet's files.
+    @StateObject private var exporter: DPFExporter
     @State private var window: TimeInterval = Tuning.chartWindows.first ?? 60
     @State private var selected: Date?
 
     private let pressureColor = Color.indigo
     private let rpmColor = Color.teal
+
+    init(monitor: DPFMonitor, log: DPFRegenLog, finder: DPFHistoryFinder, recorder: DPFRecorder) {
+        self.monitor = monitor
+        self.log = log
+        self.finder = finder
+        self.recorder = recorder
+        _exporter = StateObject(wrappedValue: DPFExporter(recorder: recorder, finder: finder))
+    }
 
     var body: some View {
         let chart = ChartWindow(points: monitor.points, window: window, selected: selected)
@@ -607,16 +613,16 @@ struct DPFMonitorView: View {
             }
             Menu {
                 ForEach(DPFExportRange.allCases) { range in
-                    Button(range.title) { export(range) }
+                    Button(range.title) { exporter.export(range) }
                 }
             } label: {
-                Label(exporting == nil ? "Export data (send to me)" : "Preparing the export…",
+                Label(exporter.exporting == nil ? "Export data (send to me)" : "Preparing the export…",
                       systemImage: "square.and.arrow.up")
             }
             .menuOrder(.fixed)
-            .disabled(exporting != nil)
-            if !exportNote.isEmpty {
-                Text(exportNote)
+            .disabled(exporter.exporting != nil)
+            if !exporter.note.isEmpty {
+                Text(exporter.note)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -629,27 +635,7 @@ struct DPFMonitorView: View {
         .confirmationDialog("Delete all recorded samples?", isPresented: $confirmingClear, titleVisibility: .visible) {
             Button("Delete", role: .destructive) { recorder.clear() }
         }
-        .sheet(item: $exported) { files in
-            ShareSheet(items: files.urls)
-                .presentationDetents([.medium, .large])
-        }
-    }
-
-    /// Has the recorder write its files for `range`, then opens the share sheet with them, plus the history
-    /// finder's raw scan and the OBD link's timing log when there are any.
-    private func export(_ range: DPFExportRange) {
-        guard exporting == nil else { return }
-        exporting = range
-        exportNote = ""
-        Task {
-            let files = await recorder.makeExport(range)
-            exporting = nil
-            if files.isEmpty {
-                exportNote = range == .all ? "Nothing to export." : "Nothing recorded in the \(range.title.lowercased())."
-            } else {
-                exported = ExportedFiles(urls: files + [finder.exportURL, OBDTimingLog.exportURL].compactMap { $0 })
-            }
-        }
+        .exportShareSheet(exporter)
     }
 
     // MARK: Parked check
@@ -941,24 +927,6 @@ struct DPFMonitorView: View {
     private func number(_ value: Double?, _ format: String, _ unit: String = "") -> String {
         value.map { String(format: format, $0) + unit } ?? "--"
     }
-}
-
-/// An export ready to share.
-private struct ExportedFiles: Identifiable {
-    let id = UUID()
-    let urls: [URL]
-}
-
-/// The system share sheet (AirDrop, Save to Files, WeChat, …) for files written when the export is asked for;
-/// ShareLink wants its items up front.
-private struct ShareSheet: UIViewControllerRepresentable {
-    let items: [URL]
-
-    func makeUIViewController(context: Context) -> UIActivityViewController {
-        UIActivityViewController(activityItems: items, applicationActivities: nil)
-    }
-
-    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
 }
 
 /// Finds where the PCM keeps its last 10 regeneration distances (DPFHistoryFinder): scan once (in

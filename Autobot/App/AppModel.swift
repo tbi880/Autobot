@@ -30,6 +30,7 @@
 //   OBDAdapter (PCM 7E0 every 30 s while live data runs, 10 s around a regeneration: PM_GEN / PM_ACC_DSD /
 //     PM_ACC, the regeneration flag / count / distance, what feeds the soot model, a slow DID sweep)
 //     ──▶ DPFRecorder (CSV rows, PM_GEN growth, events) ──▶ DPF screen (PM_GEN card, export)
+//     ──▶ DPFExporter ──▶ share sheet, from the DPF screen or the start screen (no ENGINE START needed)
 //   LampController.isReady ┐
 //   CarPlayMonitor.isConnected ┼──▶ WelcomeAssistant (once per drive, via VoiceCoordinator)
 //   BootSequence finished ─────┘
@@ -69,6 +70,8 @@ final class AppModel: ObservableObject {
     let dpfLog: DPFRegenLog
     let dpfHistory: DPFHistoryFinder
     let dpfRecorder: DPFRecorder
+    /// The start screen's Export data button: the recorded files, without ENGINE START or the adapter.
+    let startExport: DPFExporter
     private let voice: VoiceCoordinator
     private let doorAlert: DoorSafetyAlert
 
@@ -122,6 +125,7 @@ final class AppModel: ObservableObject {
         let dpfRecorder = DPFRecorder(obd: obd, regenLog: dpfLog, history: dpfHistory)
         dpfRecorder.onLog = log
         self.dpfRecorder = dpfRecorder
+        self.startExport = DPFExporter(recorder: dpfRecorder, finder: dpfHistory)
         let reverse = ReverseLight(obd: obd, lighting: lighting)
         reverse.onLog = log
         self.reverse = reverse

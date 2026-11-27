@@ -3,7 +3,8 @@
 // the dashboard. Its first screenful is the connection status, live selector and lamp state, the big
 // microphone button (starts the Welcome) and the DPF monitor / Saved places rows; the finders, the test
 // buttons and the packet log follow below it (scroll).
-// Saved places opens from the start screen too, so the list can be edited without ENGINE START.
+// Saved places opens from the start screen too, so the list can be edited without ENGINE START; so does
+// the recorder's data export (DPFExporter).
 
 import Combine
 import SwiftUI
@@ -12,6 +13,7 @@ struct ContentView: View {
     @StateObject private var app = AppModel()
     @State private var showDashboard = false
     @State private var showingPlaces = false      // from the start screen or the dashboard
+    @State private var showingExport = false      // the start screen's Export data: how far back?
 
     var body: some View {
         ZStack {
@@ -19,8 +21,9 @@ struct ContentView: View {
                 DashboardView(app: app, onShowPlaces: { showingPlaces = true })
                     .transition(.dashboardReveal)
             } else {
-                BootView(boot: app.boot, places: app.places, onIgnite: app.ignite,
-                         onShowPlaces: { showingPlaces = true })
+                BootView(boot: app.boot, places: app.places,
+                         exporter: AppConfig.DPF.enabled ? app.startExport : nil, onIgnite: app.ignite,
+                         onShowPlaces: { showingPlaces = true }, onExport: { showingExport = true })
                     .transition(.bootExit)
                     .zIndex(1)
             }
@@ -28,6 +31,7 @@ struct ContentView: View {
         .sheet(isPresented: $showingPlaces) {
             SavedPlacesView(store: app.places, backup: app.backup)
         }
+        .startScreenExport(app.startExport, isPresented: $showingExport)
         .onReceive(app.boot.$phase) { phase in
             guard phase == .finished, !showDashboard else { return }
             withAnimation(.timingCurve(0.65, 0, 0.25, 1, duration: AppConfig.Boot.dashboardTransition)) {
