@@ -4,7 +4,8 @@
 // shockwaves and sparks while the button folds into a tachometer-style progress ring.
 // The ring then fills as the lamp, the OBD2 adapter and car audio connect: it waits at 30 / 60 / 90 %
 // for each in turn (rules in BootSequence).
-// Under the title, a Saved places button opens the list without starting anything.
+// Under the title, a Saved places button opens the list without starting anything, and an Export data
+// button shares the recorder's files the same way (no adapter needed: they are on the phone).
 //
 // Everything is drawn from the time since the press (TimelineView), so the button → ring morph,
 // the effects and the shake are one continuous animation that stays in sync with the sound.
@@ -14,8 +15,11 @@ import SwiftUI
 struct BootView: View {
     @ObservedObject var boot: BootSequence
     let places: SavedPlacesStore
+    /// nil: no Export data button (the DPF features are off).
+    let exporter: DPFExporter?
     let onIgnite: () -> Void
     let onShowPlaces: () -> Void
+    let onExport: () -> Void
 
     var body: some View {
         // Frozen once the dashboard takes over: the exit transition then only moves one still
@@ -34,7 +38,11 @@ struct BootView: View {
                 .overlay(alignment: .top) {
                     VStack(spacing: 8) {
                         BootHeader()
-                        BootPlacesButton(store: places, action: onShowPlaces)
+                        // Side by side when they fit, so the gauge keeps its room on a small phone
+                        ViewThatFits(in: .horizontal) {
+                            HStack(spacing: 8) { topButtons }
+                            VStack(spacing: 0) { topButtons }
+                        }
                     }
                     .padding(.top, 28)
                 }
@@ -47,6 +55,14 @@ struct BootView: View {
             }
         }
         .statusBarHidden()
+    }
+
+    /// What opens from this screen without ENGINE START.
+    @ViewBuilder private var topButtons: some View {
+        BootPlacesButton(store: places, action: onShowPlaces)
+        if let exporter {
+            BootExportButton(exporter: exporter, action: onExport)
+        }
     }
 }
 
@@ -553,6 +569,40 @@ private struct BootPlacesButton: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Saved places")
+    }
+}
+
+/// Export data from the start screen: the same export as the DPF screen's recorder card, without
+/// ENGINE START. ContentView asks how far back and shows the share sheet.
+private struct BootExportButton: View {
+    @ObservedObject var exporter: DPFExporter
+    let action: () -> Void
+
+    var body: some View {
+        let preparing = exporter.exporting != nil
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: "square.and.arrow.up")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Palette.amber)
+                Text(preparing ? "PREPARING…" : "EXPORT DATA")
+                    .font(.system(size: 11, weight: .heavy))
+                    .tracking(1.5)
+                    .foregroundStyle(Color.white.opacity(0.85))
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(Color.white.opacity(0.4))
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(Capsule().fill(Color.white.opacity(0.06)))
+            .overlay(Capsule().strokeBorder(Color.white.opacity(0.14), lineWidth: 1))
+            .padding(.vertical, 6)                 // a 44 pt touch target
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(preparing)
+        .accessibilityLabel(preparing ? "Preparing the export" : "Export data")
     }
 }
 
