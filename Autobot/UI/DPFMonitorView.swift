@@ -622,7 +622,7 @@ struct DPFMonitorView: View {
     }
 
     /// Has the recorder write its files for `range`, then opens the share sheet with them, plus the history
-    /// finder's raw scan when there is one.
+    /// finder's raw scan and the OBD link's timing log when there are any.
     private func export(_ range: DPFExportRange) {
         guard exporting == nil else { return }
         exporting = range
@@ -633,7 +633,7 @@ struct DPFMonitorView: View {
             if files.isEmpty {
                 exportNote = range == .all ? "Nothing to export." : "Nothing recorded in the \(range.title.lowercased())."
             } else {
-                exported = ExportedFiles(urls: files + [finder.exportURL].compactMap { $0 })
+                exported = ExportedFiles(urls: files + [finder.exportURL, OBDTimingLog.exportURL].compactMap { $0 })
             }
         }
     }

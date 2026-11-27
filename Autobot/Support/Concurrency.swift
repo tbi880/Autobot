@@ -1,6 +1,6 @@
 // Concurrency.swift
 // Small helpers for code that receives callbacks on background threads
-// (audio taps, speech recognition, speech rendering).
+// (audio taps, speech recognition, speech rendering), and for timing.
 
 import Foundation
 
@@ -25,5 +25,12 @@ nonisolated func withTimeout<T: Sendable>(
         let first = await group.next() ?? nil
         group.cancelAll()
         return first
+    }
+}
+
+nonisolated extension Duration {
+    /// The duration in seconds, as a Double.
+    var inSeconds: Double {
+        Double(components.seconds) + Double(components.attoseconds) * 1e-18
     }
 }

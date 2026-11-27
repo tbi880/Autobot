@@ -81,6 +81,22 @@ nonisolated enum AppConfig {
         static let retryDelay: Duration = .seconds(3)
         /// Rounds in a row without live data before the set-up starts again.
         static let maxMissedReadings = 5
+        /// After a command timed out, the next one first interrupts the adapter and waits this long for
+        /// its prompt, so a late reply can't be taken for the next command's (ELMLink).
+        static let resyncTimeout: TimeInterval = 1.0
+        /// Timing (OBDTimings): one line every this many seconds to the timing file (the DPF screen's
+        /// export sends it along)…
+        static let timingReportInterval: TimeInterval = 60
+        /// …and to the dashboard log every this many lines while all is well (right away when not).
+        static let timingQuietReports = 10
+        /// "Not well": a command took this long…
+        static let slowCommand: TimeInterval = 1.0
+        /// …the lights frame (turn signals, wiper lever) went unwatched this long (logged at once)…
+        static let slowLookGap: TimeInterval = 5.0
+        /// …or the app itself came back this much late from a 50 ms wait (main thread held up).
+        static let stallThreshold: TimeInterval = 0.25
+        /// The timing file's size limit; over it the older half is dropped.
+        static let timingLogMaxBytes = 500_000
         /// Read the transmission over UDS service 22 and drive Power Mode from the real lever:
         /// M = Power Mode, D/N/R/P = off. On this car (2015 CX-5 2.2D) the TCM's gear value
         /// (7E1 221E12) gives P/R/N and the gear, and D vs M comes from the M flag the M finder learns
@@ -583,8 +599,13 @@ nonisolated enum AppConfig {
         /// A look never lasts longer than this.
         static let maxListen: TimeInterval = 1.3
         /// Flashing ends this long after the last flash heard when nothing conclusive comes in (frames
-        /// missing), so the turn-signal flash can't get stuck.
+        /// missing, or no look at all because the adapter is busy or slow), so the turn-signal flash
+        /// can't get stuck.
         static let holdLimit: TimeInterval = 3
+        /// Work between rounds (DPF reads, finder scans) stops for a look once the last one is this old,
+        /// so the indicators and the wiper lever never wait for a long piece of work. Longer than a
+        /// normal round, so short work isn't interrupted.
+        static let maxGapInJobs: TimeInterval = 2.0
         /// The first look of each connection lasts this long, with the CAN IDs shown, to check that the
         /// frame is there and that the adapter keeps other frames out while listening.
         static let checkListen: TimeInterval = 1.0

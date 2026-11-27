@@ -173,12 +173,6 @@ final class BootSequence: ObservableObject {
     }
 }
 
-private extension Duration {
-    var inSeconds: Double {
-        Double(components.seconds) + Double(components.attoseconds) * 1e-18
-    }
-}
-
 // MARK: - Haptics
 
 /// The press "click", the starter cranking, the engine firing, and ticks at 30 / 60 / 90 / 100 %.

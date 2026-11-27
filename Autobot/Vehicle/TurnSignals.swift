@@ -22,7 +22,8 @@
 //     (`idleListen`), so a flashing indicator is never missed. The rising edge of a bit already seen
 //     flashing (since the app started) starts it at once.
 //   - while flashing: any edge (dark → lit or lit → dark) keeps it going; dark for a whole `offWindow`
-//     ends it, and so does nothing conclusive for `holdLimit` (frames missing).
+//     ends it, and so does nothing conclusive for `holdLimit` (frames missing, or no look at all: that
+//     is by the clock, OBDAdapter.restartTurnHold).
 //   - both sides flashing: the hazard lights.
 
 import Foundation
@@ -163,11 +164,14 @@ nonisolated struct TurnSignalDetector {
         }
     }
 
-    /// No flash heard for holdLimit (nothing conclusive came in): off.
-    private mutating func expire(at now: Date) {
-        guard state.isOn, let lastFlash, now.timeIntervalSince(lastFlash) > tuning.holdLimit else { return }
+    /// No flash heard for holdLimit (nothing conclusive came in): off. Checked at the end of every look,
+    /// and by OBDAdapter's clock when no look comes at all (the adapter busy or slow).
+    @discardableResult
+    mutating func expire(at now: Date) -> TurnSignals.State {
+        guard state.isOn, let lastFlash, now.timeIntervalSince(lastFlash) > tuning.holdLimit else { return state }
         state = .off
         self.lastFlash = nil
+        return state
     }
 
     /// What the lamp bits did during one look, frame by frame.

@@ -293,6 +293,37 @@ The trailing `1` tells the adapter one reply is enough; it is dropped if the ada
 RPM is only read by the DPF monitor while its screen is open; it is not part of live driving updates.
 Protocol, request header and timings are in `AppConfig.OBD`.
 
+### One command at a time, and staying in step
+
+Commands go out one at a time: the next one waits for the `>` prompt or a timeout (`ELMLink`). After a
+timeout the adapter may still be busy and the reply may still be on its way, so the next command first
+interrupts the adapter (a space) and waits for the prompt (`resyncTimeout`); a reply that turns up with
+nothing waiting for it is thrown away. A late reply can therefore never be taken for the next command's.
+
+Work that needs the adapter for longer (the DPF reads, the finders' scans) runs between two rounds of
+live data, and a round always runs between two pieces of work. The lights frame (turn signals, wiper
+lever) doesn't wait for long work either: its reads stop for a look once the last one is 2 s old
+(`AppConfig.TurnSignals.maxGapInJobs`).
+
+### Link timing (when the app lags behind the car)
+
+Every command's round trip, every round, the time between two looks at the lights frame and the work
+between rounds are timed (`OBDTimings`). Once a minute they become one line:
+
+`OBD timing: 412 commands 38 ms (longest 310 ms 221E12) · 58 rounds 1.0 s (longest 1.6 s) · lights every
+1.0 s (longest gap 1.9 s, DPFRecorder 0.7 s) · 09A 9.8/s · DPFRecorder 6× longest 0.7 s`
+
+The line always goes to a small file the DPF screen's export sends along (`autobot-obd-timing.log`,
+the newest 500 kB); it goes to the dashboard log when something is off (a timeout, a late reply, a
+command over 1 s, the lights unwatched for over 5 s, the app itself held up) and every tenth time
+otherwise. Reading it after a long drive:
+
+- commands slow, timeouts, late replies, resyncs → the adapter or the Bluetooth link (heat, distance)
+- commands fast but rounds or the lights gap long → work between rounds holds the adapter; the line
+  names it
+- `09A` far from 10/s → frames arrive in bursts or go missing on the way
+- `app held up` → the phone (main thread busy, thermal throttling), not the link
+
 ### Transmission: P / R / N, the gear, and M vs D
 
 After the engine ECU answers, Autobot asks the transmission module (TCM, `7E1`, answers from `7E9`) over UDS
@@ -356,6 +387,9 @@ stays lit for 1 s, like the lights-on bit, is a steady light and is ignored:
   flashing indicators are always caught, typically within about a second
 - flashing → off: dark for 0.6 s while listening, typically about a second after they stop (3-flash
   lane changes included)
+- flashing → off by the clock: nothing confirmed for 3 s (`holdLimit`), whether looks found nothing
+  conclusive or no look came at all because the adapter was busy or slow. So the flash never outlasts
+  the car's indicators by more than that, whatever the link is doing
 - left and right together: the hazard lights
 
 The first look of every connection lasts 1 s, with the CAN IDs shown, and logs what it heard:
@@ -791,7 +825,9 @@ Autobot/
 ├── Lighting/    LightingArbiter (priority between lighting features), TurnSignalFlash (mode-coloured flash
 │                while the indicators flash), ReverseLight (yellow breathing in R), RainMode (cyan
 │                breathing while it rains, from the wipers)
-├── Vehicle/     OBDAdapter (OBD2 Bluetooth), ELM327 (adapter protocol), MazdaTCM (gearbox values),
+├── Vehicle/     OBDAdapter (OBD2 Bluetooth, live data), ELMLink (the command channel: one command at a
+│                time, timeouts, back in step after one), OBDTimings (how long commands, rounds and
+│                looks take, for the log), ELM327 (adapter protocol), MazdaTCM (gearbox values),
 │                SignalDiff (finding on/off bits by comparison), DoorFinder (learns a door's switch),
 │                DoorMonitor (door state), DoorSafetyAlert, TurnSignals (the indicator lamp frame and
 │                when it counts as flashing), Wipers (the wiper lever in the same frame, the FBCM's
@@ -815,6 +851,8 @@ Autobot/
                  ReconnectTimer (once-a-minute Bluetooth retry for the lamp and the OBD2 adapter),
                  Hex (bytes as hex text and back), Persistence (Codable values in UserDefaults),
                  Streak (the same reading several times in a row)
+AutobotTests/    OBDLinkTests (ELMLink against a scripted adapter, the turn signals' hold limit, the
+                 timing lines); run with ⌘U
 ```
 
 Everything you might want to tweak — the Power Mode trigger, OBD2 settings, phrases, voice character,

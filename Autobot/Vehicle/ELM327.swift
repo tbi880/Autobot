@@ -141,9 +141,9 @@ enum ELM327 {
     /// until any character is sent; the adapter throws that character away, finishes its line and
     /// answers with the prompt.
     static let monitorAll = "ATMA"
-    /// Stops monitoring: a space, which the adapter would also just ignore at the prompt (a lone CR
-    /// would repeat the last command, ATMA).
-    static let stopMonitoring = " "
+    /// Stops monitoring, or any command the adapter is still busy with: a space, which the adapter would
+    /// also just ignore at the prompt (a lone CR would repeat the last command).
+    static let interrupt = " "
     /// CAN auto-formatting off while listening, so a broadcast frame's 8 data bytes show as they are
     /// (with it on, the first byte is taken for an ISO-TP length byte: the frame gets cut short or
     /// marked "<DATA ERROR"). On again for the requests; on is also the default after ATZ.

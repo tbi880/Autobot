@@ -23,9 +23,16 @@
 // makes a round a few hundred ms longer (AppConfig.TurnSignals.everyRounds). The wiper lever is in the
 // same frame, so it costs nothing on top.
 //
-// One command at a time: the next one goes out after the ">" prompt (or a timeout). Work that needs
-// the adapter for longer (MFinder's / DoorFinder's / WiperFinder's scans, snapshots and traces) runs
-// between two rounds via runBetweenRounds, so it never mixes with the live requests.
+// One command at a time: the next one goes out after the ">" prompt (or a timeout; ELMLink.swift, which
+// also puts the link back in step after a timeout). Work that needs the adapter for longer (MFinder's /
+// DoorFinder's / WiperFinder's scans, snapshots and traces, the DPF reads) runs between two rounds via
+// runBetweenRounds, so it never mixes with the live requests; a round of live data always runs between
+// two pieces of work.
+//
+// The lights frame doesn't wait for long work: while work between rounds holds the adapter, its reads
+// stop for a look whenever the last one is AppConfig.TurnSignals.maxGapInJobs old, and a flash the bus
+// hasn't confirmed for AppConfig.TurnSignals.holdLimit ends by the clock, look or no look. How long
+// commands, rounds, looks and the work take is added up (OBDTimings.swift) and logged once a minute.
 // If the ECU stops answering (engine off) the set-up starts again; if the adapter disconnects,
 // scanning starts again, like the lamp, and while the link isn't up the attempt is started over once
 // a minute (ReconnectTimer). Close MAXOBD while driving: both apps would share the
@@ -129,9 +136,7 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     private lazy var reconnectTimer = ReconnectTimer { [weak self] in self?.retryConnection() }
 
     private var session: Task<Void, Never>?
-    private var received = ""                                        // reply so far, until ">"
-    private var pendingReply: CheckedContinuation<String?, Never>?   // the command waiting for ">"
-    private var replyTimeout: Task<Void, Never>?
+    private let link = ELMLink()          // commands out, replies in, one at a time
     private var useReplyCount = true      // "…1" at the end of requests; false if the adapter says "?"
     private var selectorAvailable = false   // some ECU answers "221E23" (Ford-style P/R/N/D/M)
     private var selectorHeader: String?     // …and which one
@@ -148,17 +153,27 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     private var turnMisses = 0                 // looks in a row without the frame
     private var lightsFrameLength: Int?        // data bytes of the lights frame, from a look that showed the IDs
     private var strayLooksLogged = 0           // looks with stray lines logged this session
+    private var turnHold: Task<Void, Never>?   // ends a flash no look has confirmed for holdLimit
+    private var isLooking = false              // a look at the lights frame is under way
 
     /// Work waiting to run between two rounds of live data (runBetweenRounds).
     private struct Job {
+        let owner: String                      // who asked, for the timing log: "DPFRecorder"
         let run: () async -> Void
         let cancel: () -> Void
     }
     private var jobs: [Job] = []
     private var jobRunning = false
 
+    // Timing (OBDTimings.swift): added up since the last report.
+    private var timings = OBDTimings()
+    private var lastTimingReport = ContinuousClock.now
+    private var timingReports = 0
+    private var lastLookEnded: ContinuousClock.Instant?   // nil: no look yet this session
+    private var heldSinceLook: (what: String, seconds: TimeInterval)?   // what held the adapter longest since
+
     /// One listening window (listen(to:…)): what has been heard so far. The lines come in through
-    /// peripheral(_:didUpdateValueFor:) while the ATMA command waits for its prompt.
+    /// ELMLink.onLine while the ATMA command waits for its prompt.
     private final class Listening {
         let id: String
         let showsIDs: Bool
@@ -185,6 +200,13 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     /// The engine ECU's request header, or the broadcast address when none is set.
     private var baseHeader: String { AppConfig.OBD.requestHeader ?? "7DF" }
 
+    override init() {
+        super.init()
+        link.onExchange = { [weak self] exchange in self?.noteExchange(exchange) }
+        link.onLateReply = { [weak self] in self?.timings.lateReply() }
+        link.onResync = { [weak self] recovered in self?.timings.resync(recovered: recovered) }
+    }
+
     /// Turns on Bluetooth and starts looking for the adapter. Called when ENGINE START is pressed.
     func start() {
         if AppConfig.TestMode.enabled {
@@ -202,10 +224,13 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     /// Runs `work` between two rounds of live data, with the adapter to itself: nothing else is sent
     /// meanwhile, and live data goes on afterwards. nil if live data isn't running, or stops before
     /// the work could run.
-    func runBetweenRounds<T>(_ work: @escaping (OBDAdapter) async -> T) async -> T? {
+    /// `file` (the caller's, filled in by itself) names the work in the timing log.
+    func runBetweenRounds<T>(file: String = #fileID, _ work: @escaping (OBDAdapter) async -> T) async -> T? {
         guard isReady else { return nil }
+        let owner = file.split(separator: "/").last?.split(separator: ".").first.map(String.init) ?? file
         return await withCheckedContinuation { (continuation: CheckedContinuation<T?, Never>) in
             jobs.append(Job(
+                owner: owner,
                 run: { [unowned self] in
                     let result = await work(self)
                     continuation.resume(returning: result)
@@ -217,7 +242,7 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     /// For work in runBetweenRounds: engine RPM (mode 01 PID 0C) from the engine ECU; nil if it didn't
     /// answer. Used by the DPF monitor while its screen is open.
     func readRPM() async -> Double? {
-        guard jobRunning, await useHeader(baseHeader),
+        guard jobRunning, await useHeaderInJob(baseHeader),
               let reply = await request([ELM327.rpmPID]),
               let data = ELM327.values(in: reply, first: ELM327.rpmPID)[ELM327.rpmPID] else {
             return nil
@@ -229,7 +254,7 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     /// needed; nil if the ECU didn't answer that DID. `complete` waits for the whole reply (several
     /// frames) instead of returning after the first one.
     func readDID(_ did: String, from header: String, complete: Bool, timeout: TimeInterval) async -> [UInt8]? {
-        guard jobRunning, await useHeader(header) else { return nil }
+        guard jobRunning, await useHeaderInJob(header) else { return nil }
         let reply = await send22(did, complete: complete, timeout: timeout)
         return reply.flatMap { ELM327.payload22(did, in: $0) }
     }
@@ -247,7 +272,7 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     /// For work in runBetweenRounds: one service-22 read that also tells a refusal ("7F22xx") from
     /// silence. `complete` as in readDID.
     func probeDID(_ did: String, from header: String, complete: Bool, timeout: TimeInterval) async -> UDSReply {
-        guard jobRunning, await useHeader(header),
+        guard jobRunning, await useHeaderInJob(header),
               let reply = await send22(did, complete: complete, timeout: timeout) else { return .silent }
         if let bytes = ELM327.payload22(did, in: reply) { return .data(bytes) }
         if let code = ELM327.negativeResponseCode(service: 0x22, in: reply) { return .refused(code) }
@@ -264,7 +289,7 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     /// default session, 03 the extended one (some DIDs only answer there; it only widens what can be
     /// read). The ECU drops back to the default session by itself a few seconds after the last request.
     func diagnosticSession(_ session: UInt8, header: String) async -> UDSReply {
-        guard jobRunning, await useHeader(header),
+        guard jobRunning, await useHeaderInJob(header),
               let reply = await send(String(format: "10%02X", session)) else { return .silent }
         if let data = ELM327.positiveResponse(service: 0x10, subFunction: session, in: reply) { return .data(data) }
         if let code = ELM327.negativeResponseCode(service: 0x10, in: reply) { return .refused(code) }
@@ -304,10 +329,8 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         for _ in 0..<reads {
             for key in keys {
                 if cancelled() { return snapshot }
-                let parts = key.split(separator: " ")
-                if parts.count == 2,
-                   let bytes = await readDID(String(parts[1]), from: String(parts[0]), complete: true,
-                                             timeout: AppConfig.OBD.replyTimeout),
+                if let (header, did) = Self.headerAndDID(key),
+                   let bytes = await readDID(did, from: header, complete: true, timeout: AppConfig.OBD.replyTimeout),
                    !bytes.isEmpty {
                     snapshot[key, default: []].append(bytes)
                 }
@@ -341,10 +364,8 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         tracing: while Date().timeIntervalSince(start) < duration {
             for entry in keys {
                 if cancelled() || Date().timeIntervalSince(start) >= duration { break tracing }
-                guard writeChar != nil, !Task.isCancelled else { break tracing }   // the adapter went away
-                let parts = entry.key.split(separator: " ")
-                guard parts.count == 2, await useHeader(String(parts[0])) else { continue }
-                let did = String(parts[1])
+                guard link.isOpen, !Task.isCancelled else { break tracing }        // the adapter went away
+                guard let (header, did) = Self.headerAndDID(entry.key), await useHeader(header) else { continue }
                 let asked = Date().timeIntervalSince(start)
                 if let reply = await send22(did, complete: entry.length > 4),
                    let data = ELM327.payload22(did, in: reply), !data.isEmpty {
@@ -353,6 +374,31 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
             }
         }
         return samples
+    }
+
+    /// "726 DA10" -> the request header and the DID.
+    private static func headerAndDID(_ key: String) -> (header: String, did: String)? {
+        let parts = key.split(separator: " ")
+        return parts.count == 2 ? (String(parts[0]), String(parts[1])) : nil
+    }
+
+    /// useHeader for the reads of work between rounds: first a look at the lights frame if the last one
+    /// is getting old, so long work doesn't keep the turn signals and the wiper lever waiting.
+    private func useHeaderInJob(_ header: String) async -> Bool {
+        await lookAtLightsIfOverdue()
+        return await useHeader(header)
+    }
+
+    /// Runs the next piece of work waiting, with the adapter to itself.
+    private func runNextJob() async {
+        let job = jobs.removeFirst()
+        let started = ContinuousClock.now
+        jobRunning = true
+        await job.run()
+        jobRunning = false
+        let seconds = (ContinuousClock.now - started).inSeconds
+        timings.job(job.owner, seconds)
+        noteHeld(job.owner, seconds)
     }
 
     /// Live data stopped (or the adapter went away): work still waiting gets nil.
@@ -372,6 +418,7 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
                 await checkDoorReporting()
                 await checkClimateUnit()
                 await readLiveData()                   // returns when the ECU stops answering
+                reportTimings()
             }
             failPendingJobs()
             isReady = false
@@ -396,6 +443,8 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         turnMisses = 0
         lightsFrameLength = nil
         strayLooksLogged = 0
+        lastLookEnded = nil
+        heldSinceLook = nil
         let version = await send(ELM327.reset, timeout: AppConfig.OBD.resetTimeout)
         guard version != nil else {
             logLine("OBD: no answer to \(ELM327.reset)")
@@ -540,19 +589,23 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     private func readLiveData() async {
         status = "OBD: reading live data"
         isReady = true
+        timings = OBDTimings()                     // the set-up's commands (ATZ, probes) don't count
+        lastTimingReport = .now
         var misses = 0
         var round = 0
+        var ranJob = false                         // the last thing done was work between rounds
         while !Task.isCancelled {
-            if !jobs.isEmpty {
-                let job = jobs.removeFirst()
-                jobRunning = true
-                await job.run()
-                jobRunning = false
+            // One piece of work, then a round: however much is waiting, live data keeps its turn.
+            if !jobs.isEmpty, !ranJob {
+                await runNextJob()
+                ranJob = true
                 // Work between rounds can take a while (the DPF recorder's reads): a wipe meanwhile
                 // shouldn't slip through unseen.
                 if AppConfig.Rain.motorReadAfterJobs { _ = await readWiperMotor() }
                 continue
             }
+            ranJob = false
+            let roundStarted = ContinuousClock.now
             let transmission = await readTransmission()
             if transmission.answered {
                 // Publish the selector before the independent speed request, so a shift does not
@@ -594,6 +647,8 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
                 let readAfter = await readWiperMotor()
                 readMotor = readMotor || readAfter
             }
+            timings.round((ContinuousClock.now - roundStarted).inSeconds)
+            reportTimingsIfDue()
             if !listened, !readMotor {             // listening to the bus already took its time
                 try? await Task.sleep(for: AppConfig.OBD.pollInterval)
             }
@@ -757,12 +812,32 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     /// TurnSignalDetector needs (only for the first frame when the turn signals are off and only rain
     /// mode listens). False when it didn't listen this round.
     private func listenToLightsFrame(round: Int) async -> Bool {
-        let turnSignalsOn = AppConfig.TurnSignals.enabled
-        guard turnSignalsOn || AppConfig.Rain.enabled, !turnListenUnsupported, !receiveFilterUnsupported else {
-            return false
-        }
+        guard listensForLights else { return false }
         let every = hearsLightsFrame == false ? AppConfig.TurnSignals.retryRounds : AppConfig.TurnSignals.everyRounds
         guard round % max(every, 1) == 0 else { return false }
+        await lookAtLights()
+        return true
+    }
+
+    /// Whether the lights frame is listened for at all: a feature wants it and the adapter can.
+    private var listensForLights: Bool {
+        (AppConfig.TurnSignals.enabled || AppConfig.Rain.enabled) && !turnListenUnsupported && !receiveFilterUnsupported
+    }
+
+    /// During work between rounds, before each of its reads: a look, if the last one ended more than
+    /// AppConfig.TurnSignals.maxGapInJobs ago. Only while the frame is heard (the session's first look
+    /// and the retries after losing it stay with the rounds).
+    private func lookAtLightsIfOverdue() async {
+        guard jobRunning, listensForLights, hearsLightsFrame == true, let last = lastLookEnded,
+              (ContinuousClock.now - last).inSeconds >= AppConfig.TurnSignals.maxGapInJobs else { return }
+        await lookAtLights()
+    }
+
+    /// One look at the lights frame (see listenToLightsFrame).
+    private func lookAtLights() async {
+        isLooking = true
+        defer { isLooking = false }
+        let turnSignalsOn = AppConfig.TurnSignals.enabled
         let id = AppConfig.TurnSignals.frameID
         let firstLook = !turnLooked
         let checkListen = AppConfig.TurnSignals.checkListen
@@ -817,7 +892,9 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         if let last = frames.last {
             lightsFrame = last.data                         // every look: RainMode counts its readings
         }
-        guard turnSignalsOn else { return true }
+        noteLook(frames: frames.count,
+                 listened: heard.map { ($0.ended ?? Date()).timeIntervalSince($0.started) } ?? 0)
+        guard turnSignalsOn else { return }
         let before = turnDetector.state
         let steadyBefore = turnDetector.steadyBits
         let state = turnDetector.finish(frames, ended: heard?.ended ?? Date())
@@ -832,7 +909,36 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
             logLine("Turn signals: \(id) byte \(AppConfig.TurnSignals.lampByte) bit " + newlySteady.hex
                     + " stays lit: taken as a steady light (lights on?), not an indicator")
         }
-        return true
+        restartTurnHold()
+    }
+
+    /// A flash lasts until a look says it stopped, or until nothing has confirmed it for
+    /// AppConfig.TurnSignals.holdLimit. The detector checks that at the end of every look; this clock
+    /// checks it when no look comes (the adapter busy or slow), so the flash can't outlast the car's
+    /// indicators by more than holdLimit whatever the link is doing. Started again after every look.
+    private func restartTurnHold() {
+        turnHold?.cancel()
+        turnHold = nil
+        guard turnDetector.state.isOn else { return }
+        turnHold = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(AppConfig.TurnSignals.holdLimit + 0.1))
+            guard !Task.isCancelled else { return }
+            self?.turnHoldEnded()
+        }
+    }
+
+    private func turnHoldEnded() {
+        turnHold = nil
+        guard !isLooking else { return }                   // a look is under way: its end decides
+        let before = turnDetector.state
+        let state = turnDetector.expire(at: Date())
+        guard state != before else { return }
+        let known: TurnSignals.State? = hearsLightsFrame == true ? state : nil
+        if known != turnSignal { turnSignal = known }
+        var line = "Turn signals: stopped (no look at the bus confirmed them for "
+            + "\(Int(AppConfig.TurnSignals.holdLimit)) s"
+        if let held = heldSinceLook { line += "; " + held.what + " took " + OBDTimings.text(held.seconds) }
+        timingLine(line + ")")
     }
 
     /// Listens to the bus for frames with one CAN ID, for as long as `keepListening` says (asked after
@@ -858,20 +964,26 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         let run = Listening(id: id.uppercased(), showsIDs: showingIDs, expectedLength: expectedLength,
                             keepListening: keepListening)
         listening = run
+        link.onLine = { [weak self] line in self?.monitoredLine(line, in: run) }      // frames, as they come in
         let ticker = Task { [weak self] in
+            let tick = Duration.milliseconds(50)
             while !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(50))
+                let asked = ContinuousClock.now
+                try? await Task.sleep(for: tick)
                 guard !Task.isCancelled else { return }
+                // Back much later than asked: the app itself was held up (not the link). For the timing log.
+                let late = (ContinuousClock.now - asked - tick).inSeconds
+                if late >= AppConfig.OBD.stallThreshold { self?.timings.stall(late) }
                 self?.checkListening(run)
             }
         }
-        let reply = await send(ELM327.monitorAll, timeout: within + 1.5)    // stop + prompt take a moment
+        // No prompt in time (the stop got lost?): the next command interrupts the adapter first (ELMLink),
+        // so monitoring can't eat it.
+        _ = await send(ELM327.monitorAll, timeout: within + 1.5)            // stop + prompt take a moment
         ticker.cancel()
+        link.onLine = nil
         listening = nil
         if run.ended == nil { run.ended = Date() }         // stopped by itself (BUFFER FULL…) or no prompt
-        if reply == nil, writeChar != nil {
-            _ = await sendRaw(ELM327.stopMonitoring, timeout: 1)   // stop it again: it mustn't eat the next command
-        }
         if run.notes.contains("?") {
             refuseListening("\(ELM327.monitorAll): ?")
         }
@@ -885,19 +997,7 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         guard listening === run, run.ended == nil,
               !run.keepListening(run.frames, run.started, Date()) else { return }
         run.ended = Date()
-        if let adapter, let writeChar {
-            adapter.writeValue(Data(ELM327.stopMonitoring.utf8), for: writeChar, type: .withoutResponse)
-        }
-    }
-
-    /// While listening: every complete line before the prompt goes to the window as soon as it's in.
-    private func deliverMonitoredLines(to run: Listening) {
-        while let end = received.firstIndex(where: { $0.isNewline }) {
-            if let prompt = received.firstIndex(of: ELM327.prompt), prompt < end { return }
-            let line = String(received[..<end])
-            received.removeSubrange(...end)
-            if !line.isEmpty { monitoredLine(line, in: run) }
-        }
+        link.interrupt()
     }
 
     /// One line while listening: a frame with the wanted ID is kept (until it's decided to stop),
@@ -932,7 +1032,7 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
 
     /// Back to what the requests need: CAN formatting on, and no IDs in front of the replies.
     private func endListening(showingIDs: Bool) async {
-        guard writeChar != nil else { return }                 // disconnected: ATZ sets it all up again
+        guard link.isOpen else { return }                      // disconnected: ATZ sets it all up again
         let reply = await send(ELM327.formattingOn)
         if !ELM327.isOK(reply) {
             logLine("OBD: CAN formatting not confirmed back on after listening (\(ELM327.readable(reply)))")
@@ -980,6 +1080,8 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
 
     /// Live data stopped or the adapter went away: the indicators are unknown now.
     private func clearTurnSignals() {
+        turnHold?.cancel()
+        turnHold = nil
         turnDetector.reset()
         turnMisses = 0
         if turnSignal != nil { turnSignal = nil }
@@ -1053,36 +1155,66 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
 
     /// Sends one command and waits for the ">" prompt. nil on timeout or when not connected.
     private func send(_ command: String, timeout: TimeInterval = AppConfig.OBD.replyTimeout) async -> String? {
-        await write(command + "\r", timeout: timeout)
+        await link.send(command + "\r", timeout: timeout)
     }
 
-    /// Writes `text` as it is (no CR) and waits for the prompt: the stop character for monitoring, when
-    /// the adapter didn't answer the first one.
-    private func sendRaw(_ text: String, timeout: TimeInterval) async -> String? {
-        await write(text, timeout: timeout)
+    // MARK: Timing
+
+    /// Every command's round trip, from the link.
+    private func noteExchange(_ exchange: ELMLink.Exchange) {
+        // Monitoring the bus lasts as long as the look does; it only counts when its prompt never came.
+        if exchange.command == ELM327.monitorAll, exchange.answered { return }
+        timings.command(exchange)
+        if exchange.seconds >= AppConfig.OBD.slowCommand { noteHeld(exchange.command, exchange.seconds) }
     }
 
-    private func write(_ text: String, timeout: TimeInterval) async -> String? {
-        guard let adapter, let writeChar, pendingReply == nil, !Task.isCancelled else { return nil }
-        received = ""
-        replyTimeout = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(timeout))
-            guard !Task.isCancelled else { return }
-            self?.finishReply(nil)
+    /// Something held the adapter for `seconds`: the longest since the last look at the lights frame is
+    /// named when that look comes late.
+    private func noteHeld(_ what: String, _ seconds: TimeInterval) {
+        if seconds > (heldSinceLook?.seconds ?? 0) { heldSinceLook = (what, seconds) }
+    }
+
+    /// A look at the lights frame ended: how long since the one before, and what was in the way.
+    private func noteLook(frames: Int, listened: TimeInterval) {
+        let now = ContinuousClock.now
+        let gap = lastLookEnded.map { (now - $0).inSeconds }
+        let held = heldSinceLook.map { $0.what + " " + OBDTimings.text($0.seconds) } ?? ""
+        timings.look(gap: gap, held: held, frames: frames, listened: listened)
+        if let gap, gap >= AppConfig.OBD.slowLookGap {
+            timingLine("OBD timing: lights frame not looked at for " + OBDTimings.text(gap)
+                       + (held.isEmpty ? "" : " (" + held + ")"))
         }
-        return await withCheckedContinuation { continuation in
-            pendingReply = continuation
-            adapter.writeValue(Data(text.utf8), for: writeChar, type: .withoutResponse)
+        // While the frame isn't heard the looks are far apart on purpose: nothing to measure.
+        lastLookEnded = hearsLightsFrame == true ? now : nil
+        heldSinceLook = nil
+    }
+
+    /// Once every AppConfig.OBD.timingReportInterval, after a round: the minute's timings as one line, to
+    /// the file always, to the dashboard log when something is off (and every timingQuietReports-th time).
+    private func reportTimingsIfDue() {
+        guard (ContinuousClock.now - lastTimingReport).inSeconds >= AppConfig.OBD.timingReportInterval else { return }
+        reportTimings()
+    }
+
+    private func reportTimings() {
+        defer {
+            timings = OBDTimings()
+            lastTimingReport = .now
+        }
+        guard !timings.isEmpty else { return }
+        let line = "OBD timing: " + timings.summary(lightsFrame: AppConfig.TurnSignals.frameID)
+        timingReports += 1
+        if timings.isTroubled || timingReports % max(AppConfig.OBD.timingQuietReports, 1) == 1 {
+            timingLine(line)
+        } else {
+            OBDTimingLog.append(line)
         }
     }
 
-    /// Hands the reply (nil: timeout or disconnected) to the command waiting for it.
-    private func finishReply(_ reply: String?) {
-        replyTimeout?.cancel()
-        replyTimeout = nil
-        let waiting = pendingReply
-        pendingReply = nil
-        waiting?.resume(returning: reply)
+    /// A line for the dashboard log and the timing file.
+    private func timingLine(_ message: String) {
+        OBDTimingLog.append(message)
+        logLine(message)
     }
 
     private func setSample(_ value: OBDSample?) {
@@ -1099,10 +1231,9 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         session?.cancel()
         session = nil
         isConnected = false
-        finishReply(nil)
+        link.close()
         failPendingJobs()
         writeChar = nil
-        received = ""
         currentHeader = nil
         currentReceive = nil
         isReady = false
@@ -1203,19 +1334,15 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         reconnectTimer.disarm()
         guard session == nil else { return }
         logLine("OBD: connected to \(p.name ?? AppConfig.OBD.deviceName)")
+        link.open { [weak self] data in
+            guard let self, let adapter = self.adapter, let writeChar = self.writeChar else { return }
+            adapter.writeValue(data, for: writeChar, type: .withoutResponse)
+        }
         session = Task { [weak self] in await self?.runSession() }
     }
 
     func peripheral(_ p: CBPeripheral, didUpdateValueFor c: CBCharacteristic, error: Error?) {
         guard c.uuid == ELM327.notifyChar, let value = c.value, !value.isEmpty else { return }
-        received += String(decoding: value, as: UTF8.self)
-        if let run = listening { deliverMonitoredLines(to: run) }     // frames, as they come in
-        guard let end = received.firstIndex(of: ELM327.prompt) else {
-            if received.utf8.count > 1024 { received = "" }    // never a prompt: don't grow forever
-            return
-        }
-        let reply = String(received[..<end])
-        received = ""
-        finishReply(reply)
+        link.receive(value)
     }
 }
